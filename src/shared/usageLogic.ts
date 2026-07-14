@@ -202,7 +202,16 @@ const FILL_CHARS: Record<Exclude<StatusBarFillStyle, 'none'>, [string, string]> 
   bars: ['▮', '▯'],
 };
 
-/** Compact fill indicator for quota usage (e.g. ●●○○○ at ~40%). */
+// Half-fill glyph per style, for segments that are only partly used. Stars has no
+// widely-supported half-star glyph, so it falls back to whole-segment steps only.
+const HALF_CHARS: Partial<Record<Exclude<StatusBarFillStyle, 'none'>, string>> = {
+  dots: '◐',
+  blocks: '▌',
+  squares: '◧',
+  bars: '▬',
+};
+
+/** Compact fill indicator for quota usage (e.g. ●●◐○○ at ~50%). */
 export function quotaFillBar(
   used: number,
   limit: number,
@@ -211,10 +220,20 @@ export function quotaFillBar(
 ): string {
   if (limit <= 0 || style === 'none') return '';
   const ratio = Math.min(1, Math.max(0, used / limit));
-  const filled =
-    ratio >= 1 ? segments : ratio <= 0 ? 0 : Math.max(1, Math.floor(ratio * segments));
   const [full, empty] = FILL_CHARS[style];
-  return full.repeat(filled) + empty.repeat(segments - filled);
+  const half = HALF_CHARS[style];
+
+  if (!half) {
+    const filled =
+      ratio >= 1 ? segments : ratio <= 0 ? 0 : Math.max(1, Math.floor(ratio * segments));
+    return full.repeat(filled) + empty.repeat(segments - filled);
+  }
+
+  const exact = ratio * segments;
+  const filled = Math.min(segments, Math.floor(exact));
+  const hasHalf = filled < segments && exact - filled >= 0.5;
+  const emptyCount = segments - filled - (hasHalf ? 1 : 0);
+  return full.repeat(filled) + (hasHalf ? half : '') + empty.repeat(emptyCount);
 }
 
 /** Short month/day for the status bar, e.g. "Jul 12". */

@@ -332,13 +332,22 @@ console.log('service.quotaFillBar');
 test('fills segments proportionally and caps at full', () => {
   assert.equal(service.quotaFillBar(0, 500), '○○○○○');
   assert.equal(service.quotaFillBar(110, 500), '●○○○○');
-  assert.equal(service.quotaFillBar(250, 500), '●●○○○');
+  assert.equal(service.quotaFillBar(250, 500), '●●◐○○');
   assert.equal(service.quotaFillBar(500, 500), '●●●●●');
   assert.equal(service.quotaFillBar(512, 500), '●●●●●');
 });
+test('shows a half-filled segment once a segment is at least half used', () => {
+  assert.equal(service.quotaFillBar(140, 500), '●○○○○');
+  assert.equal(service.quotaFillBar(150, 500), '●◐○○○');
+  assert.equal(service.quotaFillBar(490, 500), '●●●●◐');
+});
 test('supports alternate fill styles', () => {
   assert.equal(service.quotaFillBar(110, 500, 5, 'blocks'), '█░░░░');
+  assert.equal(service.quotaFillBar(150, 500, 5, 'blocks'), '█▌░░░');
+  assert.equal(service.quotaFillBar(150, 500, 5, 'squares'), '■◧□□□');
+  assert.equal(service.quotaFillBar(150, 500, 5, 'bars'), '▮▬▯▯▯');
   assert.equal(service.quotaFillBar(500, 500, 5, 'stars'), '★★★★★');
+  assert.equal(service.quotaFillBar(150, 500, 5, 'stars'), '★☆☆☆☆');
   assert.equal(service.quotaFillBar(110, 500, 5, 'none'), '');
 });
 

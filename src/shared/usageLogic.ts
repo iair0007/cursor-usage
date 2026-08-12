@@ -375,6 +375,8 @@ export function statusBarText(opts: {
   showWhatIfPrefix: boolean;
   quotaFormat?: StatusBarQuotaFormat;
   fillStyle?: StatusBarFillStyle;
+  /** Monthly spend budget, for plans metered in dollars rather than requests. */
+  budget?: { spentDollars: number; budgetDollars: number; resetIso?: string } | null;
 }): string {
   const {
     quota,
@@ -383,6 +385,7 @@ export function statusBarText(opts: {
     showWhatIfPrefix,
     quotaFormat = 'usedLimit',
     fillStyle = 'dots',
+    budget,
   } = opts;
   if (quota?.limit != null && quota.limit > 0) {
     const limit = quota.limit;
@@ -407,6 +410,23 @@ export function statusBarText(opts: {
 
     return `${usedLimitLabel}${fillSuffix}${resetSuffix}`;
   }
+
+  // No request allowance, but a dollar budget: same gauge, same format and fill
+  // settings, denominated in money. Without this the quota-shaped settings do
+  // nothing at all for anyone on a budget-metered plan.
+  if (budget && budget.budgetDollars > 0) {
+    const { spentDollars, budgetDollars } = budget;
+    const reset = formatQuotaResetShort(budget.resetIso);
+    const resetSuffix = reset ? ` · ${reset}` : '';
+    const fill = quotaFillBar(spentDollars, budgetDollars, 5, fillStyle);
+    const fillSuffix = fill ? ` ${fill}` : '';
+    if (quotaFormat === 'remaining') {
+      const remaining = Math.max(0, budgetDollars - spentDollars);
+      return `$${remaining.toFixed(2)} left${fillSuffix}${resetSuffix}`;
+    }
+    return `$${spentDollars.toFixed(2)}/$${budgetDollars.toFixed(2)}${fillSuffix}${resetSuffix}`;
+  }
+
   return `${showWhatIfPrefix ? '~' : ''}$${costDollars.toFixed(2)}`;
 }
 

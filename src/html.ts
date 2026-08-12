@@ -57,6 +57,8 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             <button type="button" class="preset-btn" data-preset="7d">7 days</button>
             <button type="button" class="preset-btn active" data-preset="30d">30 days</button>
             <button type="button" class="preset-btn" data-preset="mtd">Month to date</button>
+            <button type="button" class="preset-btn hidden" data-preset="plan" id="planPresetBtn"
+              title="Only requests priced the way your plan prices them today. Earlier requests used a different billing system, so their dollars aren't comparable.">Current plan</button>
             <button type="button" class="preset-btn" data-preset="custom">Custom</button>
           </div>
           <div class="filter-fields">

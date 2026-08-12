@@ -372,6 +372,35 @@ export function filterByRange(events, startMs, endMs) {
   return events.filter((e) => !e.timestampMs || (e.timestampMs >= startMs && e.timestampMs <= endMs));
 }
 
+/**
+ * When billing switched from per-request pricing to dollar metering, if that
+ * happened inside these events.
+ *
+ * The boundary is the first metered request that has per-request-priced ones
+ * before it. Returned as the local day it fell on, because that's what a date
+ * filter can express — a range starting mid-day would silently drop the earlier
+ * part of that day.
+ *
+ * Null unless both systems are present: with only one, nothing changed inside
+ * this window and there is no boundary to offer.
+ */
+export function detectPlanChange(events) {
+  const timed = events.filter((e) => e.timestampMs > 0).sort((a, b) => a.timestampMs - b.timestampMs);
+  const firstMetered = timed.find((e) => e.billingRegime !== 'usage');
+  if (!firstMetered) return null;
+  const legacyBefore = timed.filter((e) => e.billingRegime === 'usage' && e.timestampMs < firstMetered.timestampMs);
+  if (!legacyBefore.length) return null;
+
+  const day = new Date(firstMetered.timestampMs);
+  day.setHours(0, 0, 0, 0);
+  return {
+    changedAtMs: firstMetered.timestampMs,
+    startOfDayMs: day.getTime(),
+    dayKey: dayKey(firstMetered.timestampMs),
+    legacyRequestsBefore: legacyBefore.length,
+  };
+}
+
 export function percentile(arr, p) {
   if (!arr.length) return null;
   const sorted = [...arr].sort((a, b) => a - b);

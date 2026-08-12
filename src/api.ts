@@ -376,6 +376,92 @@ export async function fetchHardLimit(session: CursorSession): Promise<number | n
   return limit != null && limit > 0 ? limit : null;
 }
 
+export interface BudgetLookup {
+  dollars: number;
+  /** e.g. "get-team-spend.spendLimitDollars" — shown to the user, so a wrong pick is traceable. */
+  source: string;
+}
+
+/**
+ * Field names that hold a monthly spend budget, in priority order.
+ *
+ * An exact-name whitelist, never a pattern like /limit/i: an account payload is
+ * full of numbers, and adopting one because its name looked right is how a
+ * confidently wrong figure reaches the screen. A name that isn't listed simply
+ * isn't found, and the shape log then says what to add.
+ *
+ * The `Cents` suffix is the unit — Cursor's payloads are consistent about it.
+ */
+const BUDGET_FIELD_NAMES = [
+  'hardLimit',
+  'hardLimitDollars',
+  'hardLimitOverrideDollars',
+  'spendLimitDollars',
+  'monthlySpendLimitDollars',
+  'monthlyLimitDollars',
+  'usageLimitDollars',
+  'budgetDollars',
+  'spendLimitCents',
+  'monthlySpendLimitCents',
+  'usageLimitCents',
+  'budgetCents',
+];
+
+function budgetFieldToDollars(name: string, value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return name.endsWith('Cents') ? n / 100 : n;
+}
+
+/**
+ * Finds a monthly budget in an arbitrary account/team payload.
+ *
+ * Team payloads carry one row per seat, so an array of member objects is only
+ * descended into for the row belonging to this user. When no row identifies
+ * itself as theirs the array is skipped entirely — showing a colleague's spend
+ * limit as your own would be worse than showing none.
+ */
+export function extractBudgetDollars(
+  payload: unknown,
+  identity: { userId?: string; email?: string } = {},
+  endpoint = 'payload',
+): BudgetLookup | null {
+  const found = new Map<string, number>();
+
+  const isMine = (row: any): boolean => {
+    if (!row || typeof row !== 'object') return false;
+    const id = row.userId ?? row.id ?? row.user_id;
+    if (identity.userId && id != null && String(id) === identity.userId) return true;
+    const email = row.email ?? row.userEmail;
+    return Boolean(identity.email && email && String(email).toLowerCase() === identity.email.toLowerCase());
+  };
+
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > 4 || value == null || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      const mine = value.filter(isMine);
+      // One entry and nothing to match on: an unambiguous single row is safe.
+      const rows = mine.length ? mine : (value.length === 1 ? value : []);
+      for (const row of rows) walk(row, depth + 1);
+      return;
+    }
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      if (BUDGET_FIELD_NAMES.includes(key)) {
+        const dollars = budgetFieldToDollars(key, v);
+        if (dollars != null && !found.has(key)) found.set(key, dollars);
+      }
+      walk(v, depth + 1);
+    }
+  };
+  walk(payload, 0);
+
+  for (const name of BUDGET_FIELD_NAMES) {
+    const dollars = found.get(name);
+    if (dollars != null) return { dollars, source: `${endpoint}.${name}` };
+  }
+  return null;
+}
+
 /**
  * Read-only endpoints that could carry a team seat's monthly spend budget,
  * tried once when no budget is known from settings.
@@ -390,34 +476,65 @@ export async function fetchHardLimit(session: CursorSession): Promise<number | n
  * picking a number because its field name looked right is how a wrong figure
  * ends up on screen presented as fact.
  */
-const BUDGET_PROBE_ENDPOINTS = [
-  'get-hard-limit',
-  'get-team-spend',
-  'get-teams',
-] as const;
-
-export async function probeBudgetEndpoints(
+/**
+ * Looks for the account's monthly spend budget.
+ *
+ * Works for both account shapes without the caller choosing: the individual
+ * question (empty body) is always asked, and the team-scoped ones are asked as
+ * well whenever the account reports a team. Seats on a team can carry a
+ * personal override *and* inherit a team default, so the first endpoint that
+ * yields a value wins in the order tried — most specific to the user first.
+ *
+ * Every candidate must be a `get-*` endpoint: this looks for a value to read,
+ * and a mis-guessed name that happened to mutate account state would be far
+ * worse than not finding the budget. When nothing is found the payload shapes
+ * are logged, so an account this doesn't cover yet reports what it needs.
+ */
+export async function fetchBudget(
   session: CursorSession,
-  teamId: number | null | undefined,
-): Promise<void> {
-  for (const name of BUDGET_PROBE_ENDPOINTS) {
-    if (!name.startsWith('get-')) continue;
+  identity: { teamId?: number | null; email?: string } = {},
+): Promise<BudgetLookup | null> {
+  const attempts: { endpoint: string; body: Record<string, unknown> }[] = [
+    { endpoint: 'get-hard-limit', body: {} },
+  ];
+  if (identity.teamId != null) {
+    attempts.push(
+      { endpoint: 'get-hard-limit', body: { teamId: identity.teamId } },
+      { endpoint: 'get-team-spend', body: { teamId: identity.teamId } },
+      { endpoint: 'get-teams', body: {} },
+    );
+  }
+
+  const unresolved: string[] = [];
+  for (const { endpoint, body } of attempts) {
+    if (!endpoint.startsWith('get-')) continue;
     try {
-      const data = await fetchJson(`https://cursor.com/api/dashboard/${name}`, {
+      const data = await fetchJson(`https://cursor.com/api/dashboard/${endpoint}`, {
         method: 'POST',
         headers: {
           ...BROWSER_HEADERS,
           'Content-Type': 'application/json',
           Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
         },
-        body: JSON.stringify(teamId != null ? { teamId } : {}),
+        body: JSON.stringify(body),
       }, 10000);
-      log(`Budget probe ${name} (teamId ${teamId ?? 'none'}): ${describePayloadShape(data).slice(0, 900)}`);
+
+      const found = extractBudgetDollars(data, { userId: session.userId, email: identity.email }, endpoint);
+      if (found) {
+        log(`Budget found: $${found.dollars} from ${found.source}`);
+        return found;
+      }
+      unresolved.push(`${endpoint}${body.teamId != null ? ' (team)' : ''}: ${describePayloadShape(data).slice(0, 600)}`);
     } catch (e: any) {
-      log(`Budget probe ${name}: ${e?.message || e}`);
+      unresolved.push(`${endpoint}: ${e?.message || e}`);
     }
   }
-  log('Budget probe done — if one of the shapes above shows your monthly budget, that field can be read directly.');
+
+  // Nothing recognised: log what was seen so an unsupported account shape can
+  // be added by name rather than guessed at.
+  for (const line of unresolved) log(`Budget lookup — ${line}`);
+  log('Budget lookup found no known budget field; set cursorUsage.budget.monthlyDollars, or report the shapes above.');
+  return null;
 }
 
 /** Validates the session and returns account info. */

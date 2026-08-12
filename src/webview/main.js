@@ -17,6 +17,7 @@ import {
   normalize,
   summarize,
   detectBillingMode,
+  detectPlanChange,
   percentile,
   projectExhaustionDate,
   groupByDay,
@@ -125,6 +126,10 @@ const state = {
   costMode: 'value', // 'value' (what-if API-equivalent) | 'billed' (actual charges)
   plan: null,
   budget: null,
+  /** Local day (YYYY-MM-DD) billing switched to the current system, once seen. */
+  planChangeDay: null,
+  /** The auto-switch to the current-plan range happens once, not on every load. */
+  planChangeAnnounced: false,
   trend: { key: null, previous: null },
   analyzeThresholds: { ...ANALYZE_THRESHOLD_DEFAULTS },
 };
@@ -300,6 +305,44 @@ function renderPlanCycle(quota, hardLimit) {
   }
 }
 
+/**
+ * Notices a plan change in the events just loaded, reveals the "Current plan"
+ * preset, and — the first time it's seen — switches to it.
+ *
+ * Mixing two billing systems in one total is the thing that made "Month to
+ * date" read $202 when cursor.com said $2.79, so once we know where the change
+ * happened, the range that only covers the current system is the honest
+ * default. Only automatic once: after that the choice is the user's, and their
+ * saved preset is respected.
+ *
+ * Returns true when it kicked off a reload, so the caller stops rendering the
+ * range being replaced.
+ */
+function applyPlanChangeDiscovery() {
+  const change = detectPlanChange(state.all);
+  if (change) {
+    state.planChangeDay = change.dayKey;
+    savePrefs({
+      preset: state.datePreset,
+      startDate: $('startDate').value,
+      endDate: $('endDate').value,
+      planChangeDay: change.dayKey,
+    });
+  }
+  $('planPresetBtn')?.classList.toggle('hidden', !state.planChangeDay);
+  if (!change || state.planChangeAnnounced || state.datePreset === 'plan') return false;
+
+  state.planChangeAnnounced = true;
+  const range = getRangeForPreset('plan');
+  if (!range) return false;
+  applyDateRange(range.start, range.end, 'plan');
+  showAlert('info', `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}. `
+    + `Showing usage since then — the ${fmt.num(change.legacyRequestsBefore)} earlier request${change.legacyRequestsBefore === 1 ? '' : 's'} in the range you picked were priced per request, so their dollars aren't comparable. `
+    + 'Pick another period to include them.');
+  void load();
+  return true;
+}
+
 /** The budget projection, or null when no budget is known (nothing to project against). */
 function budgetRunwayState() {
   return state.budget?.runway ?? null;
@@ -403,6 +446,10 @@ function getRangeForPreset(preset) {
     start.setDate(start.getDate() - 29);
   } else if (preset === 'mtd') {
     start.setDate(1);
+  } else if (preset === 'plan') {
+    // Only offered once a plan change has actually been seen in the data.
+    if (!state.planChangeDay) return null;
+    return { start: state.planChangeDay, end: toDateInputValue(end), preset };
   } else {
     return null;
   }
@@ -410,9 +457,9 @@ function getRangeForPreset(preset) {
 }
 
 function detectPreset(start, end) {
-  for (const preset of ['today', '7d', '30d', 'mtd']) {
+  for (const preset of ['today', 'plan', '7d', '30d', 'mtd']) {
     const r = getRangeForPreset(preset);
-    if (r.start === start && r.end === end) return preset;
+    if (r && r.start === start && r.end === end) return preset;
   }
   return 'custom';
 }
@@ -428,7 +475,9 @@ function loadPrefs() {
 
 function savePrefs(prefs) {
   try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+    // planChangeDay is discovered, not chosen — every other caller writes only
+    // the range, so carry it through rather than making each remember it.
+    storage.setItem(STORAGE_KEY, JSON.stringify({ planChangeDay: state.planChangeDay, ...prefs }));
   } catch {
     // ignore
   }
@@ -439,6 +488,15 @@ function savePrefs(prefs) {
 // or applying a date preset silently clears the What-if/Billed highlight (and
 // clicking What-if/Billed fires the period handler with an undefined preset).
 const PRESET_BTN_SELECTOR = '.preset-btn[data-preset]';
+
+const PRESET_LABELS = {
+  today: 'Today',
+  '7d': '7 days',
+  '30d': '30 days',
+  mtd: 'Month to date',
+  plan: 'Current plan',
+  custom: 'Custom',
+};
 
 function setActivePreset(preset) {
   document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
@@ -458,6 +516,12 @@ function applyDateRange(start, end, preset) {
 
 function initDateRange() {
   const prefs = loadPrefs();
+  if (prefs?.planChangeDay) {
+    state.planChangeDay = prefs.planChangeDay;
+    // Known from a previous session: no need to re-announce the switch.
+    state.planChangeAnnounced = true;
+    $('planPresetBtn')?.classList.remove('hidden');
+  }
   if (prefs?.preset && prefs.preset !== 'custom') {
     const range = getRangeForPreset(prefs.preset);
     applyDateRange(range.start, range.end, prefs.preset);
@@ -547,8 +611,7 @@ function sumRows(rows, key) {
 function updateFilterSummary() {
   const modelVal = $('modelFilter').value;
   const modelLabel = modelVal ? displayModel(modelVal) : 'All models';
-  const presetLabels = { today: 'Today', '7d': '7 days', '30d': '30 days', mtd: 'Month to date', custom: 'Custom' };
-  const period = presetLabels[state.datePreset] || 'Custom';
+  const period = PRESET_LABELS[state.datePreset] || 'Custom';
   const parts = [
     period,
     `${fmt.shortDate($('startDate').value)} – ${fmt.shortDate($('endDate').value)}`,
@@ -1297,6 +1360,9 @@ async function load() {
 
     // The request picker reads state.filtered, which only refresh() updates —
     // so it has to come after, or it lists the previous range's requests.
+    const switchedToPlanRange = applyPlanChangeDiscovery();
+    if (switchedToPlanRange) return; // load() re-entered with the narrower range
+
     const render = () => {
       refresh();
       populateSimRequestPicker(state.simRequestId);
@@ -1733,9 +1799,8 @@ function initAnalyzeSidebar() {
 
 function buildBriefSectionSummary(data, events) {
   const { summary } = data;
-  const presetLabels = { today: 'Today', '7d': '7 days', '30d': '30 days', mtd: 'Month to date', custom: 'Custom' };
   const lines = [
-    `- Period: ${presetLabels[state.datePreset] || 'Custom'} (${$('startDate').value} to ${$('endDate').value})`,
+    `- Period: ${PRESET_LABELS[state.datePreset] || 'Custom'} (${$('startDate').value} to ${$('endDate').value})`,
     `- Requests: ${summary.count}${summary.notCounted > 0 ? ` (+${summary.notCounted} errored/aborted events excluded)` : ''}${events.length < state.all.length ? ` (filtered from ${state.all.length} loaded)` : ''}`,
     `- Token cost: ${fmt.money(summary.totalCost)}`,
     `- Avg token cost / request: ${fmt.money(summary.avg)}`,

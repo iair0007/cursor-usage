@@ -40,6 +40,7 @@ const {
   dayKey,
   groupByDay,
   filterByRange,
+  detectPlanChange,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
 let passed = 0;
@@ -253,6 +254,42 @@ test('summarize reports the metered total separately from the old plan', () => {
   // The blended figure the panel used to headline — kept, but no longer the
   // only number on offer.
   assert.ok(Math.abs(s.totalCost - (56 * 3.64 + 2.78)) < 1e-9);
+});
+
+test('detectPlanChange finds the day billing switched systems', () => {
+  const events = [
+    normalize({ ...legacyRequest, id: 'l1', timestamp: Date.UTC(2026, 7, 4, 12) }, pricing),
+    normalize({ ...legacyRequest, id: 'l2', timestamp: Date.UTC(2026, 7, 5, 12) }, pricing),
+    normalize({ ...meteredRequest, id: 'm1', timestamp: Date.UTC(2026, 7, 12, 9) }, pricing),
+    normalize({ ...meteredRequest, id: 'm2', timestamp: Date.UTC(2026, 7, 12, 10) }, pricing),
+  ];
+  const change = detectPlanChange(events);
+  assert.equal(change.changedAtMs, Date.UTC(2026, 7, 12, 9), 'the first metered request');
+  assert.equal(change.legacyRequestsBefore, 2);
+  assert.equal(change.dayKey, dayKey(Date.UTC(2026, 7, 12, 9)));
+  // The range must start at midnight local, or the earlier part of the
+  // changeover day silently drops out of the filter.
+  assert.equal(new Date(change.startOfDayMs).getHours(), 0);
+});
+test('detectPlanChange is order-independent', () => {
+  const events = [
+    normalize({ ...meteredRequest, id: 'm', timestamp: Date.UTC(2026, 7, 12, 9) }, pricing),
+    normalize({ ...legacyRequest, id: 'l', timestamp: Date.UTC(2026, 7, 4, 12) }, pricing),
+  ];
+  assert.equal(detectPlanChange(events).changedAtMs, Date.UTC(2026, 7, 12, 9));
+});
+test('no change reported when only one billing system is present', () => {
+  assert.equal(detectPlanChange([normalize(meteredRequest, pricing)]), null);
+  assert.equal(detectPlanChange([normalize(legacyRequest, pricing)]), null);
+  assert.equal(detectPlanChange([]), null);
+});
+test('metered rows before any legacy row are not a change', () => {
+  // Old rows arriving after newer ones must not invent a boundary.
+  const events = [
+    normalize({ ...meteredRequest, id: 'm', timestamp: Date.UTC(2026, 7, 4) }, pricing),
+    normalize({ ...legacyRequest, id: 'l', timestamp: Date.UTC(2026, 7, 12) }, pricing),
+  ];
+  assert.equal(detectPlanChange(events), null);
 });
 
 test('the metered total is identical in What-if and Billed mode', () => {
@@ -762,6 +799,52 @@ await test('rows with no server id are kept even when they look alike', async ()
       assert.equal(events.length, 2);
     },
   );
+});
+
+console.log('api.extractBudgetDollars (works for individual and team accounts)');
+test('reads an individual hard limit', () => {
+  const found = api.extractBudgetDollars({ hardLimit: 120 }, {}, 'get-hard-limit');
+  assert.equal(found.dollars, 120);
+  assert.equal(found.source, 'get-hard-limit.hardLimit');
+});
+test('reads a cents-denominated field as dollars', () => {
+  assert.equal(api.extractBudgetDollars({ spendLimitCents: 12000 }).dollars, 120);
+});
+test('picks this user out of a team roster, never a colleague', () => {
+  const payload = {
+    teamMemberSpend: [
+      { userId: 'other', email: 'them@x.io', spendLimitDollars: 500 },
+      { userId: 'me', email: 'me@x.io', spendLimitDollars: 120 },
+    ],
+  };
+  assert.equal(api.extractBudgetDollars(payload, { userId: 'me' }, 'get-team-spend').dollars, 120);
+  assert.equal(api.extractBudgetDollars(payload, { email: 'ME@x.io' }).dollars, 120, 'email match is case-insensitive');
+});
+test('a roster with no row for this user yields nothing', () => {
+  // Showing someone else's limit as your own is worse than showing none.
+  const payload = {
+    teamMemberSpend: [
+      { userId: 'a', spendLimitDollars: 500 },
+      { userId: 'b', spendLimitDollars: 900 },
+    ],
+  };
+  assert.equal(api.extractBudgetDollars(payload, { userId: 'me' }), null);
+});
+test('a single unambiguous row is used even with nothing to match on', () => {
+  assert.equal(api.extractBudgetDollars({ members: [{ spendLimitDollars: 120 }] }, {}).dollars, 120);
+});
+test('unknown field names are ignored rather than guessed at', () => {
+  assert.equal(api.extractBudgetDollars({ someNewLimitField: 120, maxThing: 99 }), null);
+});
+test('zero, negative and non-numeric limits are not budgets', () => {
+  assert.equal(api.extractBudgetDollars({ hardLimit: 0 }), null);
+  assert.equal(api.extractBudgetDollars({ hardLimit: -5 }), null);
+  assert.equal(api.extractBudgetDollars({ hardLimit: 'unlimited' }), null);
+  assert.equal(api.extractBudgetDollars({ noUsageBasedAllowed: true }), null, 'the real reply for an account with no limit');
+});
+test('a per-user override outranks a team-wide default', () => {
+  const found = api.extractBudgetDollars({ spendLimitDollars: 500, hardLimitOverrideDollars: 120 }, {});
+  assert.equal(found.dollars, 120);
 });
 
 console.log('api.describePayloadShape (find unread fields without logging PII)');

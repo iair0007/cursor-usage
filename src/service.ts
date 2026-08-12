@@ -6,6 +6,7 @@ import {
 } from './auth';
 import {
   ApiError,
+  BudgetLookup,
   PlanInfo,
   PlanQuota,
   RawUsageEvent,
@@ -16,7 +17,7 @@ import {
   fetchPlanQuota,
   fetchPricingMarkdown,
   fetchStripeProfile,
-  probeBudgetEndpoints,
+  fetchBudget,
 } from './api';
 import {
   billingCycleWindow,
@@ -60,7 +61,9 @@ export type { StatusBarFillStyle, StatusBarPeriodMode, StatusBarQuotaFormat } fr
 export interface BudgetStatus {
   budgetDollars: number | null;
   /** Where the budget came from — the panel says so rather than implying Cursor reported it. */
-  source: 'setting' | 'hardLimit' | 'none';
+  source: 'setting' | 'cursor' | 'hardLimit' | 'none';
+  /** Which setting or endpoint field supplied it, so a wrong value is traceable. */
+  sourceDetail?: string;
   spentDollars: number;
   cycleStartMs: number;
   cycleEndMs: number;
@@ -90,8 +93,8 @@ export class UsageService {
   private sessionCache: { session: CursorSession | null; fetchedAt: number } | null = null;
   private usageCache = new Map<string, { result: UsageResult; fetchedAt: number }>();
   private usageInflight = new Map<string, Promise<UsageResult>>();
-  /** Budget endpoint probing is diagnostic — run it at most once per session. */
-  private budgetProbed = false;
+  /** undefined = not looked up yet; null = looked up and nothing found. */
+  private budgetLookup: BudgetLookup | null | undefined = undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -103,6 +106,7 @@ export class UsageService {
     this.sessionCache = null;
     this.usageCache.clear();
     this.usageInflight.clear();
+    this.budgetLookup = undefined;
   }
 
   async getSession(): Promise<CursorSession | null> {
@@ -313,23 +317,22 @@ export class UsageService {
     const usage = await this.getStatusBarUsage({ mode: 'cycle', periodDays: 30 });
     if (usage.authMode === 'none') return null;
 
-    const budgetDollars = configured > 0 ? configured : (usage.hardLimit ?? null);
-
-    // Nothing knows the budget yet: probe the team-scoped endpoints once per
-    // session so the field can be identified from a log instead of guessed at.
-    // Once per session because it is diagnostic, not part of the data path.
-    if (budgetDollars == null && !this.budgetProbed) {
-      this.budgetProbed = true;
+    // Ask cursor.com only when the user hasn't set a budget themselves, and
+    // cache the answer for the session: it's the same lookup on every refresh.
+    if (configured === 0 && this.budgetLookup === undefined) {
       const session = await this.getSession();
-      if (session) {
-        void probeBudgetEndpoints(session, usage.plan?.teamId).catch(() => {
-          // Diagnostic only — never let it break a load.
-        });
-      }
+      this.budgetLookup = session
+        ? await fetchBudget(session, { teamId: usage.plan?.teamId, email: usage.email })
+            .catch(() => null)
+        : null;
     }
+
+    const looked = configured > 0 ? null : this.budgetLookup;
+    const budgetDollars = configured > 0 ? configured : (looked?.dollars ?? usage.hardLimit ?? null);
     const source: BudgetStatus['source'] = configured > 0
       ? 'setting'
-      : (usage.hardLimit ? 'hardLimit' : 'none');
+      : (looked ? 'cursor' : (usage.hardLimit ? 'hardLimit' : 'none'));
+    const sourceDetail = configured > 0 ? 'cursorUsage.budget.monthlyDollars' : looked?.source;
 
     const { start, end } = billingCycleWindow(usage.quota ?? undefined);
     // Metered spend only: requests priced by the older per-request plan never
@@ -348,11 +351,11 @@ export class UsageService {
       cycleEndMs,
     });
     this.log(
-      `Budget: ${budgetDollars != null ? `$${budgetDollars}` : 'not set'} (${source}) · spent $${spentDollars.toFixed(2)} this cycle`
+      `Budget: ${budgetDollars != null ? `$${budgetDollars}` : 'not set'} (${sourceDetail || source}) · spent $${spentDollars.toFixed(2)} this cycle`
       + (runway?.dailySpend != null ? ` · $${runway.dailySpend.toFixed(2)}/day` : ''),
     );
 
-    return { budgetDollars, source, spentDollars, cycleStartMs: start, cycleEndMs, runway };
+    return { budgetDollars, source, sourceDetail, spentDollars, cycleStartMs: start, cycleEndMs, runway };
   }
 
   /** Pricing markdown, cached for an hour (it changes rarely). */

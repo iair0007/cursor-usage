@@ -2,7 +2,7 @@
   "name": "cursor-usage-dashboard",
   "displayName": "Cursor Usage Dashboard",
   "description": "Track your remaining Cursor requests and spend: status bar quota gauge, cost dashboard, cache savings, model breakdown, cost simulator.",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "publisher": "iair0007",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -197,7 +197,7 @@
             ],
             "default": "usedLimit",
             "order": 1,
-            "description": "How plan request quota is shown in the status bar."
+            "description": "How the plan allowance is shown in the status bar — included requests, or the monthly budget on plans metered in dollars."
           },
           "cursorUsage.statusBar.fillStyle": {
             "type": "string",
@@ -227,7 +227,7 @@
             ],
             "default": "dots",
             "order": 2,
-            "description": "Visual fill indicator next to the quota figure."
+            "description": "Visual fill indicator next to the allowance figure (request quota or monthly budget)."
           }
         }
       },
@@ -241,7 +241,7 @@
             "minimum": 1,
             "maximum": 99,
             "order": 1,
-            "description": "Turn the status bar yellow once this % of included requests is used."
+            "description": "Turn the status bar yellow once this % of the plan allowance is used — included requests, or the monthly budget on plans metered in dollars."
           },
           "cursorUsage.statusBar.criticalAtPercent": {
             "type": "number",
@@ -249,7 +249,7 @@
             "minimum": 1,
             "maximum": 200,
             "order": 2,
-            "description": "Turn the status bar red once this % of included requests is used."
+            "description": "Turn the status bar red once this % of the plan allowance is used — included requests, or the monthly budget on plans metered in dollars."
           }
         }
       }

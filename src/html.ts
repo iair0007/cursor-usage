@@ -113,6 +113,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
           <span class="plan-cycle-bar-label" id="planCycleBarLabel"></span>
         </div>
         <p class="plan-cycle-note" id="planCycleNote"></p>
+        <p class="plan-cycle-note plan-cycle-scope hidden" id="planCycleScope"></p>
       </section>
 
       <!--
@@ -194,7 +195,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <div class="table-head">
           <div>
             <h3>Request log</h3>
-            <p class="table-desc">Token cost per request (not the flat usage fee). Hover ⓘ on column headers for help.</p>
+            <p class="table-desc" id="tableCostDesc">Token cost per request (not the flat usage fee). Hover ⓘ on column headers for help.</p>
           </div>
           <div class="table-controls">
             <label class="inline-label">
@@ -211,17 +212,17 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
           <table id="requestsTable">
             <thead>
               <tr>
-                <th data-sort="timestampMs">Time</th>
-                <th data-sort="model">Model <span class="tip" tabindex="0" data-tip="Auto = Cursor picks the model automatically. Cache savings use Auto pricing from Cursor docs. Named models use their own rates.">ⓘ</span></th>
-                <th data-sort="cost">Token cost <span class="tip" tabindex="0" data-tip="Model/API charge from token usage — the number that reflects how expensive the request actually was.">ⓘ</span></th>
-                <th data-sort="requestCharge" id="colUsageFee" class="hidden">Usage fee <span class="tip" tabindex="0" data-tip="Extra flat per-request charge on usage-based plans (e.g. $0.04). Not part of token cost above.">ⓘ</span></th>
-                <th data-sort="cacheSavings">Cache saved <span class="tip" tabindex="0" data-tip="Per request: cache-read tokens × (input rate − cache-read rate) using that request's model pricing. Hover a cell to see which rate was used.">ⓘ</span></th>
-                <th data-sort="inputTokens">Input</th>
-                <th data-sort="outputTokens">Output</th>
-                <th data-sort="cacheReadTokens">Cache read</th>
-                <th data-sort="cacheWriteTokens">Cache write</th>
-                <th data-sort="totalTokens">Total</th>
-                <th></th>
+                <th scope="col" tabindex="0" data-sort="timestampMs">Time</th>
+                <th scope="col" tabindex="0" data-sort="model">Model <span class="tip" tabindex="0" data-tip="Auto = Cursor picks the model automatically. Cache savings use Auto pricing from Cursor docs. Named models use their own rates.">ⓘ</span></th>
+                <th scope="col" tabindex="0" data-sort="cost"><span id="colCostLabelText">Token cost</span> <span class="tip" tabindex="0" data-tip="Model/API charge from token usage — the number that reflects how expensive the request actually was. Follows the Costs toggle: What-if shows the API-equivalent value of the tokens, Billed shows what your plan charged.">ⓘ</span></th>
+                <th scope="col" tabindex="0" data-sort="requestCharge" id="colUsageFee" class="hidden">Usage fee <span class="tip" tabindex="0" data-tip="Extra flat per-request charge on usage-based plans (e.g. $0.04). Not part of token cost above.">ⓘ</span></th>
+                <th scope="col" tabindex="0" data-sort="cacheSavings">Cache saved <span class="tip" tabindex="0" data-tip="Per request: cache-read tokens × (input rate − cache-read rate) using that request's model pricing. Hover a cell to see which rate was used.">ⓘ</span></th>
+                <th scope="col" tabindex="0" data-sort="inputTokens">Input</th>
+                <th scope="col" tabindex="0" data-sort="outputTokens">Output</th>
+                <th scope="col" tabindex="0" data-sort="cacheReadTokens">Cache read</th>
+                <th scope="col" tabindex="0" data-sort="cacheWriteTokens">Cache write</th>
+                <th scope="col" tabindex="0" data-sort="totalTokens">Total</th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody id="tableBody"></tbody>
@@ -237,16 +238,17 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
 
       <section id="panelAnalytics" class="panel-analytics hidden" role="tabpanel">
         <p class="analytics-intro">Trends for your filtered period. For actionable recommendations and Cursor Chat briefs, open the <button type="button" class="btn-link-inline" id="goAnalyzeTab">Analyze</button> tab.</p>
+        <p id="analyticsEmpty" class="panel analytics-empty hidden">No requests in this period, so there is nothing to chart yet. Widen the date range or clear the model filter.</p>
         <div class="analytics-stats" id="analyticsStats"></div>
-        <article class="panel analytics-chart-main">
-          <h3>Daily token cost</h3>
-          <p class="panel-desc">How spend changed day to day · excludes flat usage fees</p>
+        <article class="panel analytics-chart-main" id="analyticsChartMain">
+          <h3 id="chartCostTitle">Daily token cost</h3>
+          <p class="panel-desc" id="chartCostDesc">How spend changed day to day · excludes flat usage fees</p>
           <div class="chart-box chart-box-lg"><canvas id="chartCost"></canvas></div>
         </article>
-        <div class="analytics-chart-row">
+        <div class="analytics-chart-row" id="analyticsChartRow">
           <article class="panel">
             <h3>Cost by model</h3>
-            <p class="panel-desc">Top models by token/API spend</p>
+            <p class="panel-desc" id="chartModelsDesc">Top models by token/API spend</p>
             <div class="chart-box"><canvas id="chartModels"></canvas></div>
           </article>
           <article class="panel">

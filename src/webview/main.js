@@ -539,12 +539,21 @@ function formatChartTokens(v) {
  * priced by the older per-request plan, producing a figure that matches
  * neither page — and looks like the extension is inventing money.
  */
-function planChangeNote(summary) {
-  if (!summary.spansPlanChange) return '';
+function planChangeNote(summary, { short = false } = {}) {
+  // Keyed on the presence of per-request rows, not on the range straddling the
+  // change: a range entirely before it (say "Last month") shows a large token
+  // figure against cursor.com's $0 and needs the same explanation.
+  if (!summary.legacyRequestCount) return '';
   const requests = `${fmt.num(summary.legacyRequestCount)} request${summary.legacyRequestCount === 1 ? '' : 's'}`;
-  return `cursor.com meters ${fmt.money(summary.meteredTotal)} for this range. `
-    + `The remaining ${requests} (${fmt.money(summary.legacyTokenValue)} of token value) predate your plan change and were `
-    + `priced per request — ${fmt.money(summary.legacyFeeTotal)} in flat fees — so its spend view doesn't count them.`;
+  const metered = `cursor.com meters ${fmt.money(summary.meteredTotal)} for this range`;
+  // The stat card is one of three in a grid — the long form there would make it
+  // several lines taller than its neighbours, so it gets the headline only.
+  if (short) {
+    return `${metered} · ${requests} priced per request under your previous plan`;
+  }
+  const legacy = `${requests} (${fmt.money(summary.legacyTokenValue)} of token value) were priced per request `
+    + `under your previous plan — ${fmt.money(summary.legacyFeeTotal)} in flat fees — so its spend view doesn't count them`;
+  return `${metered}. ${summary.meteredCount ? 'The other ' : 'All '}${legacy}.`;
 }
 
 /** ▲/▼ delta badge vs the previous equal-length period; null when there's nothing to compare or the baseline is 0. */
@@ -827,9 +836,6 @@ function renderKpis(summary) {
   costSub += ` · ${fmt.num(summary.withCost)} requests`;
   $('kpiCostSub').textContent = costSub;
 
-  const planChange = planChangeNote(summary);
-  if (planChange) $('kpiCostSub').textContent += ` · ${planChange}`;
-
   const feeEl = $('kpiCostFees');
   if (feeEl) {
     if (summary.hasUsageFees) {
@@ -864,7 +870,12 @@ function renderKpis(summary) {
     const planNote = isFreePlan()
       ? `You're on the <strong>${esc(planLabel() || 'Free plan')}</strong> — requests are <strong>not actually billed</strong>; costs shown in What-if mode are the API-equivalent value of your tokens. `
       : (planLabel() ? `Plan: <strong>${esc(planLabel())}</strong>. ` : '');
-    billingEl.innerHTML = `${planNote}${messages[summary.billingMode] || messages.unknown} Cache savings use each request's model pricing from <a href="https://cursor.com/docs/models-and-pricing">Cursor docs</a> (Auto requests use Auto rates). Compare with the <a href="https://cursor.com/dashboard/usage">official dashboard</a>.`;
+    // The full reconciliation belongs here rather than in a stat card: this
+    // banner is full width, and it's the same place the plan-change and
+    // billing-mode explanations already live.
+    const planChange = planChangeNote(summary);
+    const planChangeHtml = planChange ? ` <strong>${esc(planChange)}</strong>` : '';
+    billingEl.innerHTML = `${planNote}${messages[summary.billingMode] || messages.unknown}${planChangeHtml} Cache savings use each request's model pricing from <a href="https://cursor.com/docs/models-and-pricing">Cursor docs</a> (Auto requests use Auto rates). Compare with the <a href="https://cursor.com/dashboard/usage">official dashboard</a>.`;
     billingEl.classList.remove('hidden');
   }
 }
@@ -1115,10 +1126,14 @@ function renderOverview() {
     $('ovSavings').textContent = '—';
     $('ovSavingsSub').textContent = '';
     $('ovTrendRange').textContent = '';
+    // The canned empty-state text ("No requests in this period yet") would be a
+    // claim about data we never got — say nothing about the period instead.
+    $('ovSparklineEmpty').textContent = 'No usage data loaded.';
     renderOvSparkline([]);
     $('ovInsightPanel').classList.add('hidden');
     return;
   }
+  $('ovSparklineEmpty').textContent = 'No requests in this period yet.';
 
   const events = state.filtered;
   const summary = summarize(events);
@@ -1130,7 +1145,7 @@ function renderOverview() {
   const trend = state.trend.key === currentTrendKey() && state.trend.previous
     ? trendBadge(summary.totalCost, state.trend.previous.totalCost)
     : '';
-  const planChange = planChangeNote(summary);
+  const planChange = planChangeNote(summary, { short: true });
   $('ovCostSub').innerHTML = planChange
     ? `${trend}<span class="ov-stat-note">${esc(planChange)}</span>`
     : trend;
@@ -1206,21 +1221,30 @@ async function load() {
     state.page = 1;
     destroyCharts();
     renderPlanCycle(usage.quota, usage.hardLimit);
+    // Must run before refresh(): applyFilters() reads the model select, and a
+    // model that only existed in the previous range has to be gone from it
+    // before the new events are filtered.
     populateModelFilter(state.all);
     populateSimulatorModels();
-    populateSimRequestPicker(state.simRequestId);
     if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
     if (state.appView === 'usage') $('usageView').classList.remove('hidden');
 
+    // The request picker reads state.filtered, which only refresh() updates —
+    // so it has to come after, or it lists the previous range's requests.
+    const render = () => {
+      refresh();
+      populateSimRequestPicker(state.simRequestId);
+    };
+
     if (usage.authMode === 'none') {
       showAlert('warn', 'Not signed in. Open Cursor while logged into your account, or run "Cursor Usage: Set Session Token Manually" from the command palette.');
-      refresh();
+      render();
       return;
     }
 
     if (!state.all.length) {
       showAlert('warn', 'No usage events in this date range.');
-      refresh();
+      render();
       return;
     }
 
@@ -1237,7 +1261,7 @@ async function load() {
       : `Loaded ${state.all.length} requests`;
     showAlert('info', `${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${fallbackNote}`);
     // refresh() already re-renders the overview and analyze views.
-    refresh();
+    render();
     if (state.appView === 'simulator') refreshSimulator();
   } catch (err) {
     // Drop whatever was loaded before: it belongs to a different (older)
@@ -1249,6 +1273,7 @@ async function load() {
     if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
     if (state.appView === 'usage') $('usageView').classList.remove('hidden');
     refresh();
+    populateSimRequestPicker(null);
     showAlert('error', err.authError
       ? `${err.message} — your Cursor session may have expired. Re-open Cursor logged in, or run "Cursor Usage: Set Session Token Manually".`
       : err.message);
@@ -1258,7 +1283,10 @@ async function load() {
 }
 
 function exportCsv() {
-  const headers = ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost', 'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens'];
+  // meteredCost/billingRegime are appended, not inserted: existing columns keep
+  // their positions for anything already parsing this file. They're what makes
+  // a row-by-row reconciliation against cursor.com's usage export possible.
+  const headers = ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost', 'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'meteredCost', 'billingRegime'];
   const rows = state.filtered.map((e) => [
     new Date(e.timestampMs).toISOString(),
     e.model,
@@ -1272,6 +1300,8 @@ function exportCsv() {
     e.cacheReadTokens,
     e.cacheWriteTokens,
     e.totalTokens,
+    e.planMeteredCost ?? '',
+    e.billingRegime,
   ]);
   const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
   const filename = `cursor-usage-${$('startDate').value}-${$('endDate').value}.csv`;

@@ -255,6 +255,37 @@ test('summarize reports the metered total separately from the old plan', () => {
   assert.ok(Math.abs(s.totalCost - (56 * 3.64 + 2.78)) < 1e-9);
 });
 
+test('the metered total is identical in What-if and Billed mode', () => {
+  // The reconciliation figure answers "what does cursor.com meter for this
+  // range", which the cost toggle must not move. applyCostMode() rewrites
+  // `cost`, so anything deriving metered spend from `cost` at summarize time
+  // would drift — this pins it to normalize() time.
+  const events = [normalize(legacyRequest, pricing), normalize(meteredRequest, pricing)];
+  const whatIf = summarize(events);
+  const billed = summarize(events.map((e) => ({ ...e, cost: e.billedCost })));
+  assert.equal(billed.meteredTotal, whatIf.meteredTotal);
+  assert.equal(billed.legacyRequestCount, whatIf.legacyRequestCount);
+  assert.equal(billed.spansPlanChange, whatIf.spansPlanChange);
+  // …while the headline total does move, which is the point of the toggle.
+  assert.notEqual(billed.totalCost, whatIf.totalCost);
+});
+
+test('summarize over no events yields zeros, not NaN', () => {
+  // Every empty load now renders through this path (the panel used to bail out
+  // early and leave the previous range's numbers on screen).
+  const s = summarize([]);
+  assert.equal(s.count, 0);
+  assert.equal(s.totalCost, 0);
+  assert.equal(s.meteredTotal, 0);
+  assert.equal(s.legacyRequestCount, 0);
+  assert.equal(s.spansPlanChange, false);
+  assert.equal(s.avg, null);
+  assert.equal(s.withCostCounted, 0);
+  for (const [key, value] of Object.entries(s)) {
+    assert.ok(!Number.isNaN(value), `${key} is NaN`);
+  }
+});
+
 test('a range inside one billing system is not flagged as a plan change', () => {
   const onlyMetered = summarize([normalize(meteredRequest, pricing)]);
   assert.equal(onlyMetered.spansPlanChange, false);

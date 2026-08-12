@@ -19,6 +19,8 @@ import {
   detectBillingMode,
   percentile,
   projectExhaustionDate,
+  groupByDay,
+  filterByRange,
 } from './logic.js';
 
 const vscode = acquireVsCodeApi();
@@ -100,6 +102,8 @@ const ANALYZE_THRESHOLD_DEFAULTS = {
 const state = {
   all: [],
   filtered: [],
+  /** True once a load has settled, so views can tell "no data" from "not fetched yet". */
+  loaded: false,
   pricing: null,
   sortKey: 'timestampMs',
   sortDir: 'desc',
@@ -369,8 +373,14 @@ function savePrefs(prefs) {
   }
 }
 
+// The cost-mode buttons share the .preset-btn class for styling only — they
+// carry data-cost-mode, not data-preset. Period wiring must never match them,
+// or applying a date preset silently clears the What-if/Billed highlight (and
+// clicking What-if/Billed fires the period handler with an undefined preset).
+const PRESET_BTN_SELECTOR = '.preset-btn[data-preset]';
+
 function setActivePreset(preset) {
-  document.querySelectorAll('.preset-btn').forEach((btn) => {
+  document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.preset === preset);
   });
   state.datePreset = preset;
@@ -382,6 +392,7 @@ function applyDateRange(start, end, preset) {
   const resolved = preset || detectPreset(start, end);
   setActivePreset(resolved);
   savePrefs({ preset: resolved, startDate: start, endDate: end });
+  updateFilterSummary();
 }
 
 function initDateRange() {
@@ -407,9 +418,11 @@ function onPresetClick(preset) {
       startDate: $('startDate').value,
       endDate: $('endDate').value,
     });
+    updateFilterSummary();
     return;
   }
   const range = getRangeForPreset(preset);
+  if (!range) return;
   applyDateRange(range.start, range.end, preset);
   load();
 }
@@ -726,16 +739,6 @@ function renderCharts(events) {
   });
 
   state.chartsReady = true;
-}
-
-function groupByDay(events) {
-  const map = {};
-  for (const e of events) {
-    if (!e.timestampMs || e.cost == null) continue;
-    const day = new Date(e.timestampMs).toISOString().slice(0, 10);
-    map[day] = (map[day] || 0) + e.cost;
-  }
-  return map;
 }
 
 function populateModelFilter(events) {
@@ -1070,6 +1073,23 @@ function renderOvSparkline(events) {
 function renderOverview() {
   if (!$('overviewView')) return;
 
+  // No settled load behind the current filter (first paint, or a failed
+  // fetch). Show placeholders, never numbers: a $0.00 here reads as a real
+  // zero for the selected period, and leftover values read as if they were
+  // this period's.
+  if (!state.loaded) {
+    $('ovCost').textContent = '—';
+    $('ovCostSub').innerHTML = '';
+    $('ovRequests').textContent = '—';
+    $('ovRequestsSub').textContent = '';
+    $('ovSavings').textContent = '—';
+    $('ovSavingsSub').textContent = '';
+    $('ovTrendRange').textContent = '';
+    renderOvSparkline([]);
+    $('ovInsightPanel').classList.add('hidden');
+    return;
+  }
+
   const events = state.filtered;
   const summary = summarize(events);
 
@@ -1126,7 +1146,12 @@ async function load() {
     showAlert('error', 'Pick a valid date range.');
     return;
   }
+  if (start > end) {
+    showAlert('error', 'The "From" date is after the "To" date — pick a valid range.');
+    return;
+  }
 
+  updateFilterSummary();
   $('loading').classList.remove('hidden');
   $('usageView').classList.add('hidden');
   $('overviewView').classList.add('hidden');
@@ -1140,28 +1165,31 @@ async function load() {
     state.pricing = parsePricing(pricingData.markdown || '');
     state.plan = usage.plan || null;
     const normOpts = { freePlan: isFreePlan() };
-    state.all = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
+    const normalized = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
+    state.all = filterByRange(normalized, start, end);
+    // Not signed in is not "zero usage" — keep the placeholders in that case.
+    state.loaded = usage.authMode !== 'none';
     state.page = 1;
     destroyCharts();
     renderPlanCycle(usage.quota, usage.hardLimit);
+    populateModelFilter(state.all);
+    populateSimulatorModels();
+    populateSimRequestPicker(state.simRequestId);
     if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
+    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
 
     if (usage.authMode === 'none') {
       showAlert('warn', 'Not signed in. Open Cursor while logged into your account, or run "Cursor Usage: Set Session Token Manually" from the command palette.');
-      renderOverview();
+      refresh();
       return;
     }
 
     if (!state.all.length) {
       showAlert('warn', 'No usage events in this date range.');
-      renderOverview();
+      refresh();
       return;
     }
 
-    populateModelFilter(state.all);
-    populateSimulatorModels();
-    populateSimRequestPicker(state.simRequestId);
-    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
     if (usage.email || planLabel()) {
       $('authLabel').textContent = [usage.email ? `Signed in as ${usage.email}` : null, planLabel()]
         .filter(Boolean).join(' — ');
@@ -1174,11 +1202,19 @@ async function load() {
       ? `Loaded ${countedAll} requests (${state.all.length} events incl. errored/aborted)`
       : `Loaded ${state.all.length} requests`;
     showAlert('info', `${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${fallbackNote}`);
+    // refresh() already re-renders the overview and analyze views.
     refresh();
-    if (state.appView === 'overview') renderOverview();
     if (state.appView === 'simulator') refreshSimulator();
-    if (state.appView === 'analyze') renderAnalyze();
   } catch (err) {
+    // Drop whatever was loaded before: it belongs to a different (older)
+    // query, and leaving it on screen under the new filter reads as if the
+    // numbers were for the range now shown in the toolbar.
+    state.all = [];
+    state.loaded = false;
+    destroyCharts();
+    if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
+    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
+    refresh();
     showAlert('error', err.authError
       ? `${err.message} — your Cursor session may have expired. Re-open Cursor logged in, or run "Cursor Usage: Set Session Token Manually".`
       : err.message);
@@ -1790,6 +1826,7 @@ function populateSimRequestPicker(selectedId) {
   const events = state.filtered.length ? state.filtered : state.all;
   if (!events.length) {
     el.innerHTML = '<option value="">No requests loaded</option>';
+    state.simRequestId = null;
     return;
   }
   const sorted = [...events].sort((a, b) => b.timestampMs - a.timestampMs);
@@ -2187,7 +2224,7 @@ async function init() {
   $('refreshBtn').addEventListener('click', load);
   $('exportBtn').addEventListener('click', exportCsv);
 
-  document.querySelectorAll('.preset-btn').forEach((btn) => {
+  document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
     btn.addEventListener('click', () => onPresetClick(btn.dataset.preset));
   });
 
@@ -2344,6 +2381,11 @@ async function init() {
       refresh();
     });
   });
+
+  // Put the chrome in the state the view actually implies before the first
+  // load — otherwise Overview opens with the Requests filter bar still showing
+  // (duplicating its own period chips) until the user switches views once.
+  setAppView(state.appView);
 
   await load();
 }

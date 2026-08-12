@@ -37,6 +37,9 @@ const {
   isCountedRequest,
   percentile,
   projectExhaustionDate,
+  dayKey,
+  groupByDay,
+  filterByRange,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
 let passed = 0;
@@ -198,6 +201,66 @@ test('percentile', () => {
 test('displayModel maps default/auto', () => {
   assert.equal(displayModel('default'), 'Auto');
   assert.equal(displayModel('gpt-5.2'), 'gpt-5.2');
+});
+
+console.log('date bucketing & range filtering');
+
+/** Local midnight of a Y/M/D, the way the dashboard's date pickers build ranges. */
+function localMidnight(y, m, d, h = 0, min = 0) {
+  return new Date(y, m - 1, d, h, min, 0, 0).getTime();
+}
+
+test('dayKey buckets by local day, not UTC day', () => {
+  // Late-evening and early-morning stamps stay on their local calendar day in
+  // every timezone — the UTC-based bucketing this replaced moved one of them.
+  assert.equal(dayKey(localMidnight(2026, 8, 12, 23, 30)), '2026-08-12');
+  assert.equal(dayKey(localMidnight(2026, 8, 12, 0, 15)), '2026-08-12');
+  assert.equal(dayKey(NaN), null);
+});
+
+test('groupByDay sums cost per local day and skips costless/timeless events', () => {
+  const byDay = groupByDay([
+    { timestampMs: localMidnight(2026, 8, 12, 23, 30), cost: 1 },
+    { timestampMs: localMidnight(2026, 8, 12, 1, 0), cost: 0.5 },
+    { timestampMs: localMidnight(2026, 8, 11, 9, 0), cost: 2 },
+    { timestampMs: localMidnight(2026, 8, 11, 9, 0), cost: null },
+    { timestampMs: 0, cost: 3 },
+  ]);
+  assert.deepEqual(byDay, { '2026-08-12': 1.5, '2026-08-11': 2 });
+});
+
+test('groupByDay days fall inside the local range that selected them', () => {
+  const start = localMidnight(2026, 8, 12);
+  const end = localMidnight(2026, 8, 12, 23, 59) + 59_999;
+  const events = [
+    { timestampMs: localMidnight(2026, 8, 12, 0, 5), cost: 1 },
+    { timestampMs: localMidnight(2026, 8, 12, 22, 45), cost: 1 },
+  ];
+  const days = Object.keys(groupByDay(filterByRange(events, start, end)));
+  assert.deepEqual(days, ['2026-08-12']);
+});
+
+test('filterByRange drops out-of-range rows and keeps timestamp-less ones', () => {
+  const start = localMidnight(2026, 8, 12);
+  const end = localMidnight(2026, 8, 12, 23, 59) + 59_999;
+  const events = [
+    { id: 'before', timestampMs: start - 1 },
+    { id: 'start-edge', timestampMs: start },
+    { id: 'inside', timestampMs: localMidnight(2026, 8, 12, 13, 0) },
+    { id: 'end-edge', timestampMs: end },
+    { id: 'after', timestampMs: end + 1 },
+    { id: 'no-timestamp', timestampMs: 0 },
+  ];
+  assert.deepEqual(
+    filterByRange(events, start, end).map((e) => e.id),
+    ['start-edge', 'inside', 'end-edge', 'no-timestamp'],
+  );
+});
+
+test('filterByRange is a no-op when the range is not a usable number', () => {
+  const events = [{ id: 'a', timestampMs: 1 }];
+  assert.equal(filterByRange(events, NaN, 5), events);
+  assert.equal(filterByRange(events, 1, undefined), events);
 });
 
 // --- TS modules -----------------------------------------------------------

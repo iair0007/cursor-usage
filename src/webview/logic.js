@@ -295,6 +295,46 @@ export function summarize(events) {
   };
 }
 
+/**
+ * Local calendar day (YYYY-MM-DD) for a timestamp.
+ *
+ * Deliberately local, not UTC: the date filters are built from local midnight
+ * boundaries, so bucketing by UTC day would push late-evening (or early-morning,
+ * west of UTC) requests into a day that sits outside the selected range —
+ * daily charts then disagree with the KPI totals they sit next to.
+ */
+export function dayKey(timestampMs) {
+  const d = new Date(timestampMs);
+  if (Number.isNaN(d.getTime())) return null;
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** { 'YYYY-MM-DD': totalCost } over events that have a cost, keyed by local day. */
+export function groupByDay(events) {
+  const map = {};
+  for (const e of events) {
+    if (!e.timestampMs || e.cost == null) continue;
+    const day = dayKey(e.timestampMs);
+    if (!day) continue;
+    map[day] = (map[day] || 0) + e.cost;
+  }
+  return map;
+}
+
+/**
+ * Client-side guard so what's displayed always matches the active filter.
+ * The usage API is asked for [startMs, endMs] but its date semantics aren't
+ * documented (inclusive ends, whole-day rounding, server timezone), so a
+ * response can carry rows outside the requested window. Events with no usable
+ * timestamp are kept — the server is the only thing that can place them.
+ */
+export function filterByRange(events, startMs, endMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return events;
+  return events.filter((e) => !e.timestampMs || (e.timestampMs >= startMs && e.timestampMs <= endMs));
+}
+
 export function percentile(arr, p) {
   if (!arr.length) return null;
   const sorted = [...arr].sort((a, b) => a - b);

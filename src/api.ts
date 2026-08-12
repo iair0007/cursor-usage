@@ -233,6 +233,9 @@ export interface PlanInfo {
   /** e.g. 'free', 'free_trial', 'pro', 'business', 'enterprise', 'unknown' */
   membershipType: string;
   daysRemainingOnTrial?: number | null;
+  /** Team this seat belongs to; budgets on team plans are scoped to it, not to the user. */
+  teamId?: number | null;
+  isTeamMember?: boolean;
 }
 
 /**
@@ -282,6 +285,8 @@ export async function fetchStripeProfile(session: CursorSession): Promise<PlanIn
       data?.membershipType ?? data?.individualMembershipType ?? 'unknown',
     ).toLowerCase(),
     daysRemainingOnTrial: num(data?.daysRemainingOnTrial),
+    teamId: num(data?.teamId),
+    isTeamMember: Boolean(data?.isTeamMember),
   };
 }
 
@@ -369,6 +374,50 @@ export async function fetchHardLimit(session: CursorSession): Promise<number | n
   log(`Hard-limit raw response: ${JSON.stringify(data).slice(0, 300)}`);
   const limit = num(data?.hardLimit);
   return limit != null && limit > 0 ? limit : null;
+}
+
+/**
+ * Read-only endpoints that could carry a team seat's monthly spend budget,
+ * tried once when no budget is known from settings.
+ *
+ * The account payload reports `isTeamMember: true` with a `teamId`, while
+ * get-hard-limit is asked with an empty body — an individual-scoped question
+ * about a limit that lives on the team. These re-ask it with the team id.
+ *
+ * Every entry must be a `get-*` endpoint: this probes for a value to read, and
+ * a mis-guessed name that happened to mutate account state would be a far worse
+ * outcome than not finding the budget. The results are logged, never adopted —
+ * picking a number because its field name looked right is how a wrong figure
+ * ends up on screen presented as fact.
+ */
+const BUDGET_PROBE_ENDPOINTS = [
+  'get-hard-limit',
+  'get-team-spend',
+  'get-teams',
+] as const;
+
+export async function probeBudgetEndpoints(
+  session: CursorSession,
+  teamId: number | null | undefined,
+): Promise<void> {
+  for (const name of BUDGET_PROBE_ENDPOINTS) {
+    if (!name.startsWith('get-')) continue;
+    try {
+      const data = await fetchJson(`https://cursor.com/api/dashboard/${name}`, {
+        method: 'POST',
+        headers: {
+          ...BROWSER_HEADERS,
+          'Content-Type': 'application/json',
+          Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+        },
+        body: JSON.stringify(teamId != null ? { teamId } : {}),
+      }, 10000);
+      log(`Budget probe ${name} (teamId ${teamId ?? 'none'}): ${describePayloadShape(data).slice(0, 900)}`);
+    } catch (e: any) {
+      log(`Budget probe ${name}: ${e?.message || e}`);
+    }
+  }
+  log('Budget probe done — if one of the shapes above shows your monthly budget, that field can be read directly.');
 }
 
 /** Validates the session and returns account info. */

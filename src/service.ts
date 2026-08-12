@@ -16,6 +16,7 @@ import {
   fetchPlanQuota,
   fetchPricingMarkdown,
   fetchStripeProfile,
+  probeBudgetEndpoints,
 } from './api';
 import {
   billingCycleWindow,
@@ -89,6 +90,8 @@ export class UsageService {
   private sessionCache: { session: CursorSession | null; fetchedAt: number } | null = null;
   private usageCache = new Map<string, { result: UsageResult; fetchedAt: number }>();
   private usageInflight = new Map<string, Promise<UsageResult>>();
+  /** Budget endpoint probing is diagnostic — run it at most once per session. */
+  private budgetProbed = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -311,6 +314,19 @@ export class UsageService {
     if (usage.authMode === 'none') return null;
 
     const budgetDollars = configured > 0 ? configured : (usage.hardLimit ?? null);
+
+    // Nothing knows the budget yet: probe the team-scoped endpoints once per
+    // session so the field can be identified from a log instead of guessed at.
+    // Once per session because it is diagnostic, not part of the data path.
+    if (budgetDollars == null && !this.budgetProbed) {
+      this.budgetProbed = true;
+      const session = await this.getSession();
+      if (session) {
+        void probeBudgetEndpoints(session, usage.plan?.teamId).catch(() => {
+          // Diagnostic only — never let it break a load.
+        });
+      }
+    }
     const source: BudgetStatus['source'] = configured > 0
       ? 'setting'
       : (usage.hardLimit ? 'hardLimit' : 'none');

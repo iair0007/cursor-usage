@@ -792,6 +792,25 @@ test('descends far enough to reach a nested budget field, then summarizes', () =
   assert.match(api.describePayloadShape({ xs: [] }), /xs: array\(0\)/);
 });
 
+await test('stripe profile exposes the team id a budget would be scoped to', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      membershipType: 'enterprise', isTeamMember: true, teamId: 28585505,
+    }),
+  });
+  try {
+    const plan = await api.fetchStripeProfile({ cookieValue: 'c', userId: 'u' });
+    assert.equal(plan.membershipType, 'enterprise');
+    assert.equal(plan.teamId, 28585505);
+    assert.equal(plan.isTeamMember, true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 console.log('api.parseQuotaResponse');
 test('prefers the gpt-4 bucket, passes through startOfMonth, computes resetIso', () => {
   const quota = api.parseQuotaResponse({

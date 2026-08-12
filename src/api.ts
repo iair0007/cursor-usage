@@ -235,6 +235,35 @@ export interface PlanInfo {
   daysRemainingOnTrial?: number | null;
 }
 
+/**
+ * Structure of a response — field names with their numeric values — without the
+ * free-text content.
+ *
+ * Used to find fields this extension doesn't read yet (a monthly spend budget,
+ * for one) in payloads that also carry account identifiers. Numbers and
+ * booleans print as-is because those are what we're hunting for and they
+ * identify nobody; strings print as `string`, so an email or a customer id
+ * can't reach the log. A string that is purely digits is the exception —
+ * budgets are sometimes sent that way, and a bare number leaks nothing.
+ */
+const MAX_SHAPE_DEPTH = 3;
+
+export function describePayloadShape(value: unknown, depth = 0): string {
+  if (value === null) return 'null';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'string') return /^\d+(\.\d+)?$/.test(value) ? value : 'string';
+  if (Array.isArray(value)) {
+    if (!value.length) return 'array(0)';
+    return depth >= MAX_SHAPE_DEPTH ? `array(${value.length})` : `array(${value.length}) of ${describePayloadShape(value[0], depth + 1)}`;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (depth >= MAX_SHAPE_DEPTH) return `{${entries.length} keys}`;
+    return `{${entries.map(([k, v]) => `${k}: ${describePayloadShape(v, depth + 1)}`).join(', ')}}`;
+  }
+  return typeof value;
+}
+
 /** Account plan/membership via the same endpoint the cursor.com dashboard uses. */
 export async function fetchStripeProfile(session: CursorSession): Promise<PlanInfo> {
   const data = await fetchJson('https://cursor.com/api/auth/stripe', {
@@ -244,6 +273,10 @@ export async function fetchStripeProfile(session: CursorSession): Promise<PlanIn
       Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
     },
   });
+  // This response is fetched on every load but only two fields are read. Log
+  // its shape so fields worth reading — a monthly spend budget above all —
+  // can be identified from a user's log instead of guessed at.
+  log(`Stripe profile shape: ${describePayloadShape(data).slice(0, 900)}`);
   return {
     membershipType: String(
       data?.membershipType ?? data?.individualMembershipType ?? 'unknown',

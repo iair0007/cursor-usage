@@ -750,6 +750,34 @@ await test('rows with no server id are kept even when they look alike', async ()
   );
 });
 
+console.log('api.describePayloadShape (find unread fields without logging PII)');
+test('prints numbers and booleans, hides free-text', () => {
+  const shape = api.describePayloadShape({
+    membershipType: 'enterprise',
+    customerEmail: 'someone@example.com',
+    monthlyLimitDollars: 120,
+    verified: true,
+    trialDays: null,
+  });
+  assert.match(shape, /monthlyLimitDollars: 120/);
+  assert.match(shape, /verified: true/);
+  assert.match(shape, /trialDays: null/);
+  assert.match(shape, /membershipType: string/);
+  assert.ok(!shape.includes('example.com'), 'an email must never reach the log');
+  assert.ok(!shape.includes('enterprise'), 'string contents are withheld');
+});
+test('a numeric string keeps its value — budgets are sometimes sent that way', () => {
+  assert.match(api.describePayloadShape({ limit: '120' }), /limit: 120/);
+  assert.match(api.describePayloadShape({ limit: '120.50' }), /limit: 120.50/);
+});
+test('descends far enough to reach a nested budget field, then summarizes', () => {
+  // A limit sitting under two wrapper objects still has to be visible.
+  assert.match(api.describePayloadShape({ team: { settings: { spendLimit: 120 } } }), /spendLimit: 120/);
+  assert.match(api.describePayloadShape({ a: { b: { c: { d: 1 } } } }), /a: \{b: \{c: \{1 keys\}\}\}/);
+  assert.match(api.describePayloadShape({ xs: [{ n: 5 }] }), /xs: array\(1\) of \{n: 5\}/);
+  assert.match(api.describePayloadShape({ xs: [] }), /xs: array\(0\)/);
+});
+
 console.log('api.parseQuotaResponse');
 test('prefers the gpt-4 bucket, passes through startOfMonth, computes resetIso', () => {
   const quota = api.parseQuotaResponse({

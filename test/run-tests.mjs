@@ -400,6 +400,20 @@ test('period wiring cannot match the cost-mode buttons', () => {
     + 'preset clears the What-if/Billed highlight and clicking one fires the period handler',
   );
 });
+test('the period and cost-mode controls exist exactly once', () => {
+  // Overview used to carry a second copy of these chips, two rows below the
+  // filter bar — two controls for one filter, which is what a user sees as
+  // "the same filters twice".
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  for (const preset of ['today', '7d', '30d', 'mtd', 'custom']) {
+    const hits = html.match(new RegExp(`data-preset="${preset}"`, 'g')) || [];
+    assert.equal(hits.length, 1, `data-preset="${preset}" appears ${hits.length} times`);
+  }
+  for (const mode of ['value', 'billed']) {
+    const hits = html.match(new RegExp(`data-cost-mode="${mode}"`, 'g')) || [];
+    assert.equal(hits.length, 1, `data-cost-mode="${mode}" appears ${hits.length} times`);
+  }
+});
 test('cost-mode buttons declare no data-preset', () => {
   const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
   const buttons = html.match(/<button[^>]*cost-mode-btn[^>]*>/g) || [];

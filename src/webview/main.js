@@ -2306,10 +2306,11 @@ function setAppView(view) {
   $('usageView').classList.toggle('hidden', view !== 'usage');
   $('analyzeView').classList.toggle('hidden', view !== 'analyze');
   $('simulatorView').classList.toggle('hidden', view !== 'simulator');
-  // Overview keeps the filter bar: Refresh, Export CSV, the date inputs and the
-  // model select live there and have no equivalent in its own compact toolbar.
-  // Only the Simulator drops it — that view is a standalone calculator that
-  // doesn't read the date filter at all.
+  // One filter bar, shown wherever the date range means something. Overview
+  // used to carry a second copy of the period and cost-mode chips for when this
+  // bar was hidden there; both being visible read as two competing filters, so
+  // the duplicate is gone. Only the Simulator drops the bar — that view is a
+  // standalone calculator that doesn't read the date filter at all.
   document.querySelector('.filter-bar')?.classList.toggle('hidden', view === 'simulator');
   if (view !== 'usage') {
     $('billingNotice')?.classList.add('hidden');

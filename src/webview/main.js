@@ -533,6 +533,20 @@ function formatChartTokens(v) {
   return String(Math.round(v));
 }
 
+/**
+ * Explains a range that spans a plan change, in the terms cursor.com's usage
+ * page uses. Without it the headline blends token-metered spend with requests
+ * priced by the older per-request plan, producing a figure that matches
+ * neither page — and looks like the extension is inventing money.
+ */
+function planChangeNote(summary) {
+  if (!summary.spansPlanChange) return '';
+  const requests = `${fmt.num(summary.legacyRequestCount)} request${summary.legacyRequestCount === 1 ? '' : 's'}`;
+  return `cursor.com meters ${fmt.money(summary.meteredTotal)} for this range. `
+    + `The remaining ${requests} (${fmt.money(summary.legacyTokenValue)} of token value) predate your plan change and were `
+    + `priced per request — ${fmt.money(summary.legacyFeeTotal)} in flat fees — so its spend view doesn't count them.`;
+}
+
 /** ▲/▼ delta badge vs the previous equal-length period; null when there's nothing to compare or the baseline is 0. */
 function trendBadge(current, previous) {
   if (previous == null || !(previous > 0)) return '';
@@ -812,6 +826,9 @@ function renderKpis(summary) {
   }
   costSub += ` · ${fmt.num(summary.withCost)} requests`;
   $('kpiCostSub').textContent = costSub;
+
+  const planChange = planChangeNote(summary);
+  if (planChange) $('kpiCostSub').textContent += ` · ${planChange}`;
 
   const feeEl = $('kpiCostFees');
   if (feeEl) {
@@ -1110,9 +1127,13 @@ function renderOverview() {
   const showWhatIfPrefix = state.costMode === 'value' && freePlan;
   $('ovCostLabel').textContent = state.costMode === 'billed' ? 'Billed cost' : 'Token cost';
   $('ovCost').textContent = `${showWhatIfPrefix ? '~' : ''}${fmt.money(summary.totalCost)}`;
-  $('ovCostSub').innerHTML = state.trend.key === currentTrendKey() && state.trend.previous
+  const trend = state.trend.key === currentTrendKey() && state.trend.previous
     ? trendBadge(summary.totalCost, state.trend.previous.totalCost)
     : '';
+  const planChange = planChangeNote(summary);
+  $('ovCostSub').innerHTML = planChange
+    ? `${trend}<span class="ov-stat-note">${esc(planChange)}</span>`
+    : trend;
 
   $('ovRequests').textContent = fmt.num(summary.count);
   $('ovRequestsSub').textContent = summary.count

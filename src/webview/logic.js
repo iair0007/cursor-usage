@@ -229,6 +229,21 @@ export function normalize(raw, pricing, opts = {}) {
   // as opposed to `cost` which is the API-equivalent value of the tokens.
   const billedCost = billedCostForEvent(raw.kind, chargedCents, opts.freePlan);
 
+  // Which billing system priced this request. A range that spans a plan change
+  // holds both, and they are not addable: cursor.com's spend view meters
+  // token-priced requests in dollars, while request-priced ones consumed a
+  // request allowance and cost a flat fee instead.
+  let billingRegime;
+  if (isTokenBased) billingRegime = 'token';
+  else if (requestCharge != null) billingRegime = 'usage';
+  else billingRegime = 'unknown';
+
+  // What cursor.com's usage page meters for this request (its "Total usage"),
+  // or null for requests priced by the older per-request plan, which that page
+  // does not count. Deliberately derived from the regime rather than the kind:
+  // "Included" usage is still metered against the plan's monthly allowance.
+  const planMeteredCost = billingRegime === 'usage' ? null : (cost ?? tokenCost);
+
   const ts = eventTimestampMs(raw.timestamp);
 
   const modelRaw = raw.model || 'unknown';
@@ -249,6 +264,8 @@ export function normalize(raw, pricing, opts = {}) {
     tokenCost,
     requestCharge,
     isTokenBased,
+    billingRegime,
+    planMeteredCost,
     cacheSavings,
     noCacheCost,
     pricingLabel: rates?.label || null,
@@ -280,6 +297,15 @@ export function summarize(events) {
   const hasUsageFees = events.some((e) => e.requestCharge != null && e.tokenCost != null
     && Math.abs(e.requestCharge - e.tokenCost) > 0.001);
   const billingMode = detectBillingMode(events);
+
+  // Reconciliation against cursor.com's usage page. Its "Total usage" only
+  // meters token-priced requests, so a range spanning a plan change must report
+  // the two systems side by side instead of adding them into one dollar figure
+  // that matches neither page.
+  const metered = events.filter((e) => e.planMeteredCost != null);
+  const legacy = events.filter((e) => e.billingRegime === 'usage');
+  const meteredTotal = metered.reduce((s, e) => s + e.planMeteredCost, 0);
+
   return {
     count: countedEvents.length,
     eventCount: events.length,
@@ -298,6 +324,12 @@ export function summarize(events) {
     totalRequestFees,
     hasUsageFees,
     billingMode,
+    meteredTotal,
+    meteredCount: metered.length,
+    legacyRequestCount: legacy.length,
+    legacyFeeTotal: legacy.reduce((s, e) => s + (e.requestCharge ?? 0), 0),
+    legacyTokenValue: legacy.reduce((s, e) => s + (e.tokenCost ?? e.cost ?? 0), 0),
+    spansPlanChange: metered.length > 0 && legacy.length > 0,
   };
 }
 

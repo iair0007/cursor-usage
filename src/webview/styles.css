@@ -236,6 +236,8 @@ input:focus, select:focus, textarea:focus {
 }
 .ov-stat-green.ov-stat-value { color: var(--green-strong); }
 .ov-stat-sub { color: var(--muted); font-size: 12px; min-height: 1.4em; }
+/* Reconciliation note under the cost figure — wraps, unlike the inline badge it may follow. */
+.ov-stat-note { display: block; margin-top: 4px; line-height: 1.45; }
 
 .ov-lower {
   display: grid;

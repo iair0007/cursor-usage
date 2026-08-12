@@ -194,6 +194,86 @@ test('billedCost: included/errored kinds are 0, charges bill, free plan forces 0
   const unknown = normalize({ model: 'x', tokenUsage: { totalCents: 10 } }, pricing);
   assert.equal(unknown.billedCost, null);
 });
+console.log('plan-change reconciliation (range spanning two billing systems)');
+// Modelled on a real report: an Aug 1–12 range holding requests priced by the
+// old per-request plan (flat $0.04 fee) and, after the plan changed, requests
+// metered in dollars. cursor.com's usage page reported $2.79 for the range
+// while the panel showed $185.37 — the blend of both systems.
+const legacyRequest = {
+  id: 'legacy',
+  timestamp: 1_785_900_000_000,
+  model: 'claude-opus-5-thinking-xhigh',
+  isTokenBasedCall: false,
+  chargedCents: 4,
+  tokenUsage: { inputTokens: 6205, outputTokens: 19713, totalCents: 364 },
+};
+const meteredRequest = {
+  id: 'metered',
+  timestamp: 1_786_500_000_000,
+  model: 'claude-sonnet-5-thinking-medium',
+  kind: 'Included in Business',
+  isTokenBasedCall: true,
+  chargedCents: 261,
+  tokenUsage: { inputTokens: 5340, outputTokens: 22537, totalCents: 261 },
+};
+
+test('a flat per-request fee marks the old plan; metered requests carry the spend', () => {
+  const legacy = normalize(legacyRequest, pricing);
+  assert.equal(legacy.billingRegime, 'usage');
+  assert.equal(legacy.requestCharge, 0.04);
+  assert.equal(legacy.planMeteredCost, null, 'per-request billing is not metered spend');
+
+  const metered = normalize(meteredRequest, pricing);
+  assert.equal(metered.billingRegime, 'token');
+  assert.equal(metered.requestCharge, null);
+  assert.equal(metered.planMeteredCost, 2.61, "matches cursor.com's metered amount for the row");
+});
+
+test('"Included" usage still counts as metered spend', () => {
+  // cursor.com reports included usage in Total usage (against the monthly
+  // allowance); only the out-of-pocket Billed figure treats it as zero.
+  const e = normalize(meteredRequest, pricing);
+  assert.equal(e.billedCost, 0);
+  assert.equal(e.planMeteredCost, 2.61);
+});
+
+test('summarize reports the metered total separately from the old plan', () => {
+  const events = [
+    ...Array.from({ length: 56 }, (_, i) => normalize({ ...legacyRequest, id: `l${i}` }, pricing)),
+    normalize(meteredRequest, pricing),
+    normalize({ ...meteredRequest, id: 'metered2', chargedCents: 17, tokenUsage: { totalCents: 17 } }, pricing),
+  ];
+  const s = summarize(events);
+  assert.equal(s.spansPlanChange, true);
+  assert.equal(s.meteredCount, 2);
+  assert.ok(Math.abs(s.meteredTotal - 2.78) < 1e-9, `metered total ${s.meteredTotal}`);
+  assert.equal(s.legacyRequestCount, 56);
+  assert.ok(Math.abs(s.legacyFeeTotal - 2.24) < 1e-9);
+  assert.ok(Math.abs(s.legacyTokenValue - 56 * 3.64) < 1e-9);
+  // The blended figure the panel used to headline — kept, but no longer the
+  // only number on offer.
+  assert.ok(Math.abs(s.totalCost - (56 * 3.64 + 2.78)) < 1e-9);
+});
+
+test('a range inside one billing system is not flagged as a plan change', () => {
+  const onlyMetered = summarize([normalize(meteredRequest, pricing)]);
+  assert.equal(onlyMetered.spansPlanChange, false);
+  assert.ok(Math.abs(onlyMetered.meteredTotal - 2.61) < 1e-9);
+
+  const onlyLegacy = summarize([normalize(legacyRequest, pricing)]);
+  assert.equal(onlyLegacy.spansPlanChange, false);
+  assert.equal(onlyLegacy.meteredTotal, 0);
+  assert.equal(onlyLegacy.legacyRequestCount, 1);
+});
+
+test('metered spend is unaffected by an unset isTokenBasedCall flag', () => {
+  // Same row without the flag: no flat fee still means the new system, so the
+  // reconciliation figure holds whichever way cursor.com labels the event.
+  const e = normalize({ ...meteredRequest, isTokenBasedCall: false, chargedCents: null }, pricing);
+  assert.equal(e.billingRegime, 'unknown');
+  assert.equal(e.planMeteredCost, 2.61);
+});
+
 test('withCostCounted never exceeds the request count it is shown under', () => {
   // An errored row carries cost data but is not a request: reporting it under
   // the Requests headline showed "121 requests / 122 with cost data".

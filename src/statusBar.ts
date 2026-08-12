@@ -176,8 +176,10 @@ export class UsageStatusBar {
         if (runway.overBudget) {
           tooltip.appendMarkdown(`- **$${(-runway.remainingDollars).toFixed(2)} over budget** this cycle\n`);
         } else if (runway.dailySpend != null && runway.daysToExhaustion != null) {
+          // "cycle average" so the rate can be reconciled with the spend above
+          // rather than read as today's burn.
           tooltip.appendMarkdown(
-            `- At $${runway.dailySpend.toFixed(2)}/day: ~${Math.round(runway.daysToExhaustion)} days of budget left\n`,
+            `- At $${runway.dailySpend.toFixed(2)}/day (cycle average): ~${Math.round(runway.daysToExhaustion)} days of budget left\n`,
           );
           if (runway.safeDailySpend != null) {
             tooltip.appendMarkdown(`- Stays in budget at up to **$${runway.safeDailySpend.toFixed(2)}/day**\n`);

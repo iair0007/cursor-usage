@@ -113,6 +113,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
           <span class="plan-cycle-bar-label" id="planCycleBarLabel"></span>
         </div>
         <p class="plan-cycle-note" id="planCycleNote"></p>
+        <p class="plan-cycle-note plan-cycle-scope hidden" id="planCycleScope"></p>
       </section>
 
       <!--

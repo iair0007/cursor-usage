@@ -300,17 +300,20 @@ function renderPlanCycle(quota, hardLimit) {
     }
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
     noteEl.textContent = notes.join(' ');
+    renderPlanCycleScope('quota', quota);
   } else if (budgetRunwayState()) {
-    renderBudgetCycle(card, budgetRunwayState(), barRow, ring, noteEl, hardLimit);
+    renderBudgetCycle(card, budgetRunwayState(), barRow, ring, noteEl, hardLimit, quota);
   } else if (hasMeaningfulCountOnly) {
     barRow.classList.add('hidden');
     ring.classList.add('hidden');
     const notes = [`${fmt.num(quota.used)} requests this cycle · no fixed limit found for this plan.`];
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
     noteEl.textContent = notes.join(' ');
+    renderPlanCycleScope('quota', quota);
   } else {
     barRow.classList.add('hidden');
     ring.classList.add('hidden');
+    renderPlanCycleScope(null, quota);
     const notes = [];
     if (quota) {
       notes.push(
@@ -368,6 +371,50 @@ function budgetRunwayState() {
   return state.budget?.runway ?? null;
 }
 
+/** "Aug 9" — the short form used when naming a cycle boundary in prose. */
+function formatDayMonth(ms) {
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/**
+ * The day the current billing cycle began, from whichever source knows it.
+ *
+ * Every figure on this card — requests used, budget spent, and the daily pace
+ * derived from it — is measured from that day, while the filter bar directly
+ * above the card can be showing any range at all. Naming the date is what makes
+ * "$25.28 spent" and "$6.52/day" reconcilable when the period chip says "Today".
+ */
+function cycleStartLabel(quota) {
+  if (quota?.startOfCycleIso) {
+    const ms = new Date(quota.startOfCycleIso).getTime();
+    const label = formatDayMonth(ms);
+    if (label) return label;
+  }
+  return formatDayMonth(state.budget?.cycleStartMs);
+}
+
+/**
+ * Says, once, that this card is cycle-scoped — the period selected above does
+ * not move any number on it.
+ */
+function renderPlanCycleScope(kind, quota) {
+  const el = $('planCycleScope');
+  if (!el) return;
+  if (!kind) {
+    el.classList.add('hidden');
+    el.textContent = '';
+    return;
+  }
+  const since = cycleStartLabel(quota);
+  const window = since ? `the current billing cycle (since ${since})` : 'the current billing cycle';
+  el.textContent = kind === 'quota'
+    ? `Requests here are counted over ${window} — not the period selected above.`
+    : `Spend here is measured over ${window} — not the period selected above.`;
+  el.classList.remove('hidden');
+}
+
 function formatDays(days) {
   if (days < 1) return 'less than a day';
   const whole = Math.round(days);
@@ -380,7 +427,7 @@ function formatDays(days) {
  * still fits the cycle. Phrased around the reset date, because a budget that
  * refills is a pacing problem, not a countdown to zero.
  */
-function renderBudgetCycle(card, runway, barRow, ring, noteEl, hardLimit) {
+function renderBudgetCycle(card, runway, barRow, ring, noteEl, hardLimit, quota) {
   const pctVisual = Math.min(100, Math.max(0, runway.percentUsed));
   barRow.classList.remove('hidden');
   ring.classList.remove('hidden');
@@ -399,7 +446,12 @@ function renderBudgetCycle(card, runway, barRow, ring, noteEl, hardLimit) {
   } else if (runway.dailySpend == null) {
     notes.push(`${fmt.money(runway.remainingDollars)} left this cycle — too early in the cycle to project a pace.`);
   } else {
-    const pace = `At ${fmt.money(runway.dailySpend)}/day`;
+    // The pace is spend ÷ days elapsed in this cycle, so a day of heavy use
+    // early on reads as a modest daily rate. Saying which days it averages is
+    // the difference between a figure the user can check and one that looks
+    // invented — especially when the period chip above says "Today".
+    const since = cycleStartLabel(quota);
+    const pace = `At ${fmt.money(runway.dailySpend)}/day (average${since ? ` since ${since}` : ' over this cycle'})`;
     if (runway.exhaustsBeforeReset === true) {
       notes.push(`${pace}, the ${fmt.money(runway.budgetDollars)} budget runs out in ${formatDays(runway.daysToExhaustion)}`
         + ` — ${formatDays(runway.daysUntilReset - runway.daysToExhaustion)} before the cycle resets.`);
@@ -419,6 +471,7 @@ function renderBudgetCycle(card, runway, barRow, ring, noteEl, hardLimit) {
   }
   if (hardLimit && state.budget?.source !== 'hardLimit') notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
   noteEl.textContent = notes.join(' ');
+  renderPlanCycleScope('budget', quota);
 }
 
 /** Events re-mapped so `cost` reflects the active cost mode. */

@@ -285,6 +285,11 @@ export function summarize(events) {
     eventCount: events.length,
     notCounted: events.length - countedEvents.length,
     withCost: withCost.length,
+    // Subset of the counted requests that carry cost data. `withCost` spans
+    // every row including errored/aborted ones, so it can exceed the request
+    // count — fine for explaining a cost total, wrong under a "Requests"
+    // headline, where it reads as more requests than the headline shows.
+    withCostCounted: countedEvents.filter((e) => e.cost != null).length,
     totalCost,
     totalSavings,
     noCache,

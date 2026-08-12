@@ -238,6 +238,41 @@ export function sumBilledCostDollars(
   return cents / 100;
 }
 
+export interface KindTotal {
+  kind: string;
+  count: number;
+  tokenCostDollars: number;
+  chargedDollars: number;
+}
+
+/**
+ * Per-`kind` totals for the current window.
+ *
+ * cursor.com reports usage as Total / Included / On-demand, and `kind` is the
+ * only field that says which bucket a row belongs to ("Included in Business",
+ * "Usage-based", "Errored, Not Charged", …). Splitting the same events that way
+ * is what makes a disagreement with cursor.com legible: whether the gap is
+ * extra rows, a bucket counted on one side only, or the same rows priced
+ * differently.
+ */
+export function eventKindTotals(
+  events: (UsageEventLike & { kind?: string })[],
+): KindTotal[] {
+  const byKind = new Map<string, KindTotal>();
+  for (const e of events) {
+    const kind = e.kind || '(no kind)';
+    let row = byKind.get(kind);
+    if (!row) {
+      row = { kind, count: 0, tokenCostDollars: 0, chargedDollars: 0 };
+      byKind.set(kind, row);
+    }
+    row.count++;
+    row.tokenCostDollars += sumTokenCostDollars([e]);
+    row.chargedDollars += (e.chargedCents ?? 0) / 100;
+  }
+  return [...byKind.values()].sort((a, b) => b.tokenCostDollars - a.tokenCostDollars);
+}
+
 export type StatusBarQuotaFormat = 'usedLimit' | 'remaining';
 export type StatusBarFillStyle = 'dots' | 'blocks' | 'squares' | 'stars' | 'bars' | 'none';
 

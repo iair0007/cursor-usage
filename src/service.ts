@@ -19,9 +19,11 @@ import {
 } from './api';
 import {
   billingCycleWindow,
+  eventKindTotals,
   eventTimestampSpan,
   eventsWithinRange,
   rollingDayWindow,
+  sumTokenCostDollars,
   type StatusBarPeriodMode,
 } from './shared/usageLogic';
 
@@ -29,6 +31,7 @@ export {
   billingCycleWindow,
   clampPeriodDays,
   countRequests,
+  eventKindTotals,
   eventTimestampMs,
   eventTimestampSpan,
   eventsWithinRange,
@@ -196,6 +199,18 @@ export class UsageService {
         + 'selected range only.',
       );
     }
+
+    // Printed in cursor.com's own vocabulary (Total / Included / On-demand) so
+    // the panel's figures can be reconciled against the dashboard line by line
+    // instead of eyeballed.
+    const money = (d: number) => `$${d.toFixed(2)}`;
+    const kinds = eventKindTotals(kept)
+      .map((k) => `"${k.kind}" ×${k.count} token ${money(k.tokenCostDollars)} / charged ${money(k.chargedDollars)}`)
+      .join(', ');
+    this.log(
+      `In-window totals: ${kept.length} event(s) · token cost ${money(sumTokenCostDollars(kept))}`
+      + ` · by kind: ${kinds || '(none)'}`,
+    );
     return kept;
   }
 

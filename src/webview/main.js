@@ -769,7 +769,20 @@ function tip(text) {
   return `<span class="tip" tabindex="0" aria-label="Help" data-tip="${esc(text)}">ⓘ</span>`;
 }
 
+const KPI_PLACEHOLDER_IDS = ['kpiRequests', 'kpiTotalCost', 'kpiSavings', 'kpiAvg'];
+const KPI_SUB_IDS = ['kpiRequestsSub', 'kpiCostSub', 'kpiSavingsSub', 'kpiAvgSub'];
+
 function renderKpis(summary) {
+  // Same rule as the Overview: with no settled load behind the current filter,
+  // show placeholders rather than a $0.00 that reads as a real zero.
+  if (!state.loaded) {
+    KPI_PLACEHOLDER_IDS.forEach((id) => { $(id).textContent = '—'; });
+    KPI_SUB_IDS.forEach((id) => { $(id).innerHTML = ''; });
+    $('kpiCostFees')?.classList.add('hidden');
+    $('billingNotice')?.classList.add('hidden');
+    return;
+  }
+
   const isFiltered = summary.eventCount < state.all.length;
 
   $('kpiRequests').textContent = fmt.num(summary.count);
@@ -1103,7 +1116,7 @@ function renderOverview() {
 
   $('ovRequests').textContent = fmt.num(summary.count);
   $('ovRequestsSub').textContent = summary.count
-    ? `${fmt.num(summary.withCost)} with cost data${summary.notCounted > 0 ? ` · ${fmt.num(summary.notCounted)} errored/aborted not counted` : ''}`
+    ? `${fmt.num(summary.withCostCounted)} with cost data${summary.notCounted > 0 ? ` · ${fmt.num(summary.notCounted)} errored/aborted not counted` : ''}`
     : 'No requests in this period';
 
   $('ovSavings').textContent = fmt.money(summary.totalSavings);
@@ -2176,7 +2189,11 @@ function setAppView(view) {
   $('usageView').classList.toggle('hidden', view !== 'usage');
   $('analyzeView').classList.toggle('hidden', view !== 'analyze');
   $('simulatorView').classList.toggle('hidden', view !== 'simulator');
-  document.querySelector('.filter-bar')?.classList.toggle('hidden', view !== 'usage' && view !== 'analyze');
+  // Overview keeps the filter bar: Refresh, Export CSV, the date inputs and the
+  // model select live there and have no equivalent in its own compact toolbar.
+  // Only the Simulator drops it — that view is a standalone calculator that
+  // doesn't read the date filter at all.
+  document.querySelector('.filter-bar')?.classList.toggle('hidden', view === 'simulator');
   if (view !== 'usage') {
     $('billingNotice')?.classList.add('hidden');
     $('alert')?.classList.add('hidden');

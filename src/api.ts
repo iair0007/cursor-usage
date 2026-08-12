@@ -121,6 +121,34 @@ export function toRawEvent(e: any): RawUsageEvent {
   };
 }
 
+/**
+ * Collects a page of raw rows, skipping any event id already seen.
+ *
+ * Paging these endpoints is best-effort: the page parameter isn't documented,
+ * and an endpoint that ignores it answers every request with the same first
+ * page. Appending those blindly double-counts real usage — every total, chart
+ * and average silently inflates by a whole page. Returns how many genuinely new
+ * rows the page contributed so callers can stop when a page adds nothing.
+ *
+ * Rows without a server-assigned id are always kept: their synthesized id
+ * (timestamp + model) can legitimately collide between two concurrent
+ * requests, and dropping those would lose real usage.
+ */
+function collectPage(batch: any[], seenIds: Set<string>, into: RawUsageEvent[]): number {
+  let added = 0;
+  for (const e of batch) {
+    const rawId = e?.id ?? e?.eventId;
+    if (rawId != null) {
+      const key = String(rawId);
+      if (seenIds.has(key)) continue;
+      seenIds.add(key);
+    }
+    into.push(toRawEvent(e));
+    added++;
+  }
+  return added;
+}
+
 /** Personal usage via the cursor.com dashboard API (session cookie auth). */
 export async function fetchDashboardUsage(
   session: CursorSession,
@@ -128,6 +156,7 @@ export async function fetchDashboardUsage(
   endMs: number,
 ): Promise<RawUsageEvent[]> {
   const events: RawUsageEvent[] = [];
+  const seenIds = new Set<string>();
   let page = 1;
 
   for (; page <= MAX_PAGES; page++) {
@@ -148,7 +177,11 @@ export async function fetchDashboardUsage(
     });
 
     const batch: any[] = data.usageEventsDisplay || data.usageEvents || data.events || [];
-    events.push(...batch.map(toRawEvent));
+    const added = collectPage(batch, seenIds, events);
+    if (batch.length && added === 0) {
+      log(`Page ${page} repeated rows already collected — stopping to avoid double-counting usage.`);
+      break;
+    }
 
     const total = num(data.totalUsageEventsCount);
     const hasNext =
@@ -168,6 +201,7 @@ export async function fetchAdminUsage(
 ): Promise<RawUsageEvent[]> {
   const auth = Buffer.from(`${apiKey}:`).toString('base64');
   const events: RawUsageEvent[] = [];
+  const seenIds = new Set<string>();
   let page = 1;
 
   for (; page <= MAX_PAGES; page++) {
@@ -182,7 +216,11 @@ export async function fetchAdminUsage(
     });
 
     const batch: any[] = data.usageEvents || data.events || [];
-    events.push(...batch.map(toRawEvent));
+    const added = collectPage(batch, seenIds, events);
+    if (batch.length && added === 0) {
+      log(`Page ${page} repeated rows already collected — stopping to avoid double-counting usage.`);
+      break;
+    }
 
     const hasNext = data.pagination?.hasNextPage ?? batch.length === PAGE_SIZE;
     if (!batch.length || !hasNext) break;

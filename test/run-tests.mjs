@@ -194,6 +194,19 @@ test('billedCost: included/errored kinds are 0, charges bill, free plan forces 0
   const unknown = normalize({ model: 'x', tokenUsage: { totalCents: 10 } }, pricing);
   assert.equal(unknown.billedCost, null);
 });
+test('withCostCounted never exceeds the request count it is shown under', () => {
+  // An errored row carries cost data but is not a request: reporting it under
+  // the Requests headline showed "121 requests / 122 with cost data".
+  const events = [
+    normalize(tokenBasedRaw, pricing),
+    normalize({ ...tokenBasedRaw, id: 'c', kind: 'Errored, Not Charged' }, pricing),
+  ];
+  const s = summarize(events);
+  assert.equal(s.count, 1);
+  assert.equal(s.withCost, 2);
+  assert.equal(s.withCostCounted, 1);
+  assert.ok(s.withCostCounted <= s.count);
+});
 test('percentile', () => {
   assert.equal(percentile([1, 2, 3, 4], 0.75), 4);
   assert.equal(percentile([], 0.75), null);
@@ -261,6 +274,28 @@ test('filterByRange is a no-op when the range is not a usable number', () => {
   const events = [{ id: 'a', timestampMs: 1 }];
   assert.equal(filterByRange(events, NaN, 5), events);
   assert.equal(filterByRange(events, 1, undefined), events);
+});
+
+// Source-level invariants: the webview's DOM wiring has no test harness here,
+// and the bug these guard against (one selector matching two kinds of button)
+// is invisible to the logic tests above.
+console.log('webview wiring invariants');
+test('period wiring cannot match the cost-mode buttons', () => {
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  assert.equal(
+    main.match(/querySelectorAll\(\s*['"]\.preset-btn['"]\s*\)/g),
+    null,
+    'querySelectorAll(".preset-btn") also matches the .cost-mode-btn buttons: applying a date '
+    + 'preset clears the What-if/Billed highlight and clicking one fires the period handler',
+  );
+});
+test('cost-mode buttons declare no data-preset', () => {
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  const buttons = html.match(/<button[^>]*cost-mode-btn[^>]*>/g) || [];
+  assert.ok(buttons.length >= 2, 'expected the What-if/Billed buttons in the markup');
+  for (const tag of buttons) {
+    assert.ok(!/data-preset/.test(tag), `cost-mode button also declares data-preset: ${tag}`);
+  }
 });
 
 // --- TS modules -----------------------------------------------------------
@@ -371,6 +406,120 @@ test('an in-window response is passed through untouched', () => {
   const end = Date.UTC(2026, 7, 12, 23, 59, 59, 999);
   const events = [{ id: 'a', timestamp: Date.UTC(2026, 7, 5) }];
   assert.deepEqual(service.eventsWithinRange(events, start, end), events);
+});
+
+test('panel and status bar report the same totals for the same events', () => {
+  // The panel sums normalize()d events; the status bar sums raw ones through
+  // shared helpers. Two code paths, one number the user compares against
+  // cursor.com — they must not drift apart.
+  const raws = [
+    { id: 'a', timestamp: 1_780_000_000_000, model: 'auto', isTokenBasedCall: true, chargedCents: 123, cursorTokenFee: 3, tokenUsage: { inputTokens: 10, totalCents: 100 } },
+    { id: 'b', timestamp: 1_780_000_100_000, model: 'auto', isTokenBasedCall: false, chargedCents: 4, tokenUsage: { inputTokens: 10, totalCents: 2 } },
+    { id: 'c', timestamp: 1_780_000_200_000, model: 'auto', kind: 'Included in Business', isTokenBasedCall: false, chargedCents: 0, tokenUsage: { inputTokens: 10, totalCents: 250 } },
+    { id: 'd', timestamp: 1_780_000_300_000, model: 'auto', kind: 'Errored, Not Charged', isTokenBasedCall: false, chargedCents: null, tokenUsage: { inputTokens: 0, totalCents: 0 } },
+  ];
+  const rawEvents = raws.map(api.toRawEvent);
+  const normalized = rawEvents.map((r) => normalize(r, pricing));
+
+  const panelWhatIf = summarize(normalized).totalCost;
+  assert.ok(
+    Math.abs(panelWhatIf - service.sumTokenCostDollars(rawEvents)) < 1e-9,
+    `what-if drifted: panel ${panelWhatIf} vs status bar ${service.sumTokenCostDollars(rawEvents)}`,
+  );
+
+  const panelBilled = normalized.reduce((s, e) => s + (e.billedCost ?? 0), 0);
+  assert.ok(
+    Math.abs(panelBilled - service.sumBilledCostDollars(rawEvents)) < 1e-9,
+    `billed drifted: panel ${panelBilled} vs status bar ${service.sumBilledCostDollars(rawEvents)}`,
+  );
+
+  assert.equal(summarize(normalized).count, service.countRequests(rawEvents));
+});
+
+test('eventKindTotals splits the window the way cursor.com reports it', () => {
+  const events = [
+    api.toRawEvent({ id: 1, kind: 'Included in Business', tokenUsage: { totalCents: 500 } }),
+    api.toRawEvent({ id: 2, kind: 'Included in Business', tokenUsage: { totalCents: 300 } }),
+    api.toRawEvent({ id: 3, kind: 'Usage-based', chargedCents: 40, tokenUsage: { totalCents: 100 } }),
+  ];
+  const totals = service.eventKindTotals(events);
+  assert.deepEqual(totals.map((t) => [t.kind, t.count]), [
+    ['Included in Business', 2],
+    ['Usage-based', 1],
+  ]);
+  assert.ok(Math.abs(totals[0].tokenCostDollars - 8.0) < 1e-9);
+  assert.equal(totals[0].chargedDollars, 0);
+  assert.ok(Math.abs(totals[1].tokenCostDollars - 1.0) < 1e-9);
+  assert.ok(Math.abs(totals[1].chargedDollars - 0.4) < 1e-9);
+});
+
+console.log('api.fetchDashboardUsage pagination');
+
+/** Stubs global fetch with canned page bodies, restoring the original after. */
+async function withFetchPages(pages, fn) {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body.page);
+    const payload = pages(body.page);
+    return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+  };
+  try {
+    return await fn(calls);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+const fakeSession = { cookieValue: 'cookie', userId: 'u1' };
+
+// Awaited one at a time: these swap the global fetch, so overlapping runs
+// would see each other's stub.
+await test('walks pages and returns every distinct event', async () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `e${i}`, timestamp: 1_780_000_000_000 }));
+  const page2 = Array.from({ length: 22 }, (_, i) => ({ id: `e${100 + i}`, timestamp: 1_780_000_000_000 }));
+  await withFetchPages(
+    (page) => ({
+      usageEventsDisplay: page === 1 ? page1 : page === 2 ? page2 : [],
+      totalUsageEventsCount: 122,
+    }),
+    async () => {
+      const events = await api.fetchDashboardUsage(fakeSession, 0, Date.now());
+      assert.equal(events.length, 122);
+      assert.equal(new Set(events.map((e) => e.id)).size, 122);
+    },
+  );
+});
+
+await test('an endpoint that ignores the page parameter cannot double-count', async () => {
+  // Same first page every time: without the guard this appends 100 duplicate
+  // events and every total, average and chart inflates by a full page.
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `e${i}`, timestamp: 1_780_000_000_000 }));
+  await withFetchPages(
+    () => ({ usageEventsDisplay: page1, totalUsageEventsCount: 500 }),
+    async (calls) => {
+      const events = await api.fetchDashboardUsage(fakeSession, 0, Date.now());
+      assert.equal(events.length, 100);
+      assert.ok(calls.length <= 2, `stopped after ${calls.length} pages instead of looping`);
+    },
+  );
+});
+
+await test('rows with no server id are kept even when they look alike', async () => {
+  // Synthesized ids (timestamp+model) can collide between concurrent requests —
+  // those are real, distinct usage and must not be deduplicated away.
+  const batch = [
+    { timestamp: 1_780_000_000_000, model: 'auto' },
+    { timestamp: 1_780_000_000_000, model: 'auto' },
+  ];
+  await withFetchPages(
+    (page) => ({ usageEventsDisplay: page === 1 ? batch : [], totalUsageEventsCount: 2 }),
+    async () => {
+      const events = await api.fetchDashboardUsage(fakeSession, 0, Date.now());
+      assert.equal(events.length, 2);
+    },
+  );
 });
 
 console.log('api.parseQuotaResponse');

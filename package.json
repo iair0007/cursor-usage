@@ -2,7 +2,7 @@
   "name": "cursor-usage-dashboard",
   "displayName": "Cursor Usage Dashboard",
   "description": "Track your remaining Cursor requests and spend: status bar quota gauge, cost dashboard, cache savings, model breakdown, cost simulator.",
-  "version": "0.4.9",
+  "version": "0.5.0",
   "publisher": "iair0007",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -77,6 +77,19 @@
       }
     ],
     "configuration": [
+      {
+        "title": "Budget",
+        "order": 0,
+        "properties": {
+          "cursorUsage.budget.monthlyDollars": {
+            "type": "number",
+            "default": 0,
+            "minimum": 0,
+            "order": 1,
+            "markdownDescription": "Monthly spend budget in dollars, for the burn-rate projection on budget-metered plans (the figure cursor.com shows as `$X / $Y` on its usage page). Cursor doesn't expose this through the APIs this extension can read, so set it here. Change it whenever your budget changes — the projection always re-derives from the current value and your actual spend, mid-cycle changes included. Leave at 0 to fall back to your usage-based spend cap, if you have one, or to hide the projection."
+          }
+        }
+      },
       {
         "title": "Status Bar",
         "order": 1,

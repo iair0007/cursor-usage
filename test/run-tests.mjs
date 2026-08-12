@@ -473,6 +473,123 @@ test('free plan forces 0 regardless of chargedCents', () => {
   assert.equal(service.sumBilledCostDollars(events, { membershipType: 'pro' }), 5.0);
 });
 
+console.log('projectBudgetRunway (burn rate for budget-metered plans)');
+const cycleStart = Date.UTC(2026, 7, 9);
+const cycleEnd = Date.UTC(2026, 8, 9);
+const now = Date.UTC(2026, 7, 12); // 3 days into a 31-day cycle
+
+test('projects days of runway from the pace so far', () => {
+  const r = service.projectBudgetRunway({
+    spentDollars: 10.84, budgetDollars: 120, cycleStartMs: cycleStart, cycleEndMs: cycleEnd, nowMs: now,
+  });
+  assert.ok(Math.abs(r.dailySpend - 10.84 / 3) < 1e-9);
+  assert.ok(Math.abs(r.remainingDollars - 109.16) < 1e-9);
+  assert.ok(Math.abs(r.percentUsed - 9.033) < 0.01);
+  assert.ok(Math.abs(r.daysToExhaustion - 109.16 / (10.84 / 3)) < 1e-9);
+  assert.equal(r.overBudget, false);
+  // 30.2 days of runway against 28 days left — finishes the cycle in budget.
+  assert.equal(r.exhaustsBeforeReset, false);
+  assert.ok(Math.abs(r.safeDailySpend - 109.16 / 28) < 1e-9);
+});
+
+test('flags a budget that runs out before the cycle resets', () => {
+  const r = service.projectBudgetRunway({
+    spentDollars: 60, budgetDollars: 120, cycleStartMs: cycleStart, cycleEndMs: cycleEnd, nowMs: now,
+  });
+  assert.equal(r.dailySpend, 20);
+  assert.equal(r.daysToExhaustion, 3);
+  assert.equal(r.exhaustsBeforeReset, true);
+  assert.equal(r.exhaustionDate.getTime(), now + 3 * 24 * 60 * 60 * 1000);
+  assert.ok(r.safeDailySpend < r.dailySpend, 'staying in budget requires slowing down');
+});
+
+test('raising the budget mid-cycle extends the runway from the same spend', () => {
+  const args = { spentDollars: 60, cycleStartMs: cycleStart, cycleEndMs: cycleEnd, nowMs: now };
+  const before = service.projectBudgetRunway({ ...args, budgetDollars: 120 });
+  const after = service.projectBudgetRunway({ ...args, budgetDollars: 240 });
+  assert.equal(after.dailySpend, before.dailySpend, 'pace is a fact about spending, not the budget');
+  assert.equal(after.daysToExhaustion, 9);
+  assert.equal(before.exhaustsBeforeReset, true);
+  assert.equal(after.exhaustsBeforeReset, true);
+  assert.ok(after.safeDailySpend > before.safeDailySpend);
+});
+
+test('cutting the budget below what is already spent reports over budget', () => {
+  const r = service.projectBudgetRunway({
+    spentDollars: 60, budgetDollars: 40, cycleStartMs: cycleStart, cycleEndMs: cycleEnd, nowMs: now,
+  });
+  assert.equal(r.overBudget, true);
+  assert.equal(r.remainingDollars, -20);
+  assert.equal(r.daysToExhaustion, 0, 'already exhausted, not negative days');
+  assert.equal(r.exhaustionDate.getTime(), now);
+  assert.equal(r.safeDailySpend, null, 'no daily spend keeps you inside a budget already passed');
+  assert.ok(r.percentUsed > 100, 'percent is not clamped — callers need the real overrun');
+});
+
+test('too early in the cycle to project a pace', () => {
+  // Two hours in, one big request would project the budget gone by lunchtime.
+  const r = service.projectBudgetRunway({
+    spentDollars: 5, budgetDollars: 120, cycleStartMs: cycleStart, cycleEndMs: cycleEnd,
+    nowMs: cycleStart + 2 * 60 * 60 * 1000,
+  });
+  assert.equal(r.dailySpend, null);
+  assert.equal(r.daysToExhaustion, null);
+  assert.equal(r.exhaustionDate, null);
+  assert.equal(r.exhaustsBeforeReset, null);
+  assert.equal(r.remainingDollars, 115, 'the balance is still reported');
+  assert.ok(r.safeDailySpend > 0, 'and so is a safe daily rate');
+});
+
+test('no budget, no projection', () => {
+  const base = { spentDollars: 10, cycleStartMs: cycleStart, cycleEndMs: cycleEnd, nowMs: now };
+  assert.equal(service.projectBudgetRunway({ ...base, budgetDollars: null }), null);
+  assert.equal(service.projectBudgetRunway({ ...base, budgetDollars: 0 }), null);
+  assert.equal(service.projectBudgetRunway({ ...base, budgetDollars: undefined }), null);
+});
+
+test('zero spend so far leaves the runway open rather than infinite', () => {
+  const r = service.projectBudgetRunway({
+    spentDollars: 0, budgetDollars: 120, cycleStartMs: cycleStart, cycleEndMs: cycleEnd, nowMs: now,
+  });
+  assert.equal(r.dailySpend, null, 'no pace to extrapolate from');
+  assert.equal(r.daysToExhaustion, null);
+  assert.ok(Math.abs(r.safeDailySpend - 120 / 28) < 1e-9);
+});
+
+test('an explicit pace overrides the cycle average', () => {
+  // Lets a caller swap in a trailing rate without touching this math.
+  const r = service.projectBudgetRunway({
+    spentDollars: 60, budgetDollars: 120, cycleStartMs: cycleStart, cycleEndMs: cycleEnd, nowMs: now,
+    dailySpendOverride: 6,
+  });
+  assert.equal(r.dailySpend, 6);
+  assert.equal(r.daysToExhaustion, 10);
+});
+
+test('budget spend counts metered requests only', () => {
+  // Requests priced by the old per-request plan never drew on a dollar budget,
+  // so they must not burn one down.
+  const events = [
+    api.toRawEvent({ id: 'm', isTokenBasedCall: true, chargedCents: 261, tokenUsage: { totalCents: 261 } }),
+    api.toRawEvent({ id: 'l', isTokenBasedCall: false, chargedCents: 4, tokenUsage: { totalCents: 364 } }),
+  ];
+  assert.ok(Math.abs(service.sumPlanMeteredDollars(events) - 2.61) < 1e-9);
+  assert.ok(Math.abs(service.sumTokenCostDollars(events) - (2.61 + 3.64)) < 1e-9);
+});
+
+test('panel and status bar classify billing regimes identically', () => {
+  const raws = [
+    { id: 'm', isTokenBasedCall: true, chargedCents: 261, tokenUsage: { totalCents: 261 } },
+    { id: 'l', isTokenBasedCall: false, chargedCents: 4, tokenUsage: { totalCents: 364 } },
+    { id: 'u', isTokenBasedCall: false, chargedCents: null, tokenUsage: { totalCents: 100 } },
+  ].map(api.toRawEvent);
+  for (const raw of raws) {
+    const e = normalize(raw, pricing);
+    assert.equal(e.billingRegime, service.eventBillingRegime(raw), `regime for ${raw.id}`);
+    assert.equal(e.planMeteredCost, service.planMeteredDollars(raw), `metered cost for ${raw.id}`);
+  }
+});
+
 console.log('service.eventsWithinRange (window enforced for panel + status bar)');
 test('eventTimestampMs normalizes seconds, ms, strings, and junk', () => {
   const ms = Date.UTC(2026, 7, 12, 9, 0, 0);

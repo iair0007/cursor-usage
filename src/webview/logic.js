@@ -6,24 +6,32 @@
 import {
   billedCostForEvent,
   countRequests,
+  eventBillingRegime,
   eventTimestampMs,
   isCountedRequest,
+  planMeteredDollars,
+  projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
   statusBarText,
   sumBilledCostDollars,
+  sumPlanMeteredDollars,
   sumTokenCostDollars,
 } from '../shared/usageLogic.ts';
 
 export {
   billedCostForEvent,
   countRequests,
+  eventBillingRegime,
   eventTimestampMs,
   isCountedRequest,
+  planMeteredDollars,
+  projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
   statusBarText,
   sumBilledCostDollars,
+  sumPlanMeteredDollars,
   sumTokenCostDollars,
 };
 
@@ -229,20 +237,11 @@ export function normalize(raw, pricing, opts = {}) {
   // as opposed to `cost` which is the API-equivalent value of the tokens.
   const billedCost = billedCostForEvent(raw.kind, chargedCents, opts.freePlan);
 
-  // Which billing system priced this request. A range that spans a plan change
-  // holds both, and they are not addable: cursor.com's spend view meters
-  // token-priced requests in dollars, while request-priced ones consumed a
-  // request allowance and cost a flat fee instead.
-  let billingRegime;
-  if (isTokenBased) billingRegime = 'token';
-  else if (requestCharge != null) billingRegime = 'usage';
-  else billingRegime = 'unknown';
-
-  // What cursor.com's usage page meters for this request (its "Total usage"),
-  // or null for requests priced by the older per-request plan, which that page
-  // does not count. Deliberately derived from the regime rather than the kind:
-  // "Included" usage is still metered against the plan's monthly allowance.
-  const planMeteredCost = billingRegime === 'usage' ? null : (cost ?? tokenCost);
+  // Which billing system priced this request, and what cursor.com meters for
+  // it. Both come from the shared module so the panel and the status bar's
+  // budget projection classify an event identically.
+  const billingRegime = eventBillingRegime(raw);
+  const planMeteredCost = planMeteredDollars(raw);
 
   const ts = eventTimestampMs(raw.timestamp);
 

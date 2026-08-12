@@ -22,8 +22,11 @@ import {
   eventKindTotals,
   eventTimestampSpan,
   eventsWithinRange,
+  projectBudgetRunway,
   rollingDayWindow,
+  sumPlanMeteredDollars,
   sumTokenCostDollars,
+  type BudgetRunway,
   type StatusBarPeriodMode,
 } from './shared/usageLogic';
 
@@ -31,7 +34,12 @@ export {
   billingCycleWindow,
   clampPeriodDays,
   countRequests,
+  eventBillingRegime,
+  eventCostDollars,
   eventKindTotals,
+  planMeteredDollars,
+  projectBudgetRunway,
+  sumPlanMeteredDollars,
   eventTimestampMs,
   eventTimestampSpan,
   eventsWithinRange,
@@ -47,6 +55,16 @@ export {
   sumTokenCostDollars,
 } from './shared/usageLogic';
 export type { StatusBarFillStyle, StatusBarPeriodMode, StatusBarQuotaFormat } from './shared/usageLogic';
+
+export interface BudgetStatus {
+  budgetDollars: number | null;
+  /** Where the budget came from — the panel says so rather than implying Cursor reported it. */
+  source: 'setting' | 'hardLimit' | 'none';
+  spentDollars: number;
+  cycleStartMs: number;
+  cycleEndMs: number;
+  runway: BudgetRunway | null;
+}
 
 export interface UsageResult {
   events: RawUsageEvent[];
@@ -269,6 +287,56 @@ export class UsageService {
     }
 
     return { events: [], authMode: 'none' };
+  }
+
+  /**
+   * Spend against the monthly budget for the current cycle, with a burn-rate
+   * projection. Reports the same money cursor.com's usage page shows as
+   * "Total usage", so the two can be compared directly.
+   *
+   * The budget comes in per call rather than being stored: users raise or cut
+   * it mid-cycle, and a figure captured at cycle start would quietly project
+   * the wrong runway. cursor.com does not expose the budget through any
+   * endpoint this extension can read, so the caller's setting is the primary
+   * source and the usage-based spend cap is the fallback.
+   *
+   * (The value is passed in, not read from the workspace configuration here,
+   * so this module stays free of the VS Code runtime and remains unit-testable
+   * outside the extension host.)
+   */
+  async getBudgetStatus(configuredBudgetDollars = 0): Promise<BudgetStatus | null> {
+    const configured = configuredBudgetDollars > 0 ? configuredBudgetDollars : 0;
+
+    const usage = await this.getStatusBarUsage({ mode: 'cycle', periodDays: 30 });
+    if (usage.authMode === 'none') return null;
+
+    const budgetDollars = configured > 0 ? configured : (usage.hardLimit ?? null);
+    const source: BudgetStatus['source'] = configured > 0
+      ? 'setting'
+      : (usage.hardLimit ? 'hardLimit' : 'none');
+
+    const { start, end } = billingCycleWindow(usage.quota ?? undefined);
+    // Metered spend only: requests priced by the older per-request plan never
+    // counted against a dollar budget, so folding them in would show a budget
+    // burning down that cursor.com considers untouched.
+    const spentDollars = sumPlanMeteredDollars(usage.events);
+    // The cycle ends when the quota resets; fall back to the window's end so a
+    // missing reset date costs the "before reset?" verdict, not the projection.
+    const resetMs = usage.quota?.resetIso ? new Date(usage.quota.resetIso).getTime() : NaN;
+    const cycleEndMs = Number.isNaN(resetMs) ? end : resetMs;
+
+    const runway = projectBudgetRunway({
+      spentDollars,
+      budgetDollars,
+      cycleStartMs: start,
+      cycleEndMs,
+    });
+    this.log(
+      `Budget: ${budgetDollars != null ? `$${budgetDollars}` : 'not set'} (${source}) · spent $${spentDollars.toFixed(2)} this cycle`
+      + (runway?.dailySpend != null ? ` · $${runway.dailySpend.toFixed(2)}/day` : ''),
+    );
+
+    return { budgetDollars, source, spentDollars, cycleStartMs: start, cycleEndMs, runway };
   }
 
   /** Pricing markdown, cached for an hour (it changes rarely). */

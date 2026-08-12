@@ -192,22 +192,58 @@ export function countRequests(events: UsageEventLike[]): number {
 }
 
 /**
- * What-if event cost sum; mirrors normalize() priority: token-based plans bill
- * chargedCents, otherwise model token cost (tokenUsage.totalCents +
- * cursorTokenFee), otherwise chargedCents. API-equivalent value, not billed.
+ * One event's cost in dollars; mirrors normalize() priority: token-based plans
+ * bill chargedCents, otherwise model token cost (tokenUsage.totalCents +
+ * cursorTokenFee), otherwise chargedCents. Null when the row carries no cost.
+ */
+export function eventCostDollars(e: UsageEventLike): number | null {
+  const modelCents =
+    e.tokenUsage?.totalCents != null
+      ? e.tokenUsage.totalCents + (e.cursorTokenFee ?? 0)
+      : null;
+  if (e.isTokenBasedCall && e.chargedCents != null) return e.chargedCents / 100;
+  if (modelCents != null) return modelCents / 100;
+  if (e.chargedCents != null) return e.chargedCents / 100;
+  return null;
+}
+
+/**
+ * What-if cost sum: the API-equivalent value of the tokens, not what was billed.
  */
 export function sumTokenCostDollars(events: UsageEventLike[]): number {
-  let cents = 0;
-  for (const e of events) {
-    const modelCents =
-      e.tokenUsage?.totalCents != null
-        ? e.tokenUsage.totalCents + (e.cursorTokenFee ?? 0)
-        : null;
-    if (e.isTokenBasedCall && e.chargedCents != null) cents += e.chargedCents;
-    else if (modelCents != null) cents += modelCents;
-    else if (e.chargedCents != null) cents += e.chargedCents;
-  }
-  return cents / 100;
+  let total = 0;
+  for (const e of events) total += eventCostDollars(e) ?? 0;
+  return total;
+}
+
+export type BillingRegime = 'token' | 'usage' | 'unknown';
+
+/**
+ * Which billing system priced a request. A flat per-request charge on a
+ * non-token-based call is the marker of the older request-priced plan; ranges
+ * that span a plan change hold both, and their dollars are not addable.
+ */
+export function eventBillingRegime(e: UsageEventLike): BillingRegime {
+  if (e.isTokenBasedCall) return 'token';
+  if (e.chargedCents != null) return 'usage';
+  return 'unknown';
+}
+
+/**
+ * What cursor.com's usage page meters for a request — the dollars that count
+ * against a plan's monthly budget — or null for request-priced rows, which
+ * consumed a request allowance instead and are absent from that page's spend.
+ * Deliberately independent of `kind`: "Included" usage is still metered.
+ */
+export function planMeteredDollars(e: UsageEventLike): number | null {
+  return eventBillingRegime(e) === 'usage' ? null : eventCostDollars(e);
+}
+
+/** Metered spend across events — comparable to cursor.com's "Total usage". */
+export function sumPlanMeteredDollars(events: UsageEventLike[]): number {
+  let total = 0;
+  for (const e of events) total += planMeteredDollars(e) ?? 0;
+  return total;
 }
 
 /** Per-event billed cost in dollars (normalize().billedCost rule). */
@@ -378,6 +414,100 @@ export function statusBarText(opts: {
 export function quotaPercentUsed(quota: QuotaLike | null | undefined): number | null {
   if (quota?.limit == null || quota.limit <= 0) return null;
   return (quota.used / quota.limit) * 100;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export interface BudgetRunway {
+  budgetDollars: number;
+  spentDollars: number;
+  /** Negative once spend has passed the budget — callers decide how to show it. */
+  remainingDollars: number;
+  overBudget: boolean;
+  percentUsed: number;
+  /** Observed pace so far this cycle; null until enough of the cycle has elapsed. */
+  dailySpend: number | null;
+  daysToExhaustion: number | null;
+  exhaustionDate: Date | null;
+  daysUntilReset: number | null;
+  /** True when the budget runs out before the cycle resets — the case worth warning about. */
+  exhaustsBeforeReset: boolean | null;
+  /** Spend per day from now that still lands exactly on the budget at reset. */
+  safeDailySpend: number | null;
+}
+
+/**
+ * Budget-plan equivalent of projectExhaustionDate: how long the money lasts at
+ * the current pace, and what daily spend fits the rest of the cycle.
+ *
+ * Every figure is derived from the budget and spend passed in on this call, and
+ * nothing is carried between calls. That is what makes a budget that changes
+ * mid-cycle correct without special handling: raise it and the runway simply
+ * grows from the same recorded spend; cut it — even below what's already
+ * spent — and the result reports over-budget rather than a negative runway.
+ * Callers must therefore pass the budget as it stands now, never a value
+ * captured when the cycle began.
+ *
+ * The pace is the cycle's average (spend ÷ elapsed), matching how the
+ * request-quota projection works; a caller with a better estimate can pass
+ * `dailySpendOverride` (e.g. a trailing 7-day rate) without changing this math.
+ */
+export function projectBudgetRunway(opts: {
+  spentDollars: number;
+  budgetDollars: number | null | undefined;
+  cycleStartMs: number;
+  /** Cycle reset time; enables the "before reset?" verdict and safe daily spend. */
+  cycleEndMs?: number | null;
+  nowMs?: number;
+  dailySpendOverride?: number | null;
+}): BudgetRunway | null {
+  const { spentDollars, budgetDollars, cycleStartMs, cycleEndMs, dailySpendOverride } = opts;
+  const nowMs = opts.nowMs ?? Date.now();
+  if (budgetDollars == null || !(budgetDollars > 0)) return null;
+  if (!Number.isFinite(cycleStartMs) || cycleStartMs > nowMs) return null;
+
+  const spent = Math.max(0, spentDollars);
+  const remainingDollars = budgetDollars - spent;
+  const overBudget = remainingDollars <= 0;
+  const percentUsed = (spent / budgetDollars) * 100;
+
+  const elapsedDays = (nowMs - cycleStartMs) / DAY_MS;
+  // Under half a day in, spend ÷ elapsed swings wildly — one big request would
+  // project a budget gone in hours. Report no pace rather than a scary guess.
+  let dailySpend = dailySpendOverride ?? (elapsedDays >= 0.5 ? spent / elapsedDays : null);
+  if (dailySpend != null && !(dailySpend > 0)) dailySpend = null;
+
+  const daysUntilReset = cycleEndMs != null && cycleEndMs > nowMs
+    ? (cycleEndMs - nowMs) / DAY_MS
+    : null;
+
+  let daysToExhaustion: number | null = null;
+  let exhaustionDate: Date | null = null;
+  if (overBudget) {
+    daysToExhaustion = 0;
+    exhaustionDate = new Date(nowMs);
+  } else if (dailySpend != null) {
+    daysToExhaustion = remainingDollars / dailySpend;
+    exhaustionDate = new Date(nowMs + daysToExhaustion * DAY_MS);
+  }
+
+  return {
+    budgetDollars,
+    spentDollars: spent,
+    remainingDollars,
+    overBudget,
+    percentUsed,
+    dailySpend,
+    daysToExhaustion,
+    exhaustionDate,
+    daysUntilReset,
+    exhaustsBeforeReset: daysToExhaustion != null && daysUntilReset != null
+      ? daysToExhaustion < daysUntilReset
+      : null,
+    safeDailySpend: daysUntilReset != null && daysUntilReset > 0 && !overBudget
+      ? remainingDollars / daysUntilReset
+      : null,
+  };
 }
 
 /**

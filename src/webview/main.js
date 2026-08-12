@@ -124,6 +124,7 @@ const state = {
   datePreset: '30d',
   costMode: 'value', // 'value' (what-if API-equivalent) | 'billed' (actual charges)
   plan: null,
+  budget: null,
   trend: { key: null, previous: null },
   analyzeThresholds: { ...ANALYZE_THRESHOLD_DEFAULTS },
 };
@@ -276,6 +277,8 @@ function renderPlanCycle(quota, hardLimit) {
     }
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
     noteEl.textContent = notes.join(' ');
+  } else if (budgetRunwayState()) {
+    renderBudgetCycle(card, budgetRunwayState(), barRow, ring, noteEl, hardLimit);
   } else if (hasMeaningfulCountOnly) {
     barRow.classList.add('hidden');
     ring.classList.add('hidden');
@@ -295,6 +298,64 @@ function renderPlanCycle(quota, hardLimit) {
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
     noteEl.textContent = notes.join(' ');
   }
+}
+
+/** The budget projection, or null when no budget is known (nothing to project against). */
+function budgetRunwayState() {
+  return state.budget?.runway ?? null;
+}
+
+function formatDays(days) {
+  if (days < 1) return 'less than a day';
+  const whole = Math.round(days);
+  return `${whole} day${whole === 1 ? '' : 's'}`;
+}
+
+/**
+ * Budget-plan counterpart of the request-quota gauge: how much of the monthly
+ * budget is gone, how long it lasts at the current pace, and what daily spend
+ * still fits the cycle. Phrased around the reset date, because a budget that
+ * refills is a pacing problem, not a countdown to zero.
+ */
+function renderBudgetCycle(card, runway, barRow, ring, noteEl, hardLimit) {
+  const pctVisual = Math.min(100, Math.max(0, runway.percentUsed));
+  barRow.classList.remove('hidden');
+  ring.classList.remove('hidden');
+  $('planCycleBarFill').style.width = `${pctVisual}%`;
+  $('planCycleRingFill').style.strokeDashoffset = `${RING_CIRCUMFERENCE * (1 - pctVisual / 100)}`;
+  $('planCycleBarLabel').textContent = runway.overBudget
+    ? `${fmt.money(runway.spentDollars)} / ${fmt.money(runway.budgetDollars)} · over budget (${fmt.pct(runway.percentUsed)})`
+    : `${fmt.money(runway.spentDollars)} / ${fmt.money(runway.budgetDollars)} (${fmt.pct(runway.percentUsed)})`;
+
+  if (runway.overBudget || runway.percentUsed >= PLAN_CYCLE_CRITICAL_PCT) card.classList.add('plan-cycle-critical');
+  else if (runway.percentUsed >= PLAN_CYCLE_WARN_PCT) card.classList.add('plan-cycle-warning');
+
+  const notes = [];
+  if (runway.overBudget) {
+    notes.push(`You're ${fmt.money(-runway.remainingDollars)} over this cycle's budget.`);
+  } else if (runway.dailySpend == null) {
+    notes.push(`${fmt.money(runway.remainingDollars)} left this cycle — too early in the cycle to project a pace.`);
+  } else {
+    const pace = `At ${fmt.money(runway.dailySpend)}/day`;
+    if (runway.exhaustsBeforeReset === true) {
+      notes.push(`${pace}, the ${fmt.money(runway.budgetDollars)} budget runs out in ${formatDays(runway.daysToExhaustion)}`
+        + ` — ${formatDays(runway.daysUntilReset - runway.daysToExhaustion)} before the cycle resets.`);
+    } else if (runway.exhaustsBeforeReset === false) {
+      notes.push(`${pace}, you'll finish the cycle inside budget with about ${fmt.money(runway.remainingDollars - runway.dailySpend * runway.daysUntilReset)} to spare.`);
+    } else {
+      notes.push(`${pace}, ${fmt.money(runway.remainingDollars)} lasts about ${formatDays(runway.daysToExhaustion)}.`);
+    }
+    if (runway.safeDailySpend != null) {
+      notes.push(`Up to ${fmt.money(runway.safeDailySpend)}/day keeps you within it until the reset.`);
+    }
+  }
+  if (state.budget?.source === 'setting') {
+    notes.push('Budget from your settings (cursorUsage.budget.monthlyDollars).');
+  } else if (state.budget?.source === 'hardLimit') {
+    notes.push('Budget from your usage-based spend cap.');
+  }
+  if (hardLimit && state.budget?.source !== 'hardLimit') notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
+  noteEl.textContent = notes.join(' ');
 }
 
 /** Events re-mapped so `cost` reflects the active cost mode. */
@@ -1206,10 +1267,15 @@ async function load() {
   $('overviewView').classList.add('hidden');
 
   try {
-    const [usage, pricingData] = await Promise.all([
+    const [usage, pricingData, budget] = await Promise.all([
       rpc('usage', { startDate: start, endDate: end }),
       rpc('pricing').catch(() => ({ markdown: '' })),
+      // Budget spend is always the current cycle, never the selected range —
+      // a projection built from "Today" would be meaningless. Non-fatal: the
+      // rest of the dashboard works without it.
+      rpc('budget').catch(() => null),
     ]);
+    state.budget = budget;
 
     state.pricing = parsePricing(pricingData.markdown || '');
     state.plan = usage.plan || null;

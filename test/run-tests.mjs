@@ -801,6 +801,34 @@ await test('rows with no server id are kept even when they look alike', async ()
   );
 });
 
+console.log('api.computeResetIso (next quota reset from the cycle start)');
+test('adds one calendar month', () => {
+  const reset = new Date(api.computeResetIso('2026-03-05T00:00:00'));
+  assert.equal(reset.getMonth(), 3, 'March 5 resets in April');
+  assert.equal(reset.getDate(), 5);
+});
+test('a cycle starting on the 31st resets in the next month, not the one after', () => {
+  // setMonth(+1) on Jan 31 lands on Mar 3, which would put the reset date — and
+  // every "days until reset" figure built on it — a whole month out.
+  const reset = new Date(api.computeResetIso('2026-01-31T00:00:00'));
+  assert.equal(reset.getMonth(), 1, 'February, clamped to its last day');
+  assert.equal(reset.getDate(), 28);
+});
+test('clamping respects leap years', () => {
+  const reset = new Date(api.computeResetIso('2028-01-30T00:00:00'));
+  assert.equal(reset.getMonth(), 1);
+  assert.equal(reset.getDate(), 29);
+});
+test('December rolls into the next year', () => {
+  const reset = new Date(api.computeResetIso('2026-12-15T00:00:00'));
+  assert.equal(reset.getFullYear(), 2027);
+  assert.equal(reset.getMonth(), 0);
+});
+test('missing or malformed dates yield nothing rather than an invalid date', () => {
+  assert.equal(api.computeResetIso(undefined), undefined);
+  assert.equal(api.computeResetIso('not a date'), undefined);
+});
+
 console.log('api.extractBudgetDollars (works for individual and team accounts)');
 test('reads an individual hard limit', () => {
   const found = api.extractBudgetDollars({ hardLimit: 120 }, {}, 'get-hard-limit');

@@ -298,13 +298,25 @@ export interface PlanQuota {
   resetIso?: string;
 }
 
-/** startOfCycleIso -> resetIso (one calendar month later), tolerant of malformed dates. */
-function computeResetIso(startOfCycleIso: string | undefined): string | undefined {
+/**
+ * startOfCycleIso -> resetIso (one calendar month later), tolerant of malformed dates.
+ *
+ * The day is clamped to the target month's length before the month is advanced:
+ * `setMonth` on the 31st rolls into the month *after* the one asked for (Jan 31
+ * + 1 month = Mar 3), which would put the reset date — and the "days until
+ * reset" figures derived from it — a whole month out for anyone whose cycle
+ * starts on the 29th–31st.
+ */
+export function computeResetIso(startOfCycleIso: string | undefined): string | undefined {
   if (!startOfCycleIso) return undefined;
   const start = new Date(startOfCycleIso);
   if (Number.isNaN(start.getTime())) return undefined;
   const reset = new Date(start);
+  const day = reset.getDate();
+  reset.setDate(1);
   reset.setMonth(reset.getMonth() + 1);
+  const daysInTargetMonth = new Date(reset.getFullYear(), reset.getMonth() + 1, 0).getDate();
+  reset.setDate(Math.min(day, daysInTargetMonth));
   return reset.toISOString();
 }
 

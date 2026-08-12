@@ -177,6 +177,7 @@ export class UsageService {
 
     const promise = this.fetchUsage(startMs, endMs)
       .then((result) => {
+        this.pruneUsageCache();
         this.usageCache.set(key, { result, fetchedAt: Date.now() });
         this.usageInflight.delete(key);
         return result;
@@ -187,6 +188,18 @@ export class UsageService {
       });
     this.usageInflight.set(key, promise);
     return promise;
+  }
+
+  /**
+   * Drop entries past their TTL. Every distinct date range the user loads gets
+   * its own key, and a long-lived window (custom ranges, trend comparisons)
+   * would otherwise keep every response it ever fetched alive for the session.
+   */
+  private pruneUsageCache(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.usageCache) {
+      if (now - entry.fetchedAt >= USAGE_CACHE_TTL_MS) this.usageCache.delete(key);
+    }
   }
 
   private async usageCacheKey(startMs: number, endMs: number): Promise<string> {

@@ -132,6 +132,10 @@ const state = {
   planChangeAnnounced: false,
   trend: { key: null, previous: null },
   analyzeThresholds: { ...ANALYZE_THRESHOLD_DEFAULTS },
+  /** Severity of the banner currently shown, so view switches can keep the ones that still apply. */
+  alertType: null,
+  /** Note to fold into the next load's banner (see takePendingNotice). */
+  pendingNotice: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -150,8 +154,22 @@ const fmt = {
   },
 };
 
+/**
+ * HTML-escapes a value for interpolation into markup.
+ *
+ * Quotes are escaped too, not just the angle brackets: most uses here land
+ * inside an attribute (`data-id="…"`, `value="…"`, `title="…"`), and the model
+ * names, kinds and ids being interpolated come from cursor.com's API rather
+ * than from this extension — a value carrying a quote would otherwise close the
+ * attribute and let the rest of it be parsed as markup.
+ */
 function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 const STORAGE_KEY = 'cursorUsageDashboardPrefs';
@@ -336,9 +354,11 @@ function applyPlanChangeDiscovery() {
   const range = getRangeForPreset('plan');
   if (!range) return false;
   applyDateRange(range.start, range.end, 'plan');
-  showAlert('info', `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}. `
+  // Queued rather than shown: the reload below ends with its own banner, which
+  // would replace this one immediately.
+  state.pendingNotice = `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}. `
     + `Showing usage since then — the ${fmt.num(change.legacyRequestsBefore)} earlier request${change.legacyRequestsBefore === 1 ? '' : 's'} in the range you picked were priced per request, so their dollars aren't comparable. `
-    + 'Pick another period to include them.');
+    + 'Pick another period to include them.';
   void load();
   return true;
 }
@@ -407,12 +427,47 @@ function applyCostMode(events) {
   return events.map((e) => ({ ...e, cost: e.billedCost }));
 }
 
+/**
+ * What the `cost` field currently means, for headings and column labels.
+ *
+ * The Costs toggle re-points every cost figure at either the what-if token
+ * value or the amount actually billed, so a heading hard-coded to "Token cost"
+ * is a wrong label on half of the dashboard's states — the same mistake the
+ * KPI card already avoids by rewriting its own label.
+ */
+function costModeLabel() {
+  return state.costMode === 'billed' ? 'Billed cost' : 'Token cost';
+}
+
+function costModeNoun() {
+  return state.costMode === 'billed' ? 'billed cost' : 'token cost';
+}
+
+/** Re-labels the static headings that describe whatever `cost` currently is. */
+function applyCostModeLabels() {
+  const label = costModeLabel();
+  const billed = state.costMode === 'billed';
+  const set = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  set('colCostLabelText', label);
+  set('tableCostDesc', billed
+    ? 'What your plan actually charged per request (not the flat usage fee). Hover ⓘ on column headers for help.'
+    : 'Token cost per request (not the flat usage fee). Hover ⓘ on column headers for help.');
+  set('chartCostTitle', `Daily ${costModeNoun()}`);
+  set('chartCostDesc', billed
+    ? 'How billed spend changed day to day'
+    : 'How spend changed day to day · excludes flat usage fees');
+  set('chartModelsDesc', billed ? 'Top models by billed spend' : 'Top models by token/API spend');
+}
+
 function setCostMode(mode) {
   state.costMode = mode;
   storage.setItem(COST_MODE_KEY, mode);
   document.querySelectorAll('.cost-mode-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.costMode === mode);
+    const active = btn.dataset.costMode === mode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  applyCostModeLabels();
   state.page = 1;
   destroyCharts();
   refresh();
@@ -523,9 +578,16 @@ function initDateRange() {
     $('planPresetBtn')?.classList.remove('hidden');
   }
   if (prefs?.preset && prefs.preset !== 'custom') {
+    // A stored preset can no longer be resolvable — "Current plan" saved in an
+    // earlier session whose planChangeDay didn't come back, or a preset name
+    // this version dropped. Falling through to the saved dates (and then to the
+    // default) beats throwing out of init(), which would leave the dashboard
+    // rendered but with none of its controls wired up.
     const range = getRangeForPreset(prefs.preset);
-    applyDateRange(range.start, range.end, prefs.preset);
-    return;
+    if (range) {
+      applyDateRange(range.start, range.end, prefs.preset);
+      return;
+    }
   }
   if (prefs?.startDate && prefs?.endDate) {
     applyDateRange(prefs.startDate, prefs.endDate, 'custom');
@@ -562,11 +624,52 @@ function onDateInputChange() {
   load();
 }
 
+/**
+ * Shows the single banner under the toolbar, with a dismiss control.
+ *
+ * The type is remembered: an error or warning is a statement about the data
+ * currently on screen and stays put when the user switches views, while the
+ * "Loaded N requests" confirmation is only meaningful next to the request log.
+ */
 function showAlert(type, msg) {
   const el = $('alert');
+  state.alertType = type;
   el.className = `alert ${type}`;
-  el.textContent = msg;
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  el.innerHTML = '<span class="alert-msg"></span><button type="button" class="alert-close" aria-label="Dismiss message">✕</button>';
+  el.querySelector('.alert-msg').textContent = msg;
   el.classList.remove('hidden');
+}
+
+function hideAlert() {
+  state.alertType = null;
+  $('alert')?.classList.add('hidden');
+}
+
+/**
+ * A one-off note queued by an earlier step, to be shown with the next load's
+ * banner. The plan-change switch used to post its explanation and immediately
+ * trigger the reload that overwrote it, so the one message that explains why
+ * the range moved was on screen for a fraction of a second.
+ */
+function takePendingNotice() {
+  const notice = state.pendingNotice;
+  state.pendingNotice = null;
+  return notice ? `${notice} ` : '';
+}
+
+/** Toolbar/loading state for an in-flight fetch. */
+function setBusy(busy) {
+  document.body.classList.toggle('is-loading', busy);
+  document.body.setAttribute('aria-busy', busy ? 'true' : 'false');
+  $('loading')?.classList.toggle('hidden', !busy);
+  const refreshBtn = $('refreshBtn');
+  if (refreshBtn) {
+    refreshBtn.disabled = busy;
+    refreshBtn.textContent = busy ? 'Refreshing…' : 'Refresh';
+  }
+  const exportBtn = $('exportBtn');
+  if (exportBtn) exportBtn.disabled = busy;
 }
 
 function toMs(dateStr, endOfDay) {
@@ -701,7 +804,7 @@ function renderAnalyticsStats(events, summary, previousSummary) {
   const cachePct = totalTok > 0 ? (tokens.cacheRead / totalTok) * 100 : 0;
 
   el.innerHTML = `
-    <div class="analytics-stat"><span>Total token cost</span><strong>${fmt.money(summary.totalCost)}</strong><small>${fmt.num(summary.count)} requests</small>${trendBadge(summary.totalCost, previousSummary?.totalCost)}</div>
+    <div class="analytics-stat"><span>Total ${esc(costModeNoun())}</span><strong>${fmt.money(summary.totalCost)}</strong><small>${fmt.num(summary.count)} requests</small>${trendBadge(summary.totalCost, previousSummary?.totalCost)}</div>
     <div class="analytics-stat"><span>Avg / day</span><strong>${fmt.money(avgDaily)}</strong><small>${fmt.num(dayCount)} days</small></div>
     <div class="analytics-stat"><span>Top model</span><strong>${esc(topModel ? topModel[0] : '—')}</strong><small>${topModel ? fmt.money(topModel[1]) : '—'}</small></div>
     <div class="analytics-stat"><span>Cache read share</span><strong>${fmt.pct(cachePct)}</strong><small>${fmt.money(summary.totalSavings)} saved</small></div>`;
@@ -738,6 +841,17 @@ function currentTrendKey() {
 
 function renderCharts(events) {
   destroyCharts();
+
+  // Nothing to plot: say so instead of leaving four blank axes on screen, which
+  // reads as a rendering failure rather than an empty period.
+  const emptyNote = $('analyticsEmpty');
+  const hasData = events.length > 0;
+  emptyNote?.classList.toggle('hidden', hasData);
+  ['analyticsStats', 'analyticsChartMain', 'analyticsChartRow'].forEach((id) => {
+    $(id)?.classList.toggle('hidden', !hasData);
+  });
+  if (!hasData) return;
+
   const summary = summarize(events);
   const previousForThisView = state.trend.key === currentTrendKey() ? state.trend.previous : null;
   renderAnalyticsStats(events, summary, previousForThisView);
@@ -758,7 +872,7 @@ function renderCharts(events) {
     data: {
       labels: dayLabels,
       datasets: [{
-        label: 'Token cost',
+        label: costModeLabel(),
         data: days.map((d) => byDay[d]),
         borderColor: '#2563eb',
         backgroundColor: 'rgba(37,99,235,0.06)',
@@ -799,7 +913,7 @@ function renderCharts(events) {
     data: {
       labels: modelLabels,
       datasets: [{
-        label: 'Token cost',
+        label: costModeLabel(),
         data: modelCost.map(([, v]) => v),
         backgroundColor: modelCost.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]),
         borderRadius: 4,
@@ -913,7 +1027,19 @@ function tokenTotals(events) {
 // ---------------------------------------------------------------------------
 
 function tip(text) {
-  return `<span class="tip" tabindex="0" aria-label="Help" data-tip="${esc(text)}">ⓘ</span>`;
+  return `<span class="tip" tabindex="0" role="note" aria-label="${esc(text)}" data-tip="${esc(text)}">ⓘ</span>`;
+}
+
+/**
+ * Gives the markup's static ⓘ markers the same accessible name their help text
+ * already provides visually — without it a screen reader announces a focusable
+ * "ⓘ" with no content, since the text lives in a CSS-only tooltip.
+ */
+function decorateTips(root = document) {
+  root.querySelectorAll('.tip[data-tip]:not([aria-label])').forEach((el) => {
+    el.setAttribute('role', 'note');
+    el.setAttribute('aria-label', el.dataset.tip);
+  });
 }
 
 const KPI_PLACEHOLDER_IDS = ['kpiRequests', 'kpiTotalCost', 'kpiSavings', 'kpiAvg'];
@@ -1045,7 +1171,7 @@ function renderTable(events, summary) {
     ${feeCol}
     <td class="savings">${fmt.money(pageSavings)}</td>
     <td colspan="6" style="text-align:right;color:var(--muted)">
-      Grand total: ${fmt.num(summary.count)} requests${summary.notCounted > 0 ? ` (${fmt.num(summary.eventCount)} events)` : ''} · ${fmt.money(summary.totalCost)} token cost
+      Grand total: ${fmt.num(summary.count)} requests${summary.notCounted > 0 ? ` (${fmt.num(summary.eventCount)} events)` : ''} · ${fmt.money(summary.totalCost)} ${esc(costModeNoun())}
       ${summary.hasUsageFees ? ` · ${fmt.money(summary.totalRequestFees)} usage fees` : ''}
     </td>
   </tr>`;
@@ -1056,11 +1182,15 @@ function renderTable(events, summary) {
   $('prevPage').disabled = state.page <= 1;
   $('nextPage').disabled = state.page >= totalPages;
 
-  document.querySelectorAll('th[data-sort]').forEach((th) => {
+  // Scoped to this table — an unscoped selector also stripped the simulator
+  // compare table's sort indicator every time the request log re-rendered.
+  document.querySelectorAll('#requestsTable th[data-sort]').forEach((th) => {
     th.classList.remove('sorted-asc', 'sorted-desc');
-    if (th.dataset.sort === state.sortKey) {
+    const sorted = th.dataset.sort === state.sortKey;
+    if (sorted) {
       th.classList.add(state.sortDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
     }
+    th.setAttribute('aria-sort', sorted ? (state.sortDir === 'asc' ? 'ascending' : 'descending') : 'none');
   });
 }
 
@@ -1074,9 +1204,12 @@ function setPanel(panel) {
   $('panelRequests').classList.toggle('hidden', panel !== 'requests');
   $('panelAnalytics').classList.toggle('hidden', panel !== 'analytics');
 
-  if (panel === 'analytics' && state.filtered.length) {
+  // Rendered even with nothing loaded — renderCharts() puts up its own empty
+  // note, and skipping it here used to leave the previous range's charts (or a
+  // blank grid) on screen after switching tabs.
+  if (panel === 'analytics') {
     renderCharts(state.filtered);
-    void loadTrendComparison();
+    if (state.filtered.length) void loadTrendComparison();
   }
 }
 
@@ -1095,6 +1228,10 @@ async function loadTrendComparison() {
   const key = currentTrendKey();
   if (state.trend.key === key) return;
   state.trend.key = key;
+  // The baseline belongs to the range that was loaded before this one. Keeping
+  // it while the new one is in flight would compare this period against a
+  // different period's total and label it "vs prior period".
+  state.trend.previous = null;
 
   const startMs = toMs(startStr);
   const endMs = toMs(endStr, true);
@@ -1118,8 +1255,21 @@ async function loadTrendComparison() {
     renderAnalyticsStats(state.filtered, summarize(state.filtered), state.trend.previous);
   }
   if (state.appView === 'overview') {
-    $('ovCostSub').innerHTML = state.trend.previous ? trendBadge(summarize(state.filtered).totalCost, state.trend.previous.totalCost) : '';
+    // Rebuilt through the same helper renderOverview() uses: writing the badge
+    // on its own here dropped the plan-change reconciliation note that shares
+    // this line, so the explanation for a figure cursor.com prices differently
+    // vanished a second after it appeared.
+    $('ovCostSub').innerHTML = overviewCostSubHtml(summarize(state.filtered));
   }
+}
+
+/** The Overview cost card's sub-line: trend badge plus any plan-change note. */
+function overviewCostSubHtml(summary) {
+  const trend = state.trend.key === currentTrendKey() && state.trend.previous
+    ? trendBadge(summary.totalCost, state.trend.previous.totalCost)
+    : '';
+  const planChange = planChangeNote(summary, { short: true });
+  return planChange ? `${trend}<span class="ov-stat-note">${esc(planChange)}</span>` : trend;
 }
 
 function refresh() {
@@ -1264,15 +1414,9 @@ function renderOverview() {
 
   const freePlan = isFreePlan();
   const showWhatIfPrefix = state.costMode === 'value' && freePlan;
-  $('ovCostLabel').textContent = state.costMode === 'billed' ? 'Billed cost' : 'Token cost';
+  $('ovCostLabel').textContent = costModeLabel();
   $('ovCost').textContent = `${showWhatIfPrefix ? '~' : ''}${fmt.money(summary.totalCost)}`;
-  const trend = state.trend.key === currentTrendKey() && state.trend.previous
-    ? trendBadge(summary.totalCost, state.trend.previous.totalCost)
-    : '';
-  const planChange = planChangeNote(summary, { short: true });
-  $('ovCostSub').innerHTML = planChange
-    ? `${trend}<span class="ov-stat-note">${esc(planChange)}</span>`
-    : trend;
+  $('ovCostSub').innerHTML = overviewCostSubHtml(summary);
 
   $('ovRequests').textContent = fmt.num(summary.count);
   $('ovRequestsSub').textContent = summary.count
@@ -1280,7 +1424,13 @@ function renderOverview() {
     : 'No requests in this period';
 
   $('ovSavings').textContent = fmt.money(summary.totalSavings);
-  const savingsPct = summary.noCache > 0 ? (summary.totalSavings / summary.noCache) * 100 : null;
+  // Cache savings are always a what-if estimate (tokens × published rates), so
+  // the "share of cost without cache" they're compared against has to be the
+  // what-if baseline too. In Billed mode summary.noCache is built from billed
+  // dollars, which on a plan that bills nothing per request made this read
+  // "100% of cost without cache" — or vanish entirely at $0 billed.
+  const noCacheValue = events.reduce((s, e) => s + (e.valueCost ?? 0), 0) + summary.totalSavings;
+  const savingsPct = noCacheValue > 0 ? (summary.totalSavings / noCacheValue) * 100 : null;
   $('ovSavingsSub').textContent = savingsPct != null ? `${fmt.pct(savingsPct)} of est. cost without cache` : '';
 
   const rangeLabel = `${fmt.shortDate($('startDate').value)} – ${fmt.shortDate($('endDate').value)}`;
@@ -1312,6 +1462,17 @@ function renderOverview() {
 // Data loading
 // ---------------------------------------------------------------------------
 
+/**
+ * Sequence number of the most recently started load.
+ *
+ * Every load reads the date inputs when it starts and renders when it ends, so
+ * two in flight at once (a fast one started after a slow one — clicking Refresh
+ * twice, or editing both date fields) would render in completion order: the
+ * slow, older range would land last and sit under the toolbar showing the newer
+ * one. A load that is no longer the latest throws its result away instead.
+ */
+let loadSeq = 0;
+
 async function load() {
   const start = toMs($('startDate').value);
   const end = toMs($('endDate').value, true);
@@ -1324,10 +1485,9 @@ async function load() {
     return;
   }
 
+  const seq = ++loadSeq;
   updateFilterSummary();
-  $('loading').classList.remove('hidden');
-  $('usageView').classList.add('hidden');
-  $('overviewView').classList.add('hidden');
+  setBusy(true);
 
   try {
     const [usage, pricingData, budget] = await Promise.all([
@@ -1338,6 +1498,7 @@ async function load() {
       // rest of the dashboard works without it.
       rpc('budget').catch(() => null),
     ]);
+    if (seq !== loadSeq) return;
     state.budget = budget;
 
     state.pricing = parsePricing(pricingData.markdown || '');
@@ -1355,8 +1516,6 @@ async function load() {
     // before the new events are filtered.
     populateModelFilter(state.all);
     populateSimulatorModels();
-    if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
-    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
 
     // The request picker reads state.filtered, which only refresh() updates —
     // so it has to come after, or it lists the previous range's requests.
@@ -1369,13 +1528,13 @@ async function load() {
     };
 
     if (usage.authMode === 'none') {
-      showAlert('warn', 'Not signed in. Open Cursor while logged into your account, or run "Cursor Usage: Set Session Token Manually" from the command palette.');
+      showAlert('warn', `${takePendingNotice()}Not signed in. Open Cursor while logged into your account, or run "Cursor Usage: Set Session Token Manually" from the command palette.`);
       render();
       return;
     }
 
     if (!state.all.length) {
-      showAlert('warn', 'No usage events in this date range.');
+      showAlert('warn', `${takePendingNotice()}No usage events in this date range.`);
       render();
       return;
     }
@@ -1388,39 +1547,57 @@ async function load() {
       ? ' Using bundled fallback pricing (couldn\'t reach cursor.com\'s pricing page) — cost estimates may be slightly out of date.'
       : '';
     const countedAll = state.all.filter((e) => e.counted !== false).length;
+    const plural = (n, word) => `${fmt.num(n)} ${word}${n === 1 ? '' : 's'}`;
     const loadedLabel = countedAll < state.all.length
-      ? `Loaded ${countedAll} requests (${state.all.length} events incl. errored/aborted)`
-      : `Loaded ${state.all.length} requests`;
-    showAlert('info', `${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${fallbackNote}`);
+      ? `Loaded ${plural(countedAll, 'request')} (${plural(state.all.length, 'event')} incl. errored/aborted)`
+      : `Loaded ${plural(state.all.length, 'request')}`;
+    showAlert('info', `${takePendingNotice()}${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${fallbackNote}`);
     // refresh() already re-renders the overview and analyze views.
     render();
     if (state.appView === 'simulator') refreshSimulator();
   } catch (err) {
+    if (seq !== loadSeq) return;
     // Drop whatever was loaded before: it belongs to a different (older)
     // query, and leaving it on screen under the new filter reads as if the
     // numbers were for the range now shown in the toolbar.
     state.all = [];
     state.loaded = false;
     destroyCharts();
-    if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
-    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
     refresh();
     populateSimRequestPicker(null);
     showAlert('error', err.authError
       ? `${err.message} — your Cursor session may have expired. Re-open Cursor logged in, or run "Cursor Usage: Set Session Token Manually".`
       : err.message);
   } finally {
-    $('loading').classList.add('hidden');
+    // A superseded load must not clear the busy state: the load that replaced
+    // it is still running, and its own finally will do this.
+    if (seq === loadSeq) setBusy(false);
   }
 }
 
+/**
+ * RFC 4180 field: quote anything containing a delimiter, quote or newline, and
+ * double any embedded quotes. Model names and kinds come from cursor.com, so a
+ * value with a comma in it would otherwise shift every later column of that row.
+ */
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 function exportCsv() {
+  if (!state.filtered.length) {
+    showAlert('warn', 'Nothing to export — no requests in the current filter.');
+    return;
+  }
   // meteredCost/billingRegime are appended, not inserted: existing columns keep
   // their positions for anything already parsing this file. They're what makes
   // a row-by-row reconciliation against cursor.com's usage export possible.
   const headers = ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost', 'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'meteredCost', 'billingRegime'];
   const rows = state.filtered.map((e) => [
-    new Date(e.timestampMs).toISOString(),
+    // Rows the API sent without a usable timestamp are left blank rather than
+    // stamped 1970-01-01, which would read as a real (and very old) date.
+    e.timestampMs ? new Date(e.timestampMs).toISOString() : '',
     e.model,
     e.modelRaw,
     e.valueCost ?? '',
@@ -1435,7 +1612,7 @@ function exportCsv() {
     e.planMeteredCost ?? '',
     e.billingRegime,
   ]);
-  const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  const csv = [headers.join(','), ...rows.map((r) => r.map(csvCell).join(','))].join('\n');
   const filename = `cursor-usage-${$('startDate').value}-${$('endDate').value}.csv`;
   rpc('exportCsv', { csv, filename }).catch((e) => showAlert('error', `Export failed: ${e.message}`));
 }
@@ -1593,7 +1770,7 @@ function buildAnalyzeFindings(events, summary, ctx, thresholds = state.analyzeTh
     findings.push({
       severity: 'high',
       title: `${top.model} dominates spend`,
-      body: `${fmt.pct(top.pct)} of token cost (${fmt.money(top.cost)} across ${fmt.num(top.count)} requests).`,
+      body: `${fmt.pct(top.pct)} of ${costModeNoun()} (${fmt.money(top.cost)} across ${fmt.num(top.count)} requests).`,
       action: top.model === 'Auto'
         ? 'Review expensive Auto requests — pin a cheaper model for simple edits.'
         : `Try Auto or a lighter model for routine tasks instead of ${top.model}.`,
@@ -1649,7 +1826,7 @@ function buildAnalyzeFindings(events, summary, ctx, thresholds = state.analyzeTh
     findings.push({
       severity: 'medium',
       title: 'Flat usage fees separate from tokens',
-      body: `${fmt.money(summary.totalRequestFees)} in per-request fees on top of ${fmt.money(summary.totalCost)} token cost.`,
+      body: `${fmt.money(summary.totalRequestFees)} in per-request fees on top of ${fmt.money(summary.totalCost)} ${costModeNoun()}.`,
       action: 'Fewer, larger agent turns can reduce fee overhead on usage-based plans.',
     });
   }
@@ -1675,7 +1852,7 @@ function renderAnalyzeHero(data, events) {
 
   $('analyzeHero').innerHTML = `
     <h2>${headline}</h2>
-    <p>${fmt.num(summary.count)} requests · ${fmt.money(summary.totalCost)} token cost${summary.hasUsageFees ? ` · ${fmt.money(summary.totalRequestFees)} usage fees` : ''}</p>
+    <p>${fmt.num(summary.count)} requests · ${fmt.money(summary.totalCost)} ${esc(costModeNoun())}${summary.hasUsageFees ? ` · ${fmt.money(summary.totalRequestFees)} usage fees` : ''}</p>
     <div class="analyze-hero-stats">
       <div class="analyze-hero-stat"><span>Avg / request</span><strong>${fmt.money(summary.avg)}</strong></div>
       <div class="analyze-hero-stat"><span>Cache saved</span><strong>${fmt.money(summary.totalSavings)}</strong></div>
@@ -1710,7 +1887,7 @@ function renderAnalyzeModelPanel(modelRows, totalCost) {
 
   $('analyzeModelPanel').innerHTML = `
     <h3>Spend by model</h3>
-    <p class="panel-desc">${fmt.money(totalCost)} total token cost in this view</p>
+    <p class="panel-desc">${fmt.money(totalCost)} total ${esc(costModeNoun())} in this view</p>
     <table class="analyze-table">
       <thead><tr><th>Model</th><th class="num">Cost</th><th class="num">Reqs</th><th class="num">Avg</th><th>Share</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5">No data</td></tr>'}</tbody>
@@ -1802,10 +1979,15 @@ function buildBriefSectionSummary(data, events) {
   const lines = [
     `- Period: ${PRESET_LABELS[state.datePreset] || 'Custom'} (${$('startDate').value} to ${$('endDate').value})`,
     `- Requests: ${summary.count}${summary.notCounted > 0 ? ` (+${summary.notCounted} errored/aborted events excluded)` : ''}${events.length < state.all.length ? ` (filtered from ${state.all.length} loaded)` : ''}`,
-    `- Token cost: ${fmt.money(summary.totalCost)}`,
-    `- Avg token cost / request: ${fmt.money(summary.avg)}`,
+    `- ${costModeLabel()}: ${fmt.money(summary.totalCost)}`,
+    `- Avg ${costModeNoun()} / request: ${fmt.money(summary.avg)}`,
     `- Cache savings (est.): ${fmt.money(summary.totalSavings)}`,
     `- Billing: ${summary.billingMode}`,
+    // Without this the same brief means two different things depending on a
+    // toggle the reader can't see.
+    `- Cost basis: ${state.costMode === 'billed'
+      ? 'what the plan actually billed'
+      : 'what-if — API-equivalent value of the tokens, not necessarily charged'}`,
   ];
   if (planLabel()) lines.push(`- Plan: ${planLabel()}${isFreePlan() ? ' (costs are what-if API-equivalent values, nothing actually billed)' : ''}`);
   if (summary.hasUsageFees) lines.push(`- Usage fees (flat): ${fmt.money(summary.totalRequestFees)}`);
@@ -1890,7 +2072,7 @@ function buildCursorBrief() {
     parts.push('## Top expensive requests (max 10)', buildBriefSectionTopRequests(data.expensive), '');
   }
   if (scopes.includes('dailyTrend')) {
-    parts.push('## Daily token cost', buildBriefSectionDaily(data.dailyRows), '');
+    parts.push(`## Daily ${costModeNoun()}`, buildBriefSectionDaily(data.dailyRows), '');
   }
   if (scopes.includes('findings')) {
     parts.push('## Dashboard findings (rule-based)', buildBriefSectionFindings(data.findings), '');
@@ -2187,9 +2369,22 @@ function populateCompareModelFilters(event) {
   updateComparePickerLabel();
 }
 
+/**
+ * The cost the simulator compares model rates against.
+ *
+ * Always the what-if token value, never the Billed figure: the comparison
+ * prices this request's tokens at each model's published rates, so the baseline
+ * has to be the same kind of number. With the Costs toggle on Billed, `cost`
+ * is what the plan charged — often $0 for included or free-plan requests, which
+ * made every alternative model look infinitely more expensive.
+ */
+function actualTokenCost(event) {
+  return event.valueCost ?? event.tokenCost ?? event.cost ?? null;
+}
+
 function buildCompareRows(event) {
   const tokens = tokensFromEvent(event);
-  const actualCost = event.cost ?? event.tokenCost;
+  const actualCost = actualTokenCost(event);
   const actualRow = {
     key: event.modelRaw,
     label: event.model,
@@ -2295,14 +2490,14 @@ function runCompareFromRequest() {
 
   state.simRequestId = id;
   const tokens = tokensFromEvent(event);
-  const actualCost = event.cost ?? event.tokenCost;
+  const actualCost = actualTokenCost(event);
   const summary = $('simSourceSummary');
   if (summary) {
     summary.classList.remove('hidden');
     summary.innerHTML = `
       <div><dt>When</dt><dd>${fmt.date(event.timestampMs)}</dd></div>
       <div><dt>Model used ${tip('The model Cursor billed for this request. Auto means Cursor chose the model automatically.')}</dt><dd>${esc(event.model)}</dd></div>
-      <div><dt>Actual token cost ${tip('What Cursor charged for model/API tokens on this request. Does not include flat usage fees on some plans.')}</dt><dd>${fmt.money(actualCost)}</dd></div>
+      <div><dt>Actual token cost ${tip('What Cursor charged for model/API tokens on this request. Does not include flat usage fees on some plans, and always the token value rather than the Billed figure — the comparison below prices tokens, so its baseline has to as well.')}</dt><dd>${fmt.money(actualCost)}</dd></div>
       <div><dt>Input / output ${tip('Token counts from your request — replayed as-is when estimating other models.')}</dt><dd>${fmt.num(tokens.input)} / ${fmt.num(tokens.output)}</dd></div>
       <div><dt>Cache read / write ${tip('Prompt cache tokens from this request. Savings estimates assume similar cache behavior on other models.')}</dt><dd>${fmt.num(tokens.cacheRead)} / ${fmt.num(tokens.cacheWrite)}</dd></div>
       <div><dt>Total tokens ${tip('Sum of input, output, cache read, and cache write tokens.')}</dt><dd>${fmt.num(event.totalTokens)}</dd></div>`;
@@ -2337,11 +2532,14 @@ function openCompare(requestId) {
 
 function runSimulator() {
   if (!state.pricing) return;
+  // Typed input can be negative even with min="0" on the field; a negative
+  // token count would quietly produce a negative "cost".
+  const tokenInput = (id) => Math.max(0, num($(id).value));
   const tokens = {
-    input: num($('simInput').value),
-    output: num($('simOutput').value),
-    cacheRead: num($('simCacheRead').value),
-    cacheWrite: num($('simCacheWrite').value),
+    input: tokenInput('simInput'),
+    output: tokenInput('simOutput'),
+    cacheRead: tokenInput('simCacheRead'),
+    cacheWrite: tokenInput('simCacheWrite'),
   };
   const modelKey = $('simModel').value;
   const rates = matchPricing(modelKey, state.pricing);
@@ -2379,11 +2577,17 @@ function setAppView(view) {
   document.querySelector('.filter-bar')?.classList.toggle('hidden', view === 'simulator');
   if (view !== 'usage') {
     $('billingNotice')?.classList.add('hidden');
-    $('alert')?.classList.add('hidden');
+    // Errors and warnings describe the data every view is showing, so they
+    // follow the user across tabs; only the "loaded N requests" confirmation is
+    // specific to the request log and goes away with it.
+    if (state.alertType === 'info') hideAlert();
   }
   document.querySelectorAll('.nav-item[data-app]').forEach((btn) => {
     if (btn.disabled) return;
-    btn.classList.toggle('active', btn.dataset.app === view);
+    const active = btn.dataset.app === view;
+    btn.classList.toggle('active', active);
+    if (active) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
   });
   if (view === 'overview') renderOverview();
   if (view === 'simulator') refreshSimulator();
@@ -2399,15 +2603,18 @@ async function init() {
   initCompareModelPrefs();
 
   const storedMode = storage.getItem(COST_MODE_KEY);
-  if (storedMode === 'billed' || storedMode === 'value') {
-    state.costMode = storedMode;
-    document.querySelectorAll('.cost-mode-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.costMode === storedMode);
-    });
-  }
-
+  if (storedMode === 'billed' || storedMode === 'value') state.costMode = storedMode;
   document.querySelectorAll('.cost-mode-btn').forEach((btn) => {
+    const active = btn.dataset.costMode === state.costMode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     btn.addEventListener('click', () => setCostMode(btn.dataset.costMode));
+  });
+  applyCostModeLabels();
+  decorateTips();
+
+  $('alert')?.addEventListener('click', (ev) => {
+    if (ev.target.closest('.alert-close')) hideAlert();
   });
 
   try {
@@ -2473,6 +2680,16 @@ async function init() {
 
   document.addEventListener('click', (ev) => {
     if (!ev.target.closest('#simComparePicker')) setComparePickerOpen(false);
+  });
+
+  // A popup that only closes on an outside click is a trap for keyboard users:
+  // Escape closes it and hands focus back to the control that opened it.
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    const menu = $('simComparePickerMenu');
+    if (!menu || menu.classList.contains('hidden')) return;
+    setComparePickerOpen(false);
+    $('simComparePickerBtn')?.focus();
   });
 
   $('simCompareSearch')?.addEventListener('input', (ev) => {
@@ -2572,13 +2789,25 @@ async function init() {
     el.addEventListener('change', runSimulator);
   });
 
-  document.querySelectorAll('th[data-sort]').forEach((th) => {
-    th.addEventListener('click', () => {
+  // Scoped to the request log: the simulator's compare table also uses
+  // th[data-sort], and an unscoped selector wired its headers to this handler
+  // too — clicking "Est. cost" there set the request log's sort key to a field
+  // its rows don't have, silently dropping the sort the user had chosen.
+  document.querySelectorAll('#requestsTable th[data-sort]').forEach((th) => {
+    const sortByHeader = () => {
       const key = th.dataset.sort;
       if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
       else { state.sortKey = key; state.sortDir = 'desc'; }
       state.page = 1;
       refresh();
+    };
+    th.addEventListener('click', sortByHeader);
+    // Sorting is a primary action on this table, so it has to be reachable
+    // without a pointer; the headers carry tabindex="0" for the same reason.
+    th.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      ev.preventDefault();
+      sortByHeader();
     });
   });
 

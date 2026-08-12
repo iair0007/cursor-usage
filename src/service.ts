@@ -17,12 +17,21 @@ import {
   fetchPricingMarkdown,
   fetchStripeProfile,
 } from './api';
-import { billingCycleWindow, rollingDayWindow, type StatusBarPeriodMode } from './shared/usageLogic';
+import {
+  billingCycleWindow,
+  eventTimestampSpan,
+  eventsWithinRange,
+  rollingDayWindow,
+  type StatusBarPeriodMode,
+} from './shared/usageLogic';
 
 export {
   billingCycleWindow,
   clampPeriodDays,
   countRequests,
+  eventTimestampMs,
+  eventTimestampSpan,
+  eventsWithinRange,
   formatCycleRangeLabel,
   parseStatusBarPeriodConfig,
   projectExhaustionDate,
@@ -160,16 +169,50 @@ export class UsageService {
     return `none:${startMs}:${endMs}`;
   }
 
+  /**
+   * Every consumer (panel, status bar) assumes the events it gets belong to the
+   * window it asked for, so enforce that here rather than in each of them, and
+   * log what the API actually returned — a mismatch between the requested
+   * window and the events' real span is the difference between "cursor.com
+   * disagrees with this extension" and "this extension has a bug".
+   */
+  private scopeToWindow(
+    events: RawUsageEvent[],
+    startMs: number,
+    endMs: number,
+  ): RawUsageEvent[] {
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const span = eventTimestampSpan(events);
+    this.log(
+      `Usage window ${iso(startMs)} → ${iso(endMs)}: API returned ${events.length} event(s)`
+      + (span ? ` spanning ${iso(span.min)} → ${iso(span.max)}` : ' (none carry a usable timestamp)'),
+    );
+
+    const kept = eventsWithinRange(events, startMs, endMs);
+    if (kept.length !== events.length) {
+      this.log(
+        `Dropped ${events.length - kept.length} event(s) outside the requested window — `
+        + 'cursor.com returned rows beyond the range it was asked for; totals now cover the '
+        + 'selected range only.',
+      );
+    }
+    return kept;
+  }
+
   private async fetchUsage(startMs: number, endMs: number): Promise<UsageResult> {
     const adminKey = await getAdminApiKey(this.context);
     if (adminKey) {
-      const events = await fetchAdminUsage(adminKey, startMs, endMs);
+      const events = this.scopeToWindow(
+        await fetchAdminUsage(adminKey, startMs, endMs),
+        startMs,
+        endMs,
+      );
       return { events, authMode: 'admin', note: 'Team usage via Admin API.' };
     }
 
     const session = await this.getSession();
     if (session) {
-      const [events, plan, quota, hardLimit] = await Promise.all([
+      const [rawEvents, plan, quota, hardLimit] = await Promise.all([
         fetchDashboardUsage(session, startMs, endMs),
         fetchStripeProfile(session).catch((e) => {
           this.log(`Plan lookup failed (non-fatal): ${e?.message || e}`);
@@ -184,6 +227,7 @@ export class UsageService {
           return undefined;
         }),
       ]);
+      const events = this.scopeToWindow(rawEvents, startMs, endMs);
       if (plan) this.log(`Plan: ${plan.membershipType}`);
       if (quota) this.log(`Quota: ${quota.used}/${quota.limit ?? '∞'}`);
       if (hardLimit) this.log(`Hard limit: $${hardLimit}`);

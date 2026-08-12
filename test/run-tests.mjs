@@ -327,6 +327,52 @@ test('free plan forces 0 regardless of chargedCents', () => {
   assert.equal(service.sumBilledCostDollars(events, { membershipType: 'pro' }), 5.0);
 });
 
+console.log('service.eventsWithinRange (window enforced for panel + status bar)');
+test('eventTimestampMs normalizes seconds, ms, strings, and junk', () => {
+  const ms = Date.UTC(2026, 7, 12, 9, 0, 0);
+  assert.equal(service.eventTimestampMs(ms), ms);
+  assert.equal(service.eventTimestampMs(Math.floor(ms / 1000)), Math.floor(ms / 1000) * 1000);
+  assert.equal(service.eventTimestampMs(String(ms)), ms);
+  assert.equal(service.eventTimestampMs(0), 0);
+  assert.equal(service.eventTimestampMs(undefined), 0);
+  assert.equal(service.eventTimestampMs('not-a-date'), 0);
+});
+test('drops rows the API returned from outside the requested window', () => {
+  // The failure this guards: an Aug 1–12 query answered with July rows, which
+  // then inflate the panel's totals and the status bar's cost alike.
+  const start = Date.UTC(2026, 7, 1);
+  const end = Date.UTC(2026, 7, 12, 23, 59, 59, 999);
+  const events = [
+    { id: 'july', timestamp: Date.UTC(2026, 6, 20, 12, 0) },
+    { id: 'in-range', timestamp: Date.UTC(2026, 7, 11, 12, 0) },
+    { id: 'in-range-seconds', timestamp: Math.floor(Date.UTC(2026, 7, 12, 8, 0) / 1000) },
+    { id: 'september', timestamp: Date.UTC(2026, 8, 2, 12, 0) },
+    { id: 'no-timestamp', timestamp: 0 },
+  ];
+  assert.deepEqual(
+    service.eventsWithinRange(events, start, end).map((e) => e.id),
+    ['in-range', 'in-range-seconds', 'no-timestamp'],
+  );
+});
+test('eventTimestampSpan reports the real span so logs can flag a window mismatch', () => {
+  const events = [
+    { timestamp: Date.UTC(2026, 6, 20) },
+    { timestamp: 0 },
+    { timestamp: Date.UTC(2026, 7, 12) },
+  ];
+  assert.deepEqual(service.eventTimestampSpan(events), {
+    min: Date.UTC(2026, 6, 20),
+    max: Date.UTC(2026, 7, 12),
+  });
+  assert.equal(service.eventTimestampSpan([{ timestamp: 0 }]), null);
+});
+test('an in-window response is passed through untouched', () => {
+  const start = Date.UTC(2026, 7, 1);
+  const end = Date.UTC(2026, 7, 12, 23, 59, 59, 999);
+  const events = [{ id: 'a', timestamp: Date.UTC(2026, 7, 5) }];
+  assert.deepEqual(service.eventsWithinRange(events, start, end), events);
+});
+
 console.log('api.parseQuotaResponse');
 test('prefers the gpt-4 bucket, passes through startOfMonth, computes resetIso', () => {
   const quota = api.parseQuotaResponse({

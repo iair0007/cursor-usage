@@ -6,6 +6,7 @@
 import {
   billedCostForEvent,
   countRequests,
+  eventTimestampMs,
   isCountedRequest,
   projectExhaustionDate,
   quotaPercentUsed,
@@ -17,6 +18,7 @@ import {
 export {
   billedCostForEvent,
   countRequests,
+  eventTimestampMs,
   isCountedRequest,
   projectExhaustionDate,
   quotaPercentUsed,
@@ -227,8 +229,7 @@ export function normalize(raw, pricing, opts = {}) {
   // as opposed to `cost` which is the API-equivalent value of the tokens.
   const billedCost = billedCostForEvent(raw.kind, chargedCents, opts.freePlan);
 
-  let ts = num(raw.timestamp);
-  if (ts > 0 && ts < 1e12) ts *= 1000;
+  const ts = eventTimestampMs(raw.timestamp);
 
   const modelRaw = raw.model || 'unknown';
   const rates = matchPricing(modelRaw, pricing);

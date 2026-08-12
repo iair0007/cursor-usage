@@ -110,6 +110,53 @@ export function statusBarWindow(
   return mode === 'days' ? rollingDayWindow(periodDays, now) : billingCycleWindow(quota, now);
 }
 
+/**
+ * Raw event timestamps arrive as ms or seconds, number or string, depending on
+ * which endpoint served them. Returns ms, or 0 when there's nothing usable.
+ */
+export function eventTimestampMs(timestamp: unknown): number {
+  const n = Number(timestamp);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 1e12 ? n * 1000 : n;
+}
+
+/**
+ * Keeps only events inside [startMs, endMs].
+ *
+ * cursor.com's usage endpoints are asked for an explicit window, but their date
+ * semantics are undocumented and a response can carry rows from outside it —
+ * which silently inflates every total, chart and insight computed from them,
+ * and makes the panel disagree with cursor.com's own dashboard for the same
+ * dates. Rows with no usable timestamp are kept: only the server can place
+ * them, and dropping them would lose real usage.
+ */
+export function eventsWithinRange<T extends { timestamp?: number | string }>(
+  events: T[],
+  startMs: number,
+  endMs: number,
+): T[] {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return events;
+  return events.filter((e) => {
+    const ts = eventTimestampMs(e.timestamp);
+    return ts === 0 || (ts >= startMs && ts <= endMs);
+  });
+}
+
+/** Earliest/latest usable event timestamp in ms, or null when none have one. */
+export function eventTimestampSpan<T extends { timestamp?: number | string }>(
+  events: T[],
+): { min: number; max: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const e of events) {
+    const ts = eventTimestampMs(e.timestamp);
+    if (ts === 0) continue;
+    if (ts < min) min = ts;
+    if (ts > max) max = ts;
+  }
+  return min === Infinity ? null : { min, max };
+}
+
 const FREE_KIND_RE = /included|free|not charged|no charge|errored/i;
 const NOT_COUNTED_KIND_RE = /errored|aborted|cancel/i;
 

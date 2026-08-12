@@ -57,6 +57,8 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             <button type="button" class="preset-btn" data-preset="7d">7 days</button>
             <button type="button" class="preset-btn active" data-preset="30d">30 days</button>
             <button type="button" class="preset-btn" data-preset="mtd">Month to date</button>
+            <button type="button" class="preset-btn hidden" data-preset="plan" id="planPresetBtn"
+              title="Only requests priced the way your plan prices them today. Earlier requests used a different billing system, so their dollars aren't comparable.">Current plan</button>
             <button type="button" class="preset-btn" data-preset="custom">Custom</button>
           </div>
           <div class="filter-fields">
@@ -113,18 +115,12 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <p class="plan-cycle-note" id="planCycleNote"></p>
       </section>
 
-      <div class="ov-toolbar">
-        <div class="date-presets" role="group" aria-label="Period">
-          <button type="button" class="preset-btn" data-preset="today">Today</button>
-          <button type="button" class="preset-btn" data-preset="7d">7 days</button>
-          <button type="button" class="preset-btn active" data-preset="30d">30 days</button>
-          <button type="button" class="preset-btn" data-preset="mtd">Month to date</button>
-        </div>
-        <div class="date-presets" role="group" aria-label="Cost mode">
-          <button type="button" class="preset-btn cost-mode-btn active" data-cost-mode="value">What-if</button>
-          <button type="button" class="preset-btn cost-mode-btn" data-cost-mode="billed">Billed</button>
-        </div>
-      </div>
+      <!--
+        No period/cost-mode row here: the filter bar above is shown on this view
+        and already carries both, plus the date inputs, the model filter,
+        Refresh and Export. A second copy of a subset of the same controls, two
+        rows below the first, reads as a different filter than the one in force.
+      -->
 
       <div class="ov-stats">
         <article class="ov-stat ov-stat-primary">

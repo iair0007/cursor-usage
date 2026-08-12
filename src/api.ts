@@ -121,6 +121,34 @@ export function toRawEvent(e: any): RawUsageEvent {
   };
 }
 
+/**
+ * Collects a page of raw rows, skipping any event id already seen.
+ *
+ * Paging these endpoints is best-effort: the page parameter isn't documented,
+ * and an endpoint that ignores it answers every request with the same first
+ * page. Appending those blindly double-counts real usage — every total, chart
+ * and average silently inflates by a whole page. Returns how many genuinely new
+ * rows the page contributed so callers can stop when a page adds nothing.
+ *
+ * Rows without a server-assigned id are always kept: their synthesized id
+ * (timestamp + model) can legitimately collide between two concurrent
+ * requests, and dropping those would lose real usage.
+ */
+function collectPage(batch: any[], seenIds: Set<string>, into: RawUsageEvent[]): number {
+  let added = 0;
+  for (const e of batch) {
+    const rawId = e?.id ?? e?.eventId;
+    if (rawId != null) {
+      const key = String(rawId);
+      if (seenIds.has(key)) continue;
+      seenIds.add(key);
+    }
+    into.push(toRawEvent(e));
+    added++;
+  }
+  return added;
+}
+
 /** Personal usage via the cursor.com dashboard API (session cookie auth). */
 export async function fetchDashboardUsage(
   session: CursorSession,
@@ -128,6 +156,7 @@ export async function fetchDashboardUsage(
   endMs: number,
 ): Promise<RawUsageEvent[]> {
   const events: RawUsageEvent[] = [];
+  const seenIds = new Set<string>();
   let page = 1;
 
   for (; page <= MAX_PAGES; page++) {
@@ -148,7 +177,11 @@ export async function fetchDashboardUsage(
     });
 
     const batch: any[] = data.usageEventsDisplay || data.usageEvents || data.events || [];
-    events.push(...batch.map(toRawEvent));
+    const added = collectPage(batch, seenIds, events);
+    if (batch.length && added === 0) {
+      log(`Page ${page} repeated rows already collected — stopping to avoid double-counting usage.`);
+      break;
+    }
 
     const total = num(data.totalUsageEventsCount);
     const hasNext =
@@ -168,6 +201,7 @@ export async function fetchAdminUsage(
 ): Promise<RawUsageEvent[]> {
   const auth = Buffer.from(`${apiKey}:`).toString('base64');
   const events: RawUsageEvent[] = [];
+  const seenIds = new Set<string>();
   let page = 1;
 
   for (; page <= MAX_PAGES; page++) {
@@ -182,7 +216,11 @@ export async function fetchAdminUsage(
     });
 
     const batch: any[] = data.usageEvents || data.events || [];
-    events.push(...batch.map(toRawEvent));
+    const added = collectPage(batch, seenIds, events);
+    if (batch.length && added === 0) {
+      log(`Page ${page} repeated rows already collected — stopping to avoid double-counting usage.`);
+      break;
+    }
 
     const hasNext = data.pagination?.hasNextPage ?? batch.length === PAGE_SIZE;
     if (!batch.length || !hasNext) break;
@@ -195,6 +233,38 @@ export interface PlanInfo {
   /** e.g. 'free', 'free_trial', 'pro', 'business', 'enterprise', 'unknown' */
   membershipType: string;
   daysRemainingOnTrial?: number | null;
+  /** Team this seat belongs to; budgets on team plans are scoped to it, not to the user. */
+  teamId?: number | null;
+  isTeamMember?: boolean;
+}
+
+/**
+ * Structure of a response — field names with their numeric values — without the
+ * free-text content.
+ *
+ * Used to find fields this extension doesn't read yet (a monthly spend budget,
+ * for one) in payloads that also carry account identifiers. Numbers and
+ * booleans print as-is because those are what we're hunting for and they
+ * identify nobody; strings print as `string`, so an email or a customer id
+ * can't reach the log. A string that is purely digits is the exception —
+ * budgets are sometimes sent that way, and a bare number leaks nothing.
+ */
+const MAX_SHAPE_DEPTH = 3;
+
+export function describePayloadShape(value: unknown, depth = 0): string {
+  if (value === null) return 'null';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'string') return /^\d+(\.\d+)?$/.test(value) ? value : 'string';
+  if (Array.isArray(value)) {
+    if (!value.length) return 'array(0)';
+    return depth >= MAX_SHAPE_DEPTH ? `array(${value.length})` : `array(${value.length}) of ${describePayloadShape(value[0], depth + 1)}`;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (depth >= MAX_SHAPE_DEPTH) return `{${entries.length} keys}`;
+    return `{${entries.map(([k, v]) => `${k}: ${describePayloadShape(v, depth + 1)}`).join(', ')}}`;
+  }
+  return typeof value;
 }
 
 /** Account plan/membership via the same endpoint the cursor.com dashboard uses. */
@@ -206,11 +276,17 @@ export async function fetchStripeProfile(session: CursorSession): Promise<PlanIn
       Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
     },
   });
+  // This response is fetched on every load but only two fields are read. Log
+  // its shape so fields worth reading — a monthly spend budget above all —
+  // can be identified from a user's log instead of guessed at.
+  log(`Stripe profile shape: ${describePayloadShape(data).slice(0, 900)}`);
   return {
     membershipType: String(
       data?.membershipType ?? data?.individualMembershipType ?? 'unknown',
     ).toLowerCase(),
     daysRemainingOnTrial: num(data?.daysRemainingOnTrial),
+    teamId: num(data?.teamId),
+    isTeamMember: Boolean(data?.isTeamMember),
   };
 }
 
@@ -298,6 +374,167 @@ export async function fetchHardLimit(session: CursorSession): Promise<number | n
   log(`Hard-limit raw response: ${JSON.stringify(data).slice(0, 300)}`);
   const limit = num(data?.hardLimit);
   return limit != null && limit > 0 ? limit : null;
+}
+
+export interface BudgetLookup {
+  dollars: number;
+  /** e.g. "get-team-spend.spendLimitDollars" — shown to the user, so a wrong pick is traceable. */
+  source: string;
+}
+
+/**
+ * Field names that hold a monthly spend budget, in priority order.
+ *
+ * An exact-name whitelist, never a pattern like /limit/i: an account payload is
+ * full of numbers, and adopting one because its name looked right is how a
+ * confidently wrong figure reaches the screen. A name that isn't listed simply
+ * isn't found, and the shape log then says what to add.
+ *
+ * The `Cents` suffix is the unit — Cursor's payloads are consistent about it.
+ */
+const BUDGET_FIELD_NAMES = [
+  'hardLimit',
+  'hardLimitDollars',
+  'hardLimitOverrideDollars',
+  'spendLimitDollars',
+  'monthlySpendLimitDollars',
+  'monthlyLimitDollars',
+  'usageLimitDollars',
+  'budgetDollars',
+  'spendLimitCents',
+  'monthlySpendLimitCents',
+  'usageLimitCents',
+  'budgetCents',
+];
+
+function budgetFieldToDollars(name: string, value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return name.endsWith('Cents') ? n / 100 : n;
+}
+
+/**
+ * Finds a monthly budget in an arbitrary account/team payload.
+ *
+ * Team payloads carry one row per seat, so an array of member objects is only
+ * descended into for the row belonging to this user. When no row identifies
+ * itself as theirs the array is skipped entirely — showing a colleague's spend
+ * limit as your own would be worse than showing none.
+ */
+export function extractBudgetDollars(
+  payload: unknown,
+  identity: { userId?: string; email?: string } = {},
+  endpoint = 'payload',
+): BudgetLookup | null {
+  const found = new Map<string, number>();
+
+  const isMine = (row: any): boolean => {
+    if (!row || typeof row !== 'object') return false;
+    const id = row.userId ?? row.id ?? row.user_id;
+    if (identity.userId && id != null && String(id) === identity.userId) return true;
+    const email = row.email ?? row.userEmail;
+    return Boolean(identity.email && email && String(email).toLowerCase() === identity.email.toLowerCase());
+  };
+
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > 4 || value == null || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      const mine = value.filter(isMine);
+      // One entry and nothing to match on: an unambiguous single row is safe.
+      const rows = mine.length ? mine : (value.length === 1 ? value : []);
+      for (const row of rows) walk(row, depth + 1);
+      return;
+    }
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      if (BUDGET_FIELD_NAMES.includes(key)) {
+        const dollars = budgetFieldToDollars(key, v);
+        if (dollars != null && !found.has(key)) found.set(key, dollars);
+      }
+      walk(v, depth + 1);
+    }
+  };
+  walk(payload, 0);
+
+  for (const name of BUDGET_FIELD_NAMES) {
+    const dollars = found.get(name);
+    if (dollars != null) return { dollars, source: `${endpoint}.${name}` };
+  }
+  return null;
+}
+
+/**
+ * Read-only endpoints that could carry a team seat's monthly spend budget,
+ * tried once when no budget is known from settings.
+ *
+ * The account payload reports `isTeamMember: true` with a `teamId`, while
+ * get-hard-limit is asked with an empty body — an individual-scoped question
+ * about a limit that lives on the team. These re-ask it with the team id.
+ *
+ * Every entry must be a `get-*` endpoint: this probes for a value to read, and
+ * a mis-guessed name that happened to mutate account state would be a far worse
+ * outcome than not finding the budget. The results are logged, never adopted —
+ * picking a number because its field name looked right is how a wrong figure
+ * ends up on screen presented as fact.
+ */
+/**
+ * Looks for the account's monthly spend budget.
+ *
+ * Works for both account shapes without the caller choosing: the individual
+ * question (empty body) is always asked, and the team-scoped ones are asked as
+ * well whenever the account reports a team. Seats on a team can carry a
+ * personal override *and* inherit a team default, so the first endpoint that
+ * yields a value wins in the order tried — most specific to the user first.
+ *
+ * Every candidate must be a `get-*` endpoint: this looks for a value to read,
+ * and a mis-guessed name that happened to mutate account state would be far
+ * worse than not finding the budget. When nothing is found the payload shapes
+ * are logged, so an account this doesn't cover yet reports what it needs.
+ */
+export async function fetchBudget(
+  session: CursorSession,
+  identity: { teamId?: number | null; email?: string } = {},
+): Promise<BudgetLookup | null> {
+  const attempts: { endpoint: string; body: Record<string, unknown> }[] = [
+    { endpoint: 'get-hard-limit', body: {} },
+  ];
+  if (identity.teamId != null) {
+    attempts.push(
+      { endpoint: 'get-hard-limit', body: { teamId: identity.teamId } },
+      { endpoint: 'get-team-spend', body: { teamId: identity.teamId } },
+      { endpoint: 'get-teams', body: {} },
+    );
+  }
+
+  const unresolved: string[] = [];
+  for (const { endpoint, body } of attempts) {
+    if (!endpoint.startsWith('get-')) continue;
+    try {
+      const data = await fetchJson(`https://cursor.com/api/dashboard/${endpoint}`, {
+        method: 'POST',
+        headers: {
+          ...BROWSER_HEADERS,
+          'Content-Type': 'application/json',
+          Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+        },
+        body: JSON.stringify(body),
+      }, 10000);
+
+      const found = extractBudgetDollars(data, { userId: session.userId, email: identity.email }, endpoint);
+      if (found) {
+        log(`Budget found: $${found.dollars} from ${found.source}`);
+        return found;
+      }
+      unresolved.push(`${endpoint}${body.teamId != null ? ' (team)' : ''}: ${describePayloadShape(data).slice(0, 600)}`);
+    } catch (e: any) {
+      unresolved.push(`${endpoint}: ${e?.message || e}`);
+    }
+  }
+
+  // Nothing recognised: log what was seen so an unsupported account shape can
+  // be added by name rather than guessed at.
+  for (const line of unresolved) log(`Budget lookup — ${line}`);
+  log('Budget lookup found no known budget field; set cursorUsage.budget.monthlyDollars, or report the shapes above.');
+  return null;
 }
 
 /** Validates the session and returns account info. */

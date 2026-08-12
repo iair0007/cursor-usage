@@ -6,22 +6,32 @@
 import {
   billedCostForEvent,
   countRequests,
+  eventBillingRegime,
+  eventTimestampMs,
   isCountedRequest,
+  planMeteredDollars,
+  projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
   statusBarText,
   sumBilledCostDollars,
+  sumPlanMeteredDollars,
   sumTokenCostDollars,
 } from '../shared/usageLogic.ts';
 
 export {
   billedCostForEvent,
   countRequests,
+  eventBillingRegime,
+  eventTimestampMs,
   isCountedRequest,
+  planMeteredDollars,
+  projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
   statusBarText,
   sumBilledCostDollars,
+  sumPlanMeteredDollars,
   sumTokenCostDollars,
 };
 
@@ -227,8 +237,13 @@ export function normalize(raw, pricing, opts = {}) {
   // as opposed to `cost` which is the API-equivalent value of the tokens.
   const billedCost = billedCostForEvent(raw.kind, chargedCents, opts.freePlan);
 
-  let ts = num(raw.timestamp);
-  if (ts > 0 && ts < 1e12) ts *= 1000;
+  // Which billing system priced this request, and what cursor.com meters for
+  // it. Both come from the shared module so the panel and the status bar's
+  // budget projection classify an event identically.
+  const billingRegime = eventBillingRegime(raw);
+  const planMeteredCost = planMeteredDollars(raw);
+
+  const ts = eventTimestampMs(raw.timestamp);
 
   const modelRaw = raw.model || 'unknown';
   const rates = matchPricing(modelRaw, pricing);
@@ -248,6 +263,8 @@ export function normalize(raw, pricing, opts = {}) {
     tokenCost,
     requestCharge,
     isTokenBased,
+    billingRegime,
+    planMeteredCost,
     cacheSavings,
     noCacheCost,
     pricingLabel: rates?.label || null,
@@ -279,11 +296,25 @@ export function summarize(events) {
   const hasUsageFees = events.some((e) => e.requestCharge != null && e.tokenCost != null
     && Math.abs(e.requestCharge - e.tokenCost) > 0.001);
   const billingMode = detectBillingMode(events);
+
+  // Reconciliation against cursor.com's usage page. Its "Total usage" only
+  // meters token-priced requests, so a range spanning a plan change must report
+  // the two systems side by side instead of adding them into one dollar figure
+  // that matches neither page.
+  const metered = events.filter((e) => e.planMeteredCost != null);
+  const legacy = events.filter((e) => e.billingRegime === 'usage');
+  const meteredTotal = metered.reduce((s, e) => s + e.planMeteredCost, 0);
+
   return {
     count: countedEvents.length,
     eventCount: events.length,
     notCounted: events.length - countedEvents.length,
     withCost: withCost.length,
+    // Subset of the counted requests that carry cost data. `withCost` spans
+    // every row including errored/aborted ones, so it can exceed the request
+    // count — fine for explaining a cost total, wrong under a "Requests"
+    // headline, where it reads as more requests than the headline shows.
+    withCostCounted: countedEvents.filter((e) => e.cost != null).length,
     totalCost,
     totalSavings,
     noCache,
@@ -292,6 +323,81 @@ export function summarize(events) {
     totalRequestFees,
     hasUsageFees,
     billingMode,
+    meteredTotal,
+    meteredCount: metered.length,
+    legacyRequestCount: legacy.length,
+    legacyFeeTotal: legacy.reduce((s, e) => s + (e.requestCharge ?? 0), 0),
+    legacyTokenValue: legacy.reduce((s, e) => s + (e.tokenCost ?? e.cost ?? 0), 0),
+    spansPlanChange: metered.length > 0 && legacy.length > 0,
+  };
+}
+
+/**
+ * Local calendar day (YYYY-MM-DD) for a timestamp.
+ *
+ * Deliberately local, not UTC: the date filters are built from local midnight
+ * boundaries, so bucketing by UTC day would push late-evening (or early-morning,
+ * west of UTC) requests into a day that sits outside the selected range —
+ * daily charts then disagree with the KPI totals they sit next to.
+ */
+export function dayKey(timestampMs) {
+  const d = new Date(timestampMs);
+  if (Number.isNaN(d.getTime())) return null;
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** { 'YYYY-MM-DD': totalCost } over events that have a cost, keyed by local day. */
+export function groupByDay(events) {
+  const map = {};
+  for (const e of events) {
+    if (!e.timestampMs || e.cost == null) continue;
+    const day = dayKey(e.timestampMs);
+    if (!day) continue;
+    map[day] = (map[day] || 0) + e.cost;
+  }
+  return map;
+}
+
+/**
+ * Client-side guard so what's displayed always matches the active filter.
+ * The usage API is asked for [startMs, endMs] but its date semantics aren't
+ * documented (inclusive ends, whole-day rounding, server timezone), so a
+ * response can carry rows outside the requested window. Events with no usable
+ * timestamp are kept — the server is the only thing that can place them.
+ */
+export function filterByRange(events, startMs, endMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return events;
+  return events.filter((e) => !e.timestampMs || (e.timestampMs >= startMs && e.timestampMs <= endMs));
+}
+
+/**
+ * When billing switched from per-request pricing to dollar metering, if that
+ * happened inside these events.
+ *
+ * The boundary is the first metered request that has per-request-priced ones
+ * before it. Returned as the local day it fell on, because that's what a date
+ * filter can express — a range starting mid-day would silently drop the earlier
+ * part of that day.
+ *
+ * Null unless both systems are present: with only one, nothing changed inside
+ * this window and there is no boundary to offer.
+ */
+export function detectPlanChange(events) {
+  const timed = events.filter((e) => e.timestampMs > 0).sort((a, b) => a.timestampMs - b.timestampMs);
+  const firstMetered = timed.find((e) => e.billingRegime !== 'usage');
+  if (!firstMetered) return null;
+  const legacyBefore = timed.filter((e) => e.billingRegime === 'usage' && e.timestampMs < firstMetered.timestampMs);
+  if (!legacyBefore.length) return null;
+
+  const day = new Date(firstMetered.timestampMs);
+  day.setHours(0, 0, 0, 0);
+  return {
+    changedAtMs: firstMetered.timestampMs,
+    startOfDayMs: day.getTime(),
+    dayKey: dayKey(firstMetered.timestampMs),
+    legacyRequestsBefore: legacyBefore.length,
   };
 }
 

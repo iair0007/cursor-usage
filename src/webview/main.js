@@ -17,8 +17,11 @@ import {
   normalize,
   summarize,
   detectBillingMode,
+  detectPlanChange,
   percentile,
   projectExhaustionDate,
+  groupByDay,
+  filterByRange,
 } from './logic.js';
 
 const vscode = acquireVsCodeApi();
@@ -100,6 +103,8 @@ const ANALYZE_THRESHOLD_DEFAULTS = {
 const state = {
   all: [],
   filtered: [],
+  /** True once a load has settled, so views can tell "no data" from "not fetched yet". */
+  loaded: false,
   pricing: null,
   sortKey: 'timestampMs',
   sortDir: 'desc',
@@ -120,6 +125,11 @@ const state = {
   datePreset: '30d',
   costMode: 'value', // 'value' (what-if API-equivalent) | 'billed' (actual charges)
   plan: null,
+  budget: null,
+  /** Local day (YYYY-MM-DD) billing switched to the current system, once seen. */
+  planChangeDay: null,
+  /** The auto-switch to the current-plan range happens once, not on every load. */
+  planChangeAnnounced: false,
   trend: { key: null, previous: null },
   analyzeThresholds: { ...ANALYZE_THRESHOLD_DEFAULTS },
 };
@@ -272,6 +282,8 @@ function renderPlanCycle(quota, hardLimit) {
     }
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
     noteEl.textContent = notes.join(' ');
+  } else if (budgetRunwayState()) {
+    renderBudgetCycle(card, budgetRunwayState(), barRow, ring, noteEl, hardLimit);
   } else if (hasMeaningfulCountOnly) {
     barRow.classList.add('hidden');
     ring.classList.add('hidden');
@@ -291,6 +303,102 @@ function renderPlanCycle(quota, hardLimit) {
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
     noteEl.textContent = notes.join(' ');
   }
+}
+
+/**
+ * Notices a plan change in the events just loaded, reveals the "Current plan"
+ * preset, and — the first time it's seen — switches to it.
+ *
+ * Mixing two billing systems in one total is the thing that made "Month to
+ * date" read $202 when cursor.com said $2.79, so once we know where the change
+ * happened, the range that only covers the current system is the honest
+ * default. Only automatic once: after that the choice is the user's, and their
+ * saved preset is respected.
+ *
+ * Returns true when it kicked off a reload, so the caller stops rendering the
+ * range being replaced.
+ */
+function applyPlanChangeDiscovery() {
+  const change = detectPlanChange(state.all);
+  if (change) {
+    state.planChangeDay = change.dayKey;
+    savePrefs({
+      preset: state.datePreset,
+      startDate: $('startDate').value,
+      endDate: $('endDate').value,
+      planChangeDay: change.dayKey,
+    });
+  }
+  $('planPresetBtn')?.classList.toggle('hidden', !state.planChangeDay);
+  if (!change || state.planChangeAnnounced || state.datePreset === 'plan') return false;
+
+  state.planChangeAnnounced = true;
+  const range = getRangeForPreset('plan');
+  if (!range) return false;
+  applyDateRange(range.start, range.end, 'plan');
+  showAlert('info', `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}. `
+    + `Showing usage since then — the ${fmt.num(change.legacyRequestsBefore)} earlier request${change.legacyRequestsBefore === 1 ? '' : 's'} in the range you picked were priced per request, so their dollars aren't comparable. `
+    + 'Pick another period to include them.');
+  void load();
+  return true;
+}
+
+/** The budget projection, or null when no budget is known (nothing to project against). */
+function budgetRunwayState() {
+  return state.budget?.runway ?? null;
+}
+
+function formatDays(days) {
+  if (days < 1) return 'less than a day';
+  const whole = Math.round(days);
+  return `${whole} day${whole === 1 ? '' : 's'}`;
+}
+
+/**
+ * Budget-plan counterpart of the request-quota gauge: how much of the monthly
+ * budget is gone, how long it lasts at the current pace, and what daily spend
+ * still fits the cycle. Phrased around the reset date, because a budget that
+ * refills is a pacing problem, not a countdown to zero.
+ */
+function renderBudgetCycle(card, runway, barRow, ring, noteEl, hardLimit) {
+  const pctVisual = Math.min(100, Math.max(0, runway.percentUsed));
+  barRow.classList.remove('hidden');
+  ring.classList.remove('hidden');
+  $('planCycleBarFill').style.width = `${pctVisual}%`;
+  $('planCycleRingFill').style.strokeDashoffset = `${RING_CIRCUMFERENCE * (1 - pctVisual / 100)}`;
+  $('planCycleBarLabel').textContent = runway.overBudget
+    ? `${fmt.money(runway.spentDollars)} / ${fmt.money(runway.budgetDollars)} · over budget (${fmt.pct(runway.percentUsed)})`
+    : `${fmt.money(runway.spentDollars)} / ${fmt.money(runway.budgetDollars)} (${fmt.pct(runway.percentUsed)})`;
+
+  if (runway.overBudget || runway.percentUsed >= PLAN_CYCLE_CRITICAL_PCT) card.classList.add('plan-cycle-critical');
+  else if (runway.percentUsed >= PLAN_CYCLE_WARN_PCT) card.classList.add('plan-cycle-warning');
+
+  const notes = [];
+  if (runway.overBudget) {
+    notes.push(`You're ${fmt.money(-runway.remainingDollars)} over this cycle's budget.`);
+  } else if (runway.dailySpend == null) {
+    notes.push(`${fmt.money(runway.remainingDollars)} left this cycle — too early in the cycle to project a pace.`);
+  } else {
+    const pace = `At ${fmt.money(runway.dailySpend)}/day`;
+    if (runway.exhaustsBeforeReset === true) {
+      notes.push(`${pace}, the ${fmt.money(runway.budgetDollars)} budget runs out in ${formatDays(runway.daysToExhaustion)}`
+        + ` — ${formatDays(runway.daysUntilReset - runway.daysToExhaustion)} before the cycle resets.`);
+    } else if (runway.exhaustsBeforeReset === false) {
+      notes.push(`${pace}, you'll finish the cycle inside budget with about ${fmt.money(runway.remainingDollars - runway.dailySpend * runway.daysUntilReset)} to spare.`);
+    } else {
+      notes.push(`${pace}, ${fmt.money(runway.remainingDollars)} lasts about ${formatDays(runway.daysToExhaustion)}.`);
+    }
+    if (runway.safeDailySpend != null) {
+      notes.push(`Up to ${fmt.money(runway.safeDailySpend)}/day keeps you within it until the reset.`);
+    }
+  }
+  if (state.budget?.source === 'setting') {
+    notes.push('Budget from your settings (cursorUsage.budget.monthlyDollars).');
+  } else if (state.budget?.source === 'hardLimit') {
+    notes.push('Budget from your usage-based spend cap.');
+  }
+  if (hardLimit && state.budget?.source !== 'hardLimit') notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
+  noteEl.textContent = notes.join(' ');
 }
 
 /** Events re-mapped so `cost` reflects the active cost mode. */
@@ -338,6 +446,10 @@ function getRangeForPreset(preset) {
     start.setDate(start.getDate() - 29);
   } else if (preset === 'mtd') {
     start.setDate(1);
+  } else if (preset === 'plan') {
+    // Only offered once a plan change has actually been seen in the data.
+    if (!state.planChangeDay) return null;
+    return { start: state.planChangeDay, end: toDateInputValue(end), preset };
   } else {
     return null;
   }
@@ -345,9 +457,9 @@ function getRangeForPreset(preset) {
 }
 
 function detectPreset(start, end) {
-  for (const preset of ['today', '7d', '30d', 'mtd']) {
+  for (const preset of ['today', 'plan', '7d', '30d', 'mtd']) {
     const r = getRangeForPreset(preset);
-    if (r.start === start && r.end === end) return preset;
+    if (r && r.start === start && r.end === end) return preset;
   }
   return 'custom';
 }
@@ -363,14 +475,31 @@ function loadPrefs() {
 
 function savePrefs(prefs) {
   try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+    // planChangeDay is discovered, not chosen — every other caller writes only
+    // the range, so carry it through rather than making each remember it.
+    storage.setItem(STORAGE_KEY, JSON.stringify({ planChangeDay: state.planChangeDay, ...prefs }));
   } catch {
     // ignore
   }
 }
 
+// The cost-mode buttons share the .preset-btn class for styling only — they
+// carry data-cost-mode, not data-preset. Period wiring must never match them,
+// or applying a date preset silently clears the What-if/Billed highlight (and
+// clicking What-if/Billed fires the period handler with an undefined preset).
+const PRESET_BTN_SELECTOR = '.preset-btn[data-preset]';
+
+const PRESET_LABELS = {
+  today: 'Today',
+  '7d': '7 days',
+  '30d': '30 days',
+  mtd: 'Month to date',
+  plan: 'Current plan',
+  custom: 'Custom',
+};
+
 function setActivePreset(preset) {
-  document.querySelectorAll('.preset-btn').forEach((btn) => {
+  document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.preset === preset);
   });
   state.datePreset = preset;
@@ -382,10 +511,17 @@ function applyDateRange(start, end, preset) {
   const resolved = preset || detectPreset(start, end);
   setActivePreset(resolved);
   savePrefs({ preset: resolved, startDate: start, endDate: end });
+  updateFilterSummary();
 }
 
 function initDateRange() {
   const prefs = loadPrefs();
+  if (prefs?.planChangeDay) {
+    state.planChangeDay = prefs.planChangeDay;
+    // Known from a previous session: no need to re-announce the switch.
+    state.planChangeAnnounced = true;
+    $('planPresetBtn')?.classList.remove('hidden');
+  }
   if (prefs?.preset && prefs.preset !== 'custom') {
     const range = getRangeForPreset(prefs.preset);
     applyDateRange(range.start, range.end, prefs.preset);
@@ -407,9 +543,11 @@ function onPresetClick(preset) {
       startDate: $('startDate').value,
       endDate: $('endDate').value,
     });
+    updateFilterSummary();
     return;
   }
   const range = getRangeForPreset(preset);
+  if (!range) return;
   applyDateRange(range.start, range.end, preset);
   load();
 }
@@ -473,8 +611,7 @@ function sumRows(rows, key) {
 function updateFilterSummary() {
   const modelVal = $('modelFilter').value;
   const modelLabel = modelVal ? displayModel(modelVal) : 'All models';
-  const presetLabels = { today: 'Today', '7d': '7 days', '30d': '30 days', mtd: 'Month to date', custom: 'Custom' };
-  const period = presetLabels[state.datePreset] || 'Custom';
+  const period = PRESET_LABELS[state.datePreset] || 'Custom';
   const parts = [
     period,
     `${fmt.shortDate($('startDate').value)} – ${fmt.shortDate($('endDate').value)}`,
@@ -518,6 +655,29 @@ function formatChartTokens(v) {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
   if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
   return String(Math.round(v));
+}
+
+/**
+ * Explains a range that spans a plan change, in the terms cursor.com's usage
+ * page uses. Without it the headline blends token-metered spend with requests
+ * priced by the older per-request plan, producing a figure that matches
+ * neither page — and looks like the extension is inventing money.
+ */
+function planChangeNote(summary, { short = false } = {}) {
+  // Keyed on the presence of per-request rows, not on the range straddling the
+  // change: a range entirely before it (say "Last month") shows a large token
+  // figure against cursor.com's $0 and needs the same explanation.
+  if (!summary.legacyRequestCount) return '';
+  const requests = `${fmt.num(summary.legacyRequestCount)} request${summary.legacyRequestCount === 1 ? '' : 's'}`;
+  const metered = `cursor.com meters ${fmt.money(summary.meteredTotal)} for this range`;
+  // The stat card is one of three in a grid — the long form there would make it
+  // several lines taller than its neighbours, so it gets the headline only.
+  if (short) {
+    return `${metered} · ${requests} priced per request under your previous plan`;
+  }
+  const legacy = `${requests} (${fmt.money(summary.legacyTokenValue)} of token value) were priced per request `
+    + `under your previous plan — ${fmt.money(summary.legacyFeeTotal)} in flat fees — so its spend view doesn't count them`;
+  return `${metered}. ${summary.meteredCount ? 'The other ' : 'All '}${legacy}.`;
 }
 
 /** ▲/▼ delta badge vs the previous equal-length period; null when there's nothing to compare or the baseline is 0. */
@@ -728,16 +888,6 @@ function renderCharts(events) {
   state.chartsReady = true;
 }
 
-function groupByDay(events) {
-  const map = {};
-  for (const e of events) {
-    if (!e.timestampMs || e.cost == null) continue;
-    const day = new Date(e.timestampMs).toISOString().slice(0, 10);
-    map[day] = (map[day] || 0) + e.cost;
-  }
-  return map;
-}
-
 function populateModelFilter(events) {
   const models = [...new Set(events.map((e) => e.modelRaw))].sort();
   const prev = $('modelFilter').value;
@@ -766,7 +916,20 @@ function tip(text) {
   return `<span class="tip" tabindex="0" aria-label="Help" data-tip="${esc(text)}">ⓘ</span>`;
 }
 
+const KPI_PLACEHOLDER_IDS = ['kpiRequests', 'kpiTotalCost', 'kpiSavings', 'kpiAvg'];
+const KPI_SUB_IDS = ['kpiRequestsSub', 'kpiCostSub', 'kpiSavingsSub', 'kpiAvgSub'];
+
 function renderKpis(summary) {
+  // Same rule as the Overview: with no settled load behind the current filter,
+  // show placeholders rather than a $0.00 that reads as a real zero.
+  if (!state.loaded) {
+    KPI_PLACEHOLDER_IDS.forEach((id) => { $(id).textContent = '—'; });
+    KPI_SUB_IDS.forEach((id) => { $(id).innerHTML = ''; });
+    $('kpiCostFees')?.classList.add('hidden');
+    $('billingNotice')?.classList.add('hidden');
+    return;
+  }
+
   const isFiltered = summary.eventCount < state.all.length;
 
   $('kpiRequests').textContent = fmt.num(summary.count);
@@ -831,7 +994,12 @@ function renderKpis(summary) {
     const planNote = isFreePlan()
       ? `You're on the <strong>${esc(planLabel() || 'Free plan')}</strong> — requests are <strong>not actually billed</strong>; costs shown in What-if mode are the API-equivalent value of your tokens. `
       : (planLabel() ? `Plan: <strong>${esc(planLabel())}</strong>. ` : '');
-    billingEl.innerHTML = `${planNote}${messages[summary.billingMode] || messages.unknown} Cache savings use each request's model pricing from <a href="https://cursor.com/docs/models-and-pricing">Cursor docs</a> (Auto requests use Auto rates). Compare with the <a href="https://cursor.com/dashboard/usage">official dashboard</a>.`;
+    // The full reconciliation belongs here rather than in a stat card: this
+    // banner is full width, and it's the same place the plan-change and
+    // billing-mode explanations already live.
+    const planChange = planChangeNote(summary);
+    const planChangeHtml = planChange ? ` <strong>${esc(planChange)}</strong>` : '';
+    billingEl.innerHTML = `${planNote}${messages[summary.billingMode] || messages.unknown}${planChangeHtml} Cache savings use each request's model pricing from <a href="https://cursor.com/docs/models-and-pricing">Cursor docs</a> (Auto requests use Auto rates). Compare with the <a href="https://cursor.com/dashboard/usage">official dashboard</a>.`;
     billingEl.classList.remove('hidden');
   }
 }
@@ -1070,6 +1238,27 @@ function renderOvSparkline(events) {
 function renderOverview() {
   if (!$('overviewView')) return;
 
+  // No settled load behind the current filter (first paint, or a failed
+  // fetch). Show placeholders, never numbers: a $0.00 here reads as a real
+  // zero for the selected period, and leftover values read as if they were
+  // this period's.
+  if (!state.loaded) {
+    $('ovCost').textContent = '—';
+    $('ovCostSub').innerHTML = '';
+    $('ovRequests').textContent = '—';
+    $('ovRequestsSub').textContent = '';
+    $('ovSavings').textContent = '—';
+    $('ovSavingsSub').textContent = '';
+    $('ovTrendRange').textContent = '';
+    // The canned empty-state text ("No requests in this period yet") would be a
+    // claim about data we never got — say nothing about the period instead.
+    $('ovSparklineEmpty').textContent = 'No usage data loaded.';
+    renderOvSparkline([]);
+    $('ovInsightPanel').classList.add('hidden');
+    return;
+  }
+  $('ovSparklineEmpty').textContent = 'No requests in this period yet.';
+
   const events = state.filtered;
   const summary = summarize(events);
 
@@ -1077,13 +1266,17 @@ function renderOverview() {
   const showWhatIfPrefix = state.costMode === 'value' && freePlan;
   $('ovCostLabel').textContent = state.costMode === 'billed' ? 'Billed cost' : 'Token cost';
   $('ovCost').textContent = `${showWhatIfPrefix ? '~' : ''}${fmt.money(summary.totalCost)}`;
-  $('ovCostSub').innerHTML = state.trend.key === currentTrendKey() && state.trend.previous
+  const trend = state.trend.key === currentTrendKey() && state.trend.previous
     ? trendBadge(summary.totalCost, state.trend.previous.totalCost)
     : '';
+  const planChange = planChangeNote(summary, { short: true });
+  $('ovCostSub').innerHTML = planChange
+    ? `${trend}<span class="ov-stat-note">${esc(planChange)}</span>`
+    : trend;
 
   $('ovRequests').textContent = fmt.num(summary.count);
   $('ovRequestsSub').textContent = summary.count
-    ? `${fmt.num(summary.withCost)} with cost data${summary.notCounted > 0 ? ` · ${fmt.num(summary.notCounted)} errored/aborted not counted` : ''}`
+    ? `${fmt.num(summary.withCostCounted)} with cost data${summary.notCounted > 0 ? ` · ${fmt.num(summary.notCounted)} errored/aborted not counted` : ''}`
     : 'No requests in this period';
 
   $('ovSavings').textContent = fmt.money(summary.totalSavings);
@@ -1126,42 +1319,67 @@ async function load() {
     showAlert('error', 'Pick a valid date range.');
     return;
   }
+  if (start > end) {
+    showAlert('error', 'The "From" date is after the "To" date — pick a valid range.');
+    return;
+  }
 
+  updateFilterSummary();
   $('loading').classList.remove('hidden');
   $('usageView').classList.add('hidden');
   $('overviewView').classList.add('hidden');
 
   try {
-    const [usage, pricingData] = await Promise.all([
+    const [usage, pricingData, budget] = await Promise.all([
       rpc('usage', { startDate: start, endDate: end }),
       rpc('pricing').catch(() => ({ markdown: '' })),
+      // Budget spend is always the current cycle, never the selected range —
+      // a projection built from "Today" would be meaningless. Non-fatal: the
+      // rest of the dashboard works without it.
+      rpc('budget').catch(() => null),
     ]);
+    state.budget = budget;
 
     state.pricing = parsePricing(pricingData.markdown || '');
     state.plan = usage.plan || null;
     const normOpts = { freePlan: isFreePlan() };
-    state.all = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
+    const normalized = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
+    state.all = filterByRange(normalized, start, end);
+    // Not signed in is not "zero usage" — keep the placeholders in that case.
+    state.loaded = usage.authMode !== 'none';
     state.page = 1;
     destroyCharts();
     renderPlanCycle(usage.quota, usage.hardLimit);
+    // Must run before refresh(): applyFilters() reads the model select, and a
+    // model that only existed in the previous range has to be gone from it
+    // before the new events are filtered.
+    populateModelFilter(state.all);
+    populateSimulatorModels();
     if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
+    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
+
+    // The request picker reads state.filtered, which only refresh() updates —
+    // so it has to come after, or it lists the previous range's requests.
+    const switchedToPlanRange = applyPlanChangeDiscovery();
+    if (switchedToPlanRange) return; // load() re-entered with the narrower range
+
+    const render = () => {
+      refresh();
+      populateSimRequestPicker(state.simRequestId);
+    };
 
     if (usage.authMode === 'none') {
       showAlert('warn', 'Not signed in. Open Cursor while logged into your account, or run "Cursor Usage: Set Session Token Manually" from the command palette.');
-      renderOverview();
+      render();
       return;
     }
 
     if (!state.all.length) {
       showAlert('warn', 'No usage events in this date range.');
-      renderOverview();
+      render();
       return;
     }
 
-    populateModelFilter(state.all);
-    populateSimulatorModels();
-    populateSimRequestPicker(state.simRequestId);
-    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
     if (usage.email || planLabel()) {
       $('authLabel').textContent = [usage.email ? `Signed in as ${usage.email}` : null, planLabel()]
         .filter(Boolean).join(' — ');
@@ -1174,11 +1392,20 @@ async function load() {
       ? `Loaded ${countedAll} requests (${state.all.length} events incl. errored/aborted)`
       : `Loaded ${state.all.length} requests`;
     showAlert('info', `${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${fallbackNote}`);
-    refresh();
-    if (state.appView === 'overview') renderOverview();
+    // refresh() already re-renders the overview and analyze views.
+    render();
     if (state.appView === 'simulator') refreshSimulator();
-    if (state.appView === 'analyze') renderAnalyze();
   } catch (err) {
+    // Drop whatever was loaded before: it belongs to a different (older)
+    // query, and leaving it on screen under the new filter reads as if the
+    // numbers were for the range now shown in the toolbar.
+    state.all = [];
+    state.loaded = false;
+    destroyCharts();
+    if (state.appView === 'overview') $('overviewView').classList.remove('hidden');
+    if (state.appView === 'usage') $('usageView').classList.remove('hidden');
+    refresh();
+    populateSimRequestPicker(null);
     showAlert('error', err.authError
       ? `${err.message} — your Cursor session may have expired. Re-open Cursor logged in, or run "Cursor Usage: Set Session Token Manually".`
       : err.message);
@@ -1188,7 +1415,10 @@ async function load() {
 }
 
 function exportCsv() {
-  const headers = ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost', 'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens'];
+  // meteredCost/billingRegime are appended, not inserted: existing columns keep
+  // their positions for anything already parsing this file. They're what makes
+  // a row-by-row reconciliation against cursor.com's usage export possible.
+  const headers = ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost', 'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'meteredCost', 'billingRegime'];
   const rows = state.filtered.map((e) => [
     new Date(e.timestampMs).toISOString(),
     e.model,
@@ -1202,6 +1432,8 @@ function exportCsv() {
     e.cacheReadTokens,
     e.cacheWriteTokens,
     e.totalTokens,
+    e.planMeteredCost ?? '',
+    e.billingRegime,
   ]);
   const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
   const filename = `cursor-usage-${$('startDate').value}-${$('endDate').value}.csv`;
@@ -1567,9 +1799,8 @@ function initAnalyzeSidebar() {
 
 function buildBriefSectionSummary(data, events) {
   const { summary } = data;
-  const presetLabels = { today: 'Today', '7d': '7 days', '30d': '30 days', mtd: 'Month to date', custom: 'Custom' };
   const lines = [
-    `- Period: ${presetLabels[state.datePreset] || 'Custom'} (${$('startDate').value} to ${$('endDate').value})`,
+    `- Period: ${PRESET_LABELS[state.datePreset] || 'Custom'} (${$('startDate').value} to ${$('endDate').value})`,
     `- Requests: ${summary.count}${summary.notCounted > 0 ? ` (+${summary.notCounted} errored/aborted events excluded)` : ''}${events.length < state.all.length ? ` (filtered from ${state.all.length} loaded)` : ''}`,
     `- Token cost: ${fmt.money(summary.totalCost)}`,
     `- Avg token cost / request: ${fmt.money(summary.avg)}`,
@@ -1790,6 +2021,7 @@ function populateSimRequestPicker(selectedId) {
   const events = state.filtered.length ? state.filtered : state.all;
   if (!events.length) {
     el.innerHTML = '<option value="">No requests loaded</option>';
+    state.simRequestId = null;
     return;
   }
   const sorted = [...events].sort((a, b) => b.timestampMs - a.timestampMs);
@@ -2139,7 +2371,12 @@ function setAppView(view) {
   $('usageView').classList.toggle('hidden', view !== 'usage');
   $('analyzeView').classList.toggle('hidden', view !== 'analyze');
   $('simulatorView').classList.toggle('hidden', view !== 'simulator');
-  document.querySelector('.filter-bar')?.classList.toggle('hidden', view !== 'usage' && view !== 'analyze');
+  // One filter bar, shown wherever the date range means something. Overview
+  // used to carry a second copy of the period and cost-mode chips for when this
+  // bar was hidden there; both being visible read as two competing filters, so
+  // the duplicate is gone. Only the Simulator drops the bar — that view is a
+  // standalone calculator that doesn't read the date filter at all.
+  document.querySelector('.filter-bar')?.classList.toggle('hidden', view === 'simulator');
   if (view !== 'usage') {
     $('billingNotice')?.classList.add('hidden');
     $('alert')?.classList.add('hidden');
@@ -2187,7 +2424,7 @@ async function init() {
   $('refreshBtn').addEventListener('click', load);
   $('exportBtn').addEventListener('click', exportCsv);
 
-  document.querySelectorAll('.preset-btn').forEach((btn) => {
+  document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
     btn.addEventListener('click', () => onPresetClick(btn.dataset.preset));
   });
 
@@ -2344,6 +2581,11 @@ async function init() {
       refresh();
     });
   });
+
+  // Put the chrome in the state the view actually implies before the first
+  // load — otherwise Overview opens with the Requests filter bar still showing
+  // (duplicating its own period chips) until the user switches views once.
+  setAppView(state.appView);
 
   await load();
 }

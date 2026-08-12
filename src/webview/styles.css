@@ -197,15 +197,6 @@ input:focus, select:focus, textarea:focus {
 
 #overviewView { margin-bottom: 8px; }
 
-.ov-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 14px 0;
-}
-
 .ov-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -236,6 +227,8 @@ input:focus, select:focus, textarea:focus {
 }
 .ov-stat-green.ov-stat-value { color: var(--green-strong); }
 .ov-stat-sub { color: var(--muted); font-size: 12px; min-height: 1.4em; }
+/* Reconciliation note under the cost figure — wraps, unlike the inline badge it may follow. */
+.ov-stat-note { display: block; margin-top: 4px; line-height: 1.45; }
 
 .ov-lower {
   display: grid;

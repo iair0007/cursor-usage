@@ -85,6 +85,15 @@ export class DashboardPanel {
         void this.statusBar?.refresh();
         return result;
       }
+      case 'budget': {
+        // Read fresh on every call so a budget changed mid-cycle takes effect
+        // on the next refresh instead of at the next window reload.
+        const configured = vscode.workspace
+          .getConfiguration('cursorUsage')
+          .get<number>('budget.monthlyDollars', 0);
+        return (await this.service.getBudgetStatus(configured))
+          ?? { budgetDollars: null, source: 'none' };
+      }
       case 'pricing':
         return { markdown: await this.service.getPricingMarkdown() };
       case 'copyText':

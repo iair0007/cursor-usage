@@ -110,6 +110,53 @@ export function statusBarWindow(
   return mode === 'days' ? rollingDayWindow(periodDays, now) : billingCycleWindow(quota, now);
 }
 
+/**
+ * Raw event timestamps arrive as ms or seconds, number or string, depending on
+ * which endpoint served them. Returns ms, or 0 when there's nothing usable.
+ */
+export function eventTimestampMs(timestamp: unknown): number {
+  const n = Number(timestamp);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 1e12 ? n * 1000 : n;
+}
+
+/**
+ * Keeps only events inside [startMs, endMs].
+ *
+ * cursor.com's usage endpoints are asked for an explicit window, but their date
+ * semantics are undocumented and a response can carry rows from outside it —
+ * which silently inflates every total, chart and insight computed from them,
+ * and makes the panel disagree with cursor.com's own dashboard for the same
+ * dates. Rows with no usable timestamp are kept: only the server can place
+ * them, and dropping them would lose real usage.
+ */
+export function eventsWithinRange<T extends { timestamp?: number | string }>(
+  events: T[],
+  startMs: number,
+  endMs: number,
+): T[] {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return events;
+  return events.filter((e) => {
+    const ts = eventTimestampMs(e.timestamp);
+    return ts === 0 || (ts >= startMs && ts <= endMs);
+  });
+}
+
+/** Earliest/latest usable event timestamp in ms, or null when none have one. */
+export function eventTimestampSpan<T extends { timestamp?: number | string }>(
+  events: T[],
+): { min: number; max: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const e of events) {
+    const ts = eventTimestampMs(e.timestamp);
+    if (ts === 0) continue;
+    if (ts < min) min = ts;
+    if (ts > max) max = ts;
+  }
+  return min === Infinity ? null : { min, max };
+}
+
 const FREE_KIND_RE = /included|free|not charged|no charge|errored/i;
 const NOT_COUNTED_KIND_RE = /errored|aborted|cancel/i;
 
@@ -145,22 +192,58 @@ export function countRequests(events: UsageEventLike[]): number {
 }
 
 /**
- * What-if event cost sum; mirrors normalize() priority: token-based plans bill
- * chargedCents, otherwise model token cost (tokenUsage.totalCents +
- * cursorTokenFee), otherwise chargedCents. API-equivalent value, not billed.
+ * One event's cost in dollars; mirrors normalize() priority: token-based plans
+ * bill chargedCents, otherwise model token cost (tokenUsage.totalCents +
+ * cursorTokenFee), otherwise chargedCents. Null when the row carries no cost.
+ */
+export function eventCostDollars(e: UsageEventLike): number | null {
+  const modelCents =
+    e.tokenUsage?.totalCents != null
+      ? e.tokenUsage.totalCents + (e.cursorTokenFee ?? 0)
+      : null;
+  if (e.isTokenBasedCall && e.chargedCents != null) return e.chargedCents / 100;
+  if (modelCents != null) return modelCents / 100;
+  if (e.chargedCents != null) return e.chargedCents / 100;
+  return null;
+}
+
+/**
+ * What-if cost sum: the API-equivalent value of the tokens, not what was billed.
  */
 export function sumTokenCostDollars(events: UsageEventLike[]): number {
-  let cents = 0;
-  for (const e of events) {
-    const modelCents =
-      e.tokenUsage?.totalCents != null
-        ? e.tokenUsage.totalCents + (e.cursorTokenFee ?? 0)
-        : null;
-    if (e.isTokenBasedCall && e.chargedCents != null) cents += e.chargedCents;
-    else if (modelCents != null) cents += modelCents;
-    else if (e.chargedCents != null) cents += e.chargedCents;
-  }
-  return cents / 100;
+  let total = 0;
+  for (const e of events) total += eventCostDollars(e) ?? 0;
+  return total;
+}
+
+export type BillingRegime = 'token' | 'usage' | 'unknown';
+
+/**
+ * Which billing system priced a request. A flat per-request charge on a
+ * non-token-based call is the marker of the older request-priced plan; ranges
+ * that span a plan change hold both, and their dollars are not addable.
+ */
+export function eventBillingRegime(e: UsageEventLike): BillingRegime {
+  if (e.isTokenBasedCall) return 'token';
+  if (e.chargedCents != null) return 'usage';
+  return 'unknown';
+}
+
+/**
+ * What cursor.com's usage page meters for a request — the dollars that count
+ * against a plan's monthly budget — or null for request-priced rows, which
+ * consumed a request allowance instead and are absent from that page's spend.
+ * Deliberately independent of `kind`: "Included" usage is still metered.
+ */
+export function planMeteredDollars(e: UsageEventLike): number | null {
+  return eventBillingRegime(e) === 'usage' ? null : eventCostDollars(e);
+}
+
+/** Metered spend across events — comparable to cursor.com's "Total usage". */
+export function sumPlanMeteredDollars(events: UsageEventLike[]): number {
+  let total = 0;
+  for (const e of events) total += planMeteredDollars(e) ?? 0;
+  return total;
 }
 
 /** Per-event billed cost in dollars (normalize().billedCost rule). */
@@ -189,6 +272,41 @@ export function sumBilledCostDollars(
     if (e.chargedCents != null) cents += e.chargedCents;
   }
   return cents / 100;
+}
+
+export interface KindTotal {
+  kind: string;
+  count: number;
+  tokenCostDollars: number;
+  chargedDollars: number;
+}
+
+/**
+ * Per-`kind` totals for the current window.
+ *
+ * cursor.com reports usage as Total / Included / On-demand, and `kind` is the
+ * only field that says which bucket a row belongs to ("Included in Business",
+ * "Usage-based", "Errored, Not Charged", …). Splitting the same events that way
+ * is what makes a disagreement with cursor.com legible: whether the gap is
+ * extra rows, a bucket counted on one side only, or the same rows priced
+ * differently.
+ */
+export function eventKindTotals(
+  events: (UsageEventLike & { kind?: string })[],
+): KindTotal[] {
+  const byKind = new Map<string, KindTotal>();
+  for (const e of events) {
+    const kind = e.kind || '(no kind)';
+    let row = byKind.get(kind);
+    if (!row) {
+      row = { kind, count: 0, tokenCostDollars: 0, chargedDollars: 0 };
+      byKind.set(kind, row);
+    }
+    row.count++;
+    row.tokenCostDollars += sumTokenCostDollars([e]);
+    row.chargedDollars += (e.chargedCents ?? 0) / 100;
+  }
+  return [...byKind.values()].sort((a, b) => b.tokenCostDollars - a.tokenCostDollars);
 }
 
 export type StatusBarQuotaFormat = 'usedLimit' | 'remaining';
@@ -257,6 +375,8 @@ export function statusBarText(opts: {
   showWhatIfPrefix: boolean;
   quotaFormat?: StatusBarQuotaFormat;
   fillStyle?: StatusBarFillStyle;
+  /** Monthly spend budget, for plans metered in dollars rather than requests. */
+  budget?: { spentDollars: number; budgetDollars: number; resetIso?: string } | null;
 }): string {
   const {
     quota,
@@ -265,6 +385,7 @@ export function statusBarText(opts: {
     showWhatIfPrefix,
     quotaFormat = 'usedLimit',
     fillStyle = 'dots',
+    budget,
   } = opts;
   if (quota?.limit != null && quota.limit > 0) {
     const limit = quota.limit;
@@ -289,6 +410,23 @@ export function statusBarText(opts: {
 
     return `${usedLimitLabel}${fillSuffix}${resetSuffix}`;
   }
+
+  // No request allowance, but a dollar budget: same gauge, same format and fill
+  // settings, denominated in money. Without this the quota-shaped settings do
+  // nothing at all for anyone on a budget-metered plan.
+  if (budget && budget.budgetDollars > 0) {
+    const { spentDollars, budgetDollars } = budget;
+    const reset = formatQuotaResetShort(budget.resetIso);
+    const resetSuffix = reset ? ` · ${reset}` : '';
+    const fill = quotaFillBar(spentDollars, budgetDollars, 5, fillStyle);
+    const fillSuffix = fill ? ` ${fill}` : '';
+    if (quotaFormat === 'remaining') {
+      const remaining = Math.max(0, budgetDollars - spentDollars);
+      return `$${remaining.toFixed(2)} left${fillSuffix}${resetSuffix}`;
+    }
+    return `$${spentDollars.toFixed(2)}/$${budgetDollars.toFixed(2)}${fillSuffix}${resetSuffix}`;
+  }
+
   return `${showWhatIfPrefix ? '~' : ''}$${costDollars.toFixed(2)}`;
 }
 
@@ -296,6 +434,100 @@ export function statusBarText(opts: {
 export function quotaPercentUsed(quota: QuotaLike | null | undefined): number | null {
   if (quota?.limit == null || quota.limit <= 0) return null;
   return (quota.used / quota.limit) * 100;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export interface BudgetRunway {
+  budgetDollars: number;
+  spentDollars: number;
+  /** Negative once spend has passed the budget — callers decide how to show it. */
+  remainingDollars: number;
+  overBudget: boolean;
+  percentUsed: number;
+  /** Observed pace so far this cycle; null until enough of the cycle has elapsed. */
+  dailySpend: number | null;
+  daysToExhaustion: number | null;
+  exhaustionDate: Date | null;
+  daysUntilReset: number | null;
+  /** True when the budget runs out before the cycle resets — the case worth warning about. */
+  exhaustsBeforeReset: boolean | null;
+  /** Spend per day from now that still lands exactly on the budget at reset. */
+  safeDailySpend: number | null;
+}
+
+/**
+ * Budget-plan equivalent of projectExhaustionDate: how long the money lasts at
+ * the current pace, and what daily spend fits the rest of the cycle.
+ *
+ * Every figure is derived from the budget and spend passed in on this call, and
+ * nothing is carried between calls. That is what makes a budget that changes
+ * mid-cycle correct without special handling: raise it and the runway simply
+ * grows from the same recorded spend; cut it — even below what's already
+ * spent — and the result reports over-budget rather than a negative runway.
+ * Callers must therefore pass the budget as it stands now, never a value
+ * captured when the cycle began.
+ *
+ * The pace is the cycle's average (spend ÷ elapsed), matching how the
+ * request-quota projection works; a caller with a better estimate can pass
+ * `dailySpendOverride` (e.g. a trailing 7-day rate) without changing this math.
+ */
+export function projectBudgetRunway(opts: {
+  spentDollars: number;
+  budgetDollars: number | null | undefined;
+  cycleStartMs: number;
+  /** Cycle reset time; enables the "before reset?" verdict and safe daily spend. */
+  cycleEndMs?: number | null;
+  nowMs?: number;
+  dailySpendOverride?: number | null;
+}): BudgetRunway | null {
+  const { spentDollars, budgetDollars, cycleStartMs, cycleEndMs, dailySpendOverride } = opts;
+  const nowMs = opts.nowMs ?? Date.now();
+  if (budgetDollars == null || !(budgetDollars > 0)) return null;
+  if (!Number.isFinite(cycleStartMs) || cycleStartMs > nowMs) return null;
+
+  const spent = Math.max(0, spentDollars);
+  const remainingDollars = budgetDollars - spent;
+  const overBudget = remainingDollars <= 0;
+  const percentUsed = (spent / budgetDollars) * 100;
+
+  const elapsedDays = (nowMs - cycleStartMs) / DAY_MS;
+  // Under half a day in, spend ÷ elapsed swings wildly — one big request would
+  // project a budget gone in hours. Report no pace rather than a scary guess.
+  let dailySpend = dailySpendOverride ?? (elapsedDays >= 0.5 ? spent / elapsedDays : null);
+  if (dailySpend != null && !(dailySpend > 0)) dailySpend = null;
+
+  const daysUntilReset = cycleEndMs != null && cycleEndMs > nowMs
+    ? (cycleEndMs - nowMs) / DAY_MS
+    : null;
+
+  let daysToExhaustion: number | null = null;
+  let exhaustionDate: Date | null = null;
+  if (overBudget) {
+    daysToExhaustion = 0;
+    exhaustionDate = new Date(nowMs);
+  } else if (dailySpend != null) {
+    daysToExhaustion = remainingDollars / dailySpend;
+    exhaustionDate = new Date(nowMs + daysToExhaustion * DAY_MS);
+  }
+
+  return {
+    budgetDollars,
+    spentDollars: spent,
+    remainingDollars,
+    overBudget,
+    percentUsed,
+    dailySpend,
+    daysToExhaustion,
+    exhaustionDate,
+    daysUntilReset,
+    exhaustsBeforeReset: daysToExhaustion != null && daysUntilReset != null
+      ? daysToExhaustion < daysUntilReset
+      : null,
+    safeDailySpend: daysUntilReset != null && daysUntilReset > 0 && !overBudget
+      ? remainingDollars / daysUntilReset
+      : null,
+  };
 }
 
 /**

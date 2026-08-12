@@ -6,6 +6,7 @@ import {
 } from './auth';
 import {
   ApiError,
+  BudgetLookup,
   PlanInfo,
   PlanQuota,
   RawUsageEvent,
@@ -16,13 +17,34 @@ import {
   fetchPlanQuota,
   fetchPricingMarkdown,
   fetchStripeProfile,
+  fetchBudget,
 } from './api';
-import { billingCycleWindow, rollingDayWindow, type StatusBarPeriodMode } from './shared/usageLogic';
+import {
+  billingCycleWindow,
+  eventKindTotals,
+  eventTimestampSpan,
+  eventsWithinRange,
+  projectBudgetRunway,
+  rollingDayWindow,
+  sumPlanMeteredDollars,
+  sumTokenCostDollars,
+  type BudgetRunway,
+  type StatusBarPeriodMode,
+} from './shared/usageLogic';
 
 export {
   billingCycleWindow,
   clampPeriodDays,
   countRequests,
+  eventBillingRegime,
+  eventCostDollars,
+  eventKindTotals,
+  planMeteredDollars,
+  projectBudgetRunway,
+  sumPlanMeteredDollars,
+  eventTimestampMs,
+  eventTimestampSpan,
+  eventsWithinRange,
   formatCycleRangeLabel,
   parseStatusBarPeriodConfig,
   projectExhaustionDate,
@@ -35,6 +57,18 @@ export {
   sumTokenCostDollars,
 } from './shared/usageLogic';
 export type { StatusBarFillStyle, StatusBarPeriodMode, StatusBarQuotaFormat } from './shared/usageLogic';
+
+export interface BudgetStatus {
+  budgetDollars: number | null;
+  /** Where the budget came from — the panel says so rather than implying Cursor reported it. */
+  source: 'setting' | 'cursor' | 'hardLimit' | 'none';
+  /** Which setting or endpoint field supplied it, so a wrong value is traceable. */
+  sourceDetail?: string;
+  spentDollars: number;
+  cycleStartMs: number;
+  cycleEndMs: number;
+  runway: BudgetRunway | null;
+}
 
 export interface UsageResult {
   events: RawUsageEvent[];
@@ -59,6 +93,8 @@ export class UsageService {
   private sessionCache: { session: CursorSession | null; fetchedAt: number } | null = null;
   private usageCache = new Map<string, { result: UsageResult; fetchedAt: number }>();
   private usageInflight = new Map<string, Promise<UsageResult>>();
+  /** undefined = not looked up yet; null = looked up and nothing found. */
+  private budgetLookup: BudgetLookup | null | undefined = undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -70,6 +106,7 @@ export class UsageService {
     this.sessionCache = null;
     this.usageCache.clear();
     this.usageInflight.clear();
+    this.budgetLookup = undefined;
   }
 
   async getSession(): Promise<CursorSession | null> {
@@ -160,16 +197,62 @@ export class UsageService {
     return `none:${startMs}:${endMs}`;
   }
 
+  /**
+   * Every consumer (panel, status bar) assumes the events it gets belong to the
+   * window it asked for, so enforce that here rather than in each of them, and
+   * log what the API actually returned — a mismatch between the requested
+   * window and the events' real span is the difference between "cursor.com
+   * disagrees with this extension" and "this extension has a bug".
+   */
+  private scopeToWindow(
+    events: RawUsageEvent[],
+    startMs: number,
+    endMs: number,
+  ): RawUsageEvent[] {
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const span = eventTimestampSpan(events);
+    this.log(
+      `Usage window ${iso(startMs)} → ${iso(endMs)}: API returned ${events.length} event(s)`
+      + (span ? ` spanning ${iso(span.min)} → ${iso(span.max)}` : ' (none carry a usable timestamp)'),
+    );
+
+    const kept = eventsWithinRange(events, startMs, endMs);
+    if (kept.length !== events.length) {
+      this.log(
+        `Dropped ${events.length - kept.length} event(s) outside the requested window — `
+        + 'cursor.com returned rows beyond the range it was asked for; totals now cover the '
+        + 'selected range only.',
+      );
+    }
+
+    // Printed in cursor.com's own vocabulary (Total / Included / On-demand) so
+    // the panel's figures can be reconciled against the dashboard line by line
+    // instead of eyeballed.
+    const money = (d: number) => `$${d.toFixed(2)}`;
+    const kinds = eventKindTotals(kept)
+      .map((k) => `"${k.kind}" ×${k.count} token ${money(k.tokenCostDollars)} / charged ${money(k.chargedDollars)}`)
+      .join(', ');
+    this.log(
+      `In-window totals: ${kept.length} event(s) · token cost ${money(sumTokenCostDollars(kept))}`
+      + ` · by kind: ${kinds || '(none)'}`,
+    );
+    return kept;
+  }
+
   private async fetchUsage(startMs: number, endMs: number): Promise<UsageResult> {
     const adminKey = await getAdminApiKey(this.context);
     if (adminKey) {
-      const events = await fetchAdminUsage(adminKey, startMs, endMs);
+      const events = this.scopeToWindow(
+        await fetchAdminUsage(adminKey, startMs, endMs),
+        startMs,
+        endMs,
+      );
       return { events, authMode: 'admin', note: 'Team usage via Admin API.' };
     }
 
     const session = await this.getSession();
     if (session) {
-      const [events, plan, quota, hardLimit] = await Promise.all([
+      const [rawEvents, plan, quota, hardLimit] = await Promise.all([
         fetchDashboardUsage(session, startMs, endMs),
         fetchStripeProfile(session).catch((e) => {
           this.log(`Plan lookup failed (non-fatal): ${e?.message || e}`);
@@ -184,6 +267,7 @@ export class UsageService {
           return undefined;
         }),
       ]);
+      const events = this.scopeToWindow(rawEvents, startMs, endMs);
       if (plan) this.log(`Plan: ${plan.membershipType}`);
       if (quota) this.log(`Quota: ${quota.used}/${quota.limit ?? '∞'}`);
       if (hardLimit) this.log(`Hard limit: $${hardLimit}`);
@@ -210,6 +294,68 @@ export class UsageService {
     }
 
     return { events: [], authMode: 'none' };
+  }
+
+  /**
+   * Spend against the monthly budget for the current cycle, with a burn-rate
+   * projection. Reports the same money cursor.com's usage page shows as
+   * "Total usage", so the two can be compared directly.
+   *
+   * The budget comes in per call rather than being stored: users raise or cut
+   * it mid-cycle, and a figure captured at cycle start would quietly project
+   * the wrong runway. cursor.com does not expose the budget through any
+   * endpoint this extension can read, so the caller's setting is the primary
+   * source and the usage-based spend cap is the fallback.
+   *
+   * (The value is passed in, not read from the workspace configuration here,
+   * so this module stays free of the VS Code runtime and remains unit-testable
+   * outside the extension host.)
+   */
+  async getBudgetStatus(configuredBudgetDollars = 0): Promise<BudgetStatus | null> {
+    const configured = configuredBudgetDollars > 0 ? configuredBudgetDollars : 0;
+
+    const usage = await this.getStatusBarUsage({ mode: 'cycle', periodDays: 30 });
+    if (usage.authMode === 'none') return null;
+
+    // Ask cursor.com only when the user hasn't set a budget themselves, and
+    // cache the answer for the session: it's the same lookup on every refresh.
+    if (configured === 0 && this.budgetLookup === undefined) {
+      const session = await this.getSession();
+      this.budgetLookup = session
+        ? await fetchBudget(session, { teamId: usage.plan?.teamId, email: usage.email })
+            .catch(() => null)
+        : null;
+    }
+
+    const looked = configured > 0 ? null : this.budgetLookup;
+    const budgetDollars = configured > 0 ? configured : (looked?.dollars ?? usage.hardLimit ?? null);
+    const source: BudgetStatus['source'] = configured > 0
+      ? 'setting'
+      : (looked ? 'cursor' : (usage.hardLimit ? 'hardLimit' : 'none'));
+    const sourceDetail = configured > 0 ? 'cursorUsage.budget.monthlyDollars' : looked?.source;
+
+    const { start, end } = billingCycleWindow(usage.quota ?? undefined);
+    // Metered spend only: requests priced by the older per-request plan never
+    // counted against a dollar budget, so folding them in would show a budget
+    // burning down that cursor.com considers untouched.
+    const spentDollars = sumPlanMeteredDollars(usage.events);
+    // The cycle ends when the quota resets; fall back to the window's end so a
+    // missing reset date costs the "before reset?" verdict, not the projection.
+    const resetMs = usage.quota?.resetIso ? new Date(usage.quota.resetIso).getTime() : NaN;
+    const cycleEndMs = Number.isNaN(resetMs) ? end : resetMs;
+
+    const runway = projectBudgetRunway({
+      spentDollars,
+      budgetDollars,
+      cycleStartMs: start,
+      cycleEndMs,
+    });
+    this.log(
+      `Budget: ${budgetDollars != null ? `$${budgetDollars}` : 'not set'} (${sourceDetail || source}) · spent $${spentDollars.toFixed(2)} this cycle`
+      + (runway?.dailySpend != null ? ` · $${runway.dailySpend.toFixed(2)}/day` : ''),
+    );
+
+    return { budgetDollars, source, sourceDetail, spentDollars, cycleStartMs: start, cycleEndMs, runway };
   }
 
   /** Pricing markdown, cached for an hour (it changes rarely). */

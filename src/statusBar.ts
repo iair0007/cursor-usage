@@ -116,10 +116,30 @@ export class UsageStatusBar {
 
       const quotaPct = quotaPercentUsed(quota);
       const hasQuotaLimit = quotaPct != null;
+
+      // Budget-metered plans have no request allowance, so the quota gauge,
+      // its format/fill settings and the warn/critical thresholds would all sit
+      // idle. Drive them from the budget instead — same settings, same
+      // behaviour, denominated in money.
+      const budgetStatus = hasQuotaLimit ? null : await this.service.getBudgetStatus(
+        vscode.workspace.getConfiguration('cursorUsage').get<number>('budget.monthlyDollars', 0),
+      ).catch(() => null);
+      const budget = budgetStatus?.budgetDollars
+        ? {
+            spentDollars: budgetStatus.spentDollars,
+            budgetDollars: budgetStatus.budgetDollars,
+            resetIso: quota?.resetIso,
+          }
+        : null;
+
+      // Whichever allowance this plan has: requests used, or budget spent.
+      // A runway only exists when a budget does, so this is null for plans
+      // with neither, and the thresholds simply don't apply.
+      const usedPct = quotaPct ?? (budget ? budgetStatus?.runway?.percentUsed ?? null : null);
       let severity: 'normal' | 'warning' | 'critical' = 'normal';
-      if (quotaPct != null) {
-        if (quotaPct >= criticalAtPercent) severity = 'critical';
-        else if (quotaPct >= warnAtPercent) severity = 'warning';
+      if (usedPct != null) {
+        if (usedPct >= criticalAtPercent) severity = 'critical';
+        else if (usedPct >= warnAtPercent) severity = 'warning';
       }
       this.item.backgroundColor =
         severity === 'critical'
@@ -136,6 +156,7 @@ export class UsageStatusBar {
         showWhatIfPrefix,
         quotaFormat,
         fillStyle,
+        budget,
       })}`;
 
       const tooltip = new vscode.MarkdownString(undefined, true);
@@ -146,6 +167,22 @@ export class UsageStatusBar {
       tooltip.appendMarkdown(`- ${costLabel} (${periodScope}): **$${cost.toFixed(2)}**\n`);
       if (!hasQuotaLimit) {
         tooltip.appendMarkdown(`- Requests (${periodScope}): **${countRequests(result.events).toLocaleString('en-US')}**\n`);
+      }
+      const runway = budgetStatus?.runway;
+      if (budget && runway) {
+        tooltip.appendMarkdown(
+          `- Budget: **$${budget.spentDollars.toFixed(2)} / $${budget.budgetDollars.toFixed(2)}** (${runway.percentUsed.toFixed(0)}%)\n`,
+        );
+        if (runway.overBudget) {
+          tooltip.appendMarkdown(`- **$${(-runway.remainingDollars).toFixed(2)} over budget** this cycle\n`);
+        } else if (runway.dailySpend != null && runway.daysToExhaustion != null) {
+          tooltip.appendMarkdown(
+            `- At $${runway.dailySpend.toFixed(2)}/day: ~${Math.round(runway.daysToExhaustion)} days of budget left\n`,
+          );
+          if (runway.safeDailySpend != null) {
+            tooltip.appendMarkdown(`- Stays in budget at up to **$${runway.safeDailySpend.toFixed(2)}/day**\n`);
+          }
+        }
       }
       if (result.plan?.membershipType) tooltip.appendMarkdown(`- Plan: ${result.plan.membershipType}\n`);
       if (quota && hasQuotaLimit) {

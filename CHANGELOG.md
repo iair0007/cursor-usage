@@ -14,7 +14,10 @@ All notable user-facing changes. Earlier releases predate this file; see the
 - **Both comparison columns are editable**, from their own headers. The custom
   option previously only moved the baseline, which made "this sprint vs last
   sprint" impossible to express. Pinning the left column detaches the
-  comparison from the filter bar and says so.
+  comparison from the filter bar and says so. The "Custom" chip is gone with
+  it — it did the same job from a place that could only reach one of the two
+  periods — leaving the presets as baseline shortcuts and the headers as the
+  way to set anything else.
 - The comparison gained requests-per-day and cache hit rate, and its model
   table now carries request counts and per-request averages — cost alone can't
   separate "used it more" from "each call got dearer". Rows that didn't move

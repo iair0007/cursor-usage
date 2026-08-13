@@ -290,14 +290,13 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
           <div class="compare-head">
             <div>
               <h3>Compare periods</h3>
-              <p class="panel-desc">Your selected period against another, and which models moved.</p>
+              <p class="panel-desc">Your selected period against another, and which models moved. Click either period's dates to change it.</p>
             </div>
             <div class="compare-controls">
               <div class="date-presets" role="group" aria-label="Compare against">
                 <span class="presets-label">Against</span>
                 <button type="button" class="preset-btn compare-mode-btn active" data-compare-mode="previous">Previous period</button>
                 <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="prevMonth">Same dates last month</button>
-                <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="custom">Custom</button>
               </div>
             </div>
           </div>
@@ -309,6 +308,13 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             detaches the comparison from the filter bar, which the panel then
             says outright rather than leaving two periods on screen with no
             clue which one the toolbar above is driving.
+
+            There is deliberately no "Custom" chip beside the presets above:
+            it did the same job as clicking a column's dates, from a place that
+            could only ever move one of the two periods. With it gone, the
+            presets are shortcuts for the baseline and the headers are the way
+            to set anything else — so the panel-desc says so out loud, since a
+            dashed underline alone is a quiet affordance.
           -->
           <div class="compare-editor hidden" id="compareEditor">
             <span class="compare-editor-label" id="compareEditorLabel"></span>

@@ -3222,15 +3222,6 @@ async function init() {
       // Seed the custom pickers with the window they'd otherwise replace, so
       // switching to Custom starts from what was already on screen instead of
       // two empty inputs.
-      if (state.trend.mode === 'custom') {
-        if (!state.trend.customStart && state.trend.range) {
-          state.trend.customStart = toDateInputValue(new Date(state.trend.range.startMs));
-          state.trend.customEnd = toDateInputValue(new Date(state.trend.range.endMs));
-        }
-        // "Custom" is a request to choose dates, so open the picker on it
-        // rather than leaving the user to find the header button.
-        state.trend.editing = 'baseline';
-      }
       saveComparePrefs();
       renderComparison();
       void loadTrendComparison();

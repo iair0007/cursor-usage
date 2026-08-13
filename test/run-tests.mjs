@@ -31,6 +31,7 @@ const {
   normModel,
   simulatorModels,
   defaultCompareSelection,
+  mergeCompareSelection,
   estimateTokenCost,
   cacheSavingsFor,
   displayModel,
@@ -178,6 +179,33 @@ test('never defaults to a model it cannot price', () => {
   const models = simulatorModels(pricing, events);
   const picked = defaultCompareSelection(models, events, 4);
   assert.ok(!picked.has('cursor-grok-4.6-high'));
+});
+
+console.log('mergeCompareSelection');
+test('keeps models the current request cannot offer', () => {
+  // Comparing a Grok request hides Grok from the picker; unticking Sonnet there
+  // must not drop Grok from the saved selection.
+  const merged = mergeCompareSelection(
+    ['claude-4-5-sonnet', 'cursor-grok-4.6-high'],
+    ['claude-4-5-sonnet', 'gpt-5-2'],
+    ['gpt-5-2'],
+  );
+  assert.deepEqual(merged, ['cursor-grok-4.6-high', 'gpt-5-2']);
+});
+test('unticking an offered model removes it', () => {
+  const merged = mergeCompareSelection(['gpt-5-2', 'composer-2-5'], ['gpt-5-2', 'composer-2-5'], ['gpt-5-2']);
+  assert.deepEqual(merged, ['gpt-5-2']);
+});
+test('no stored selection yet is not an error', () => {
+  assert.deepEqual(mergeCompareSelection(null, ['gpt-5-2'], ['gpt-5-2']), ['gpt-5-2']);
+});
+test('a carried key that is also ticked is not duplicated', () => {
+  const merged = mergeCompareSelection(['gpt-5-2'], ['gpt-5-2'], ['gpt-5-2']);
+  assert.deepEqual(merged, ['gpt-5-2']);
+});
+test('clearing every offered model still leaves the carried ones', () => {
+  const merged = mergeCompareSelection(['gpt-5-2', 'cursor-grok-4.6-high'], ['gpt-5-2'], []);
+  assert.deepEqual(merged, ['cursor-grok-4.6-high']);
 });
 
 console.log('cost math');

@@ -12,6 +12,7 @@ import {
   estimateTokenCost,
   simulatorModels,
   defaultCompareSelection,
+  mergeCompareSelection,
   displayModel,
   cacheSavingsFor,
   num,
@@ -81,6 +82,16 @@ window.addEventListener('message', (ev) => {
 // Persistence — webview state instead of localStorage
 // ---------------------------------------------------------------------------
 
+/**
+ * Two tiers, because vscode.setState alone is not durable enough. It survives
+ * the panel being hidden (and is synchronous, which every caller here relies
+ * on), but it dies with the panel — so preferences stored only there reset
+ * every time the dashboard was closed and reopened. The extension host's
+ * globalState is the durable copy; setState is the fast local mirror.
+ *
+ * Reads stay synchronous: hydratePrefs() pulls the durable copy in before
+ * init() touches any of it.
+ */
 const persisted = vscode.getState() || {};
 const storage = {
   getItem(key) {
@@ -89,8 +100,21 @@ const storage = {
   setItem(key, value) {
     persisted[key] = String(value);
     vscode.setState(persisted);
+    // Per key rather than whole-object, so a slow write can't clobber a
+    // different preference saved while it was in flight. Best-effort: losing a
+    // preference write is not worth failing a user action over.
+    rpc('prefsSet', { key, value: String(value) }).catch(() => {});
   },
 };
+
+async function hydratePrefs() {
+  try {
+    const stored = await rpc('prefsGet', {}, 5000);
+    if (stored && typeof stored === 'object') Object.assign(persisted, stored);
+  } catch {
+    // Older host, or the call failed — fall back to whatever setState kept.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -2821,29 +2845,43 @@ function saveCompareModelPrefs(keys) {
 }
 
 function initCompareModelPrefs() {
+  // `[]` is a real choice — the user cleared every model — and is distinct from
+  // `null`, which means they have never picked. Testing `.length` here treated
+  // the two alike and silently re-checked the computed defaults.
   const stored = loadCompareModelPrefs();
-  if (stored?.length) state.simCompareSelected = new Set(stored);
+  if (stored) state.simCompareSelected = new Set(stored);
 }
 
+/**
+ * The selection to show in the picker. Computed defaults apply only when the
+ * user has never chosen; once they have, their set is returned as-is, including
+ * keys this request cannot offer. Filtering it down to what is currently
+ * offered would let a save further down the line write the narrowed set back
+ * and lose the rest.
+ */
 function resolveCompareSelection(models) {
-  if (state.simCompareSelected?.size) {
-    const available = new Set(models.map((m) => m.key));
-    const kept = [...state.simCompareSelected].filter((k) => available.has(k));
-    if (kept.length) return new Set(kept);
-  }
+  if (state.simCompareSelected) return state.simCompareSelected;
   const stored = loadCompareModelPrefs();
-  if (stored?.length) {
-    const available = new Set(models.map((m) => m.key));
-    const restored = stored.filter((k) => available.has(k));
-    if (restored.length) return new Set(restored);
-  }
+  if (stored) return new Set(stored);
   return defaultCompareSelection(models, modelSourceEvents());
 }
 
 function saveCompareModelSelection() {
-  const checked = [...document.querySelectorAll('#simCompareModelFilters input:checked')].map((el) => el.value);
-  state.simCompareSelected = new Set(checked);
-  saveCompareModelPrefs(checked);
+  const boxes = [...document.querySelectorAll('#simCompareModelFilters input')];
+  const merged = mergeCompareSelection(
+    loadCompareModelPrefs(),
+    boxes.map((el) => el.value),
+    boxes.filter((el) => el.checked).map((el) => el.value),
+  );
+  state.simCompareSelected = new Set(merged);
+  saveCompareModelPrefs(merged);
+  updateComparePickerLabel();
+}
+
+/** Clear means all models, not just the ones this request happens to offer. */
+function clearCompareModelSelection() {
+  state.simCompareSelected = new Set();
+  saveCompareModelPrefs([]);
   updateComparePickerLabel();
 }
 
@@ -3037,16 +3075,19 @@ function renderCompareTableFromState() {
   if (!ctx || !$('simCompareBody')) return;
 
   const selected = getCompareModelSelection();
+  // Counted from the rows this request can actually show, not from the raw
+  // selection: that set now carries models the current request doesn't offer,
+  // so its size no longer says whether the table has anything in it.
+  const filtered = ctx.altRows.filter((r) => selected.has(r.key));
   const hint = $('simCompareFilterHint');
-  if (hint) hint.classList.toggle('hidden', selected.size > 0);
+  if (hint) hint.classList.toggle('hidden', filtered.length > 0);
 
-  if (!selected.size) {
+  if (!filtered.length) {
     $('simCompareBody').innerHTML = `<tr><td colspan="4">Select at least one model above.</td></tr>`;
     updateCompareSortHeaders();
     return;
   }
 
-  const filtered = ctx.altRows.filter((r) => selected.has(r.key));
   let rows;
   if (state.simCompareSortKey === 'label') {
     rows = sortCompareRows([ctx.actualRow, ...filtered], 'label', state.simCompareSortDir);
@@ -3186,6 +3227,8 @@ function setAppView(view) {
 // ---------------------------------------------------------------------------
 
 async function init() {
+  // Must come first: everything below reads storage synchronously.
+  await hydratePrefs();
   initDateRange();
   initPeriodComparePrefs();
   initCompareModelPrefs();
@@ -3341,7 +3384,7 @@ async function init() {
   $('simCompareClear')?.addEventListener('click', (ev) => {
     ev.stopPropagation();
     document.querySelectorAll('#simCompareModelFilters input').forEach((cb) => { cb.checked = false; });
-    saveCompareModelSelection();
+    clearCompareModelSelection();
     renderCompareTableFromState();
   });
 

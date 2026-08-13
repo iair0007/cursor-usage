@@ -3,6 +3,9 @@ import { UsageService } from './service';
 import { UsageStatusBar } from './statusBar';
 import { getDashboardHtml } from './html';
 
+/** globalState key holding the webview's persisted UI preferences. */
+const PREFS_KEY = 'cursorUsage.webviewPrefs';
+
 interface RpcMessage {
   type: 'rpc';
   id: number;
@@ -96,6 +99,20 @@ export class DashboardPanel {
       }
       case 'pricing':
         return { markdown: await this.service.getPricingMarkdown() };
+      // The webview's own vscode.setState survives being hidden but dies with
+      // the panel, so anything stored only there silently reset every time the
+      // dashboard was closed and reopened. globalState is the durable home.
+      case 'prefsGet':
+        return this.context.globalState.get<Record<string, string>>(PREFS_KEY) ?? {};
+      case 'prefsSet': {
+        const key = String(params.key ?? '');
+        if (!key) throw new Error('prefsSet requires a key');
+        const prefs = { ...(this.context.globalState.get<Record<string, string>>(PREFS_KEY) ?? {}) };
+        if (params.value == null) delete prefs[key];
+        else prefs[key] = String(params.value);
+        await this.context.globalState.update(PREFS_KEY, prefs);
+        return { ok: true };
+      }
       case 'copyText':
         await vscode.env.clipboard.writeText(String(params.text ?? ''));
         return { ok: true };

@@ -248,6 +248,29 @@ export function defaultCompareSelection(models, events = [], limit = 4) {
   return new Set(pool.slice(0, Math.min(limit, pool.length)).map((m) => m.key));
 }
 
+/**
+ * The compare selection to persist after the user ticks a box.
+ *
+ * The picker only ever offers models other than the one the current request
+ * used, so the checkboxes are a partial view of the saved selection. Writing
+ * back just what is checked therefore dropped any model the current request
+ * happened to use — pick a Grok request to compare and Grok quietly vanished
+ * from your saved models. Keys the picker cannot currently offer are carried
+ * through untouched; only the offered ones are rewritten.
+ */
+export function mergeCompareSelection(stored, offered, checked) {
+  const offeredSet = new Set(offered);
+  const carried = (stored || []).filter((k) => !offeredSet.has(k));
+  const out = [];
+  const seen = new Set();
+  for (const k of [...carried, ...checked]) {
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
 export function estimateTokenCost(rates, tokens) {
   if (!rates) return null;
   let cost = 0;

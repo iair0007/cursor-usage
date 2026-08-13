@@ -645,7 +645,17 @@ tfoot td {
 /* Each column names the window it covers: two periods are on screen at once,
    so a number that doesn't say which one it belongs to is worse than none. */
 .compare-col-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-.compare-col-range { display: block; color: var(--fg); font-size: 13px; font-weight: 600; }
+/* An id is a literal, so it keeps its own case and font — the global uppercase
+   `th` styling would print a conversation id that was never issued. */
+.compare-col-range {
+  display: block;
+  color: var(--fg);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
 .compare-col-days { display: block; font-size: 11px; font-weight: 400; }
 /* Row separators span the whole row. The global rules put a bottom border on
    `td` but not on a row-header `th`, which draws a rule that starts at the
@@ -690,12 +700,68 @@ tfoot td {
 .delta-up { color: var(--amber); }
 .delta-down { color: var(--green-strong); }
 .delta-flat { color: var(--muted); font-weight: 400; }
+/* Two sessions have no better and worse direction — see deltaCell. */
+.delta-neutral { color: var(--fg); }
 
 @media (max-width: 720px) {
   .compare-head { flex-direction: column; }
   .compare-table { font-size: 12px; }
   .compare-table th, .compare-table td { padding: 6px 6px; }
 }
+
+/* --- Sessions ------------------------------------------------------------ */
+
+.sessions-search input {
+  min-width: 200px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--vscode-input-background, var(--panel));
+  color: var(--vscode-input-foreground, var(--fg));
+  font: inherit;
+  font-size: 12px;
+}
+.sessions-hint { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
+.sessions-compare-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sessions-table { margin-top: 18px; }
+/* The pick column is a control, not a figure, so it doesn't get the tabular
+   right-alignment the rest of the table uses. */
+.sessions-table .session-pick {
+  width: 1%;
+  white-space: nowrap;
+  text-align: left;
+}
+.sessions-table tbody tr { cursor: pointer; }
+.sessions-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.session-row-picked { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Which of the two slots a picked row holds, so the A and B columns above can
+   be traced back to rows that may be far apart in a long list. */
+.session-slot {
+  display: inline-block;
+  margin-left: 4px;
+  min-width: 14px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--vscode-button-foreground, #fff);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+/* The id column is text, not a figure: its header has to sit over the ids
+   rather than over the right edge the numeric columns share. */
+.sessions-table thead th:nth-child(2) { text-align: left; }
+.sessions-table .session-id {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.sessions-table .session-models { color: var(--muted); font-size: 11px; }
 
 .analytics-chart-main { margin-bottom: 10px; }
 .analytics-chart-row {

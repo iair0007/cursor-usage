@@ -276,6 +276,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
       <div class="view-toggle hidden" role="tablist" aria-label="Analyze views" id="analyzeTabs">
         <button type="button" class="view-tab active" data-analyze-panel="findings" role="tab" aria-selected="true">Findings</button>
         <button type="button" class="view-tab" data-analyze-panel="compare" role="tab" aria-selected="false">Compare periods</button>
+        <button type="button" class="view-tab" data-analyze-panel="sessions" role="tab" aria-selected="false">Sessions</button>
       </div>
 
       <div id="analyzeCompare" class="hidden" role="tabpanel">
@@ -330,6 +331,36 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
           <p class="compare-note hidden" id="compareNote"></p>
         </article>
 
+      </div>
+
+      <!--
+        Sessions groups the same requests by the conversation they came from.
+        It deliberately has no date control of its own: the filter bar above
+        already answers "which dates", so picking a range there and coming here
+        is the whole flow. A third window picker on this tab would compete with
+        the toolbar for the same question.
+      -->
+      <div id="analyzeSessions" class="hidden" role="tabpanel">
+        <article class="panel compare-panel" id="sessionsPanel">
+          <div class="compare-head">
+            <div>
+              <h3>Sessions</h3>
+              <p class="panel-desc">Your selected period, grouped by conversation. Pick two to compare them side by side.</p>
+            </div>
+            <div class="compare-controls">
+              <label class="sessions-search">
+                <span class="sr-only">Filter sessions</span>
+                <input type="search" id="sessionSearch" placeholder="Filter by id or model" />
+              </label>
+            </div>
+          </div>
+
+          <p class="compare-status hidden" id="sessionsStatus"></p>
+          <div id="sessionsSummary"></div>
+          <div id="sessionsCompare"></div>
+          <div id="sessionsList"></div>
+          <p class="compare-note hidden" id="sessionsNote"></p>
+        </article>
       </div>
 
       <div id="analyzeContent" class="analyze-layout hidden">

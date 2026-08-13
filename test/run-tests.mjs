@@ -58,6 +58,8 @@ const {
   shiftMonths,
   sessionTotals,
   sessionSummary,
+  sessionMetrics,
+  filterSessions,
   UNATTRIBUTED_SESSION,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
@@ -1742,6 +1744,48 @@ console.log('sessionTotals / sessionSummary');
     assert.equal(s.sessions, 0);
     assert.equal(s.unattributedRequests, 1);
     assert.equal(s.topSession, null);
+  });
+
+  test('sessionMetrics reports cost, span and pace', () => {
+    const [a] = sessionTotals(events); // conv-a: 3 requests, $5, 09:00 → 14:00
+    const m = sessionMetrics(a);
+    assert.equal(m.requests, 3);
+    assert.ok(Math.abs(m.costPerRequest - 5 / 3) < 1e-9);
+    assert.equal(m.durationMs, 5 * 60 * 60 * 1000);
+    assert.ok(Math.abs(m.requestsPerHour - 3 / 5) < 1e-9);
+    assert.ok(Math.abs(m.costPerHour - 1) < 1e-9);
+  });
+
+  test('a session too short to measure reports no rate', () => {
+    // One request, or a burst inside a minute: dividing by that span invents a
+    // "900 requests/hour" pace that describes the arithmetic, not the work.
+    const single = sessionTotals([ev('solo', 0.5, 'auto', at(1, 9))]);
+    const m = sessionMetrics(single[0]);
+    assert.equal(m.durationMs, 0);
+    assert.equal(m.requestsPerHour, null);
+    assert.equal(m.costPerHour, null);
+    // The per-request figure is still well defined and still worth showing.
+    assert.equal(m.costPerRequest, 0.5);
+  });
+
+  test('a session whose requests all errored has no per-request cost', () => {
+    const errored = sessionTotals([
+      ev('bad', 0.3, 'auto', at(1, 9), { counted: false }),
+      ev('bad', 0.2, 'auto', at(1, 11), { counted: false }),
+    ]);
+    const m = sessionMetrics(errored[0]);
+    assert.equal(m.requests, 0);
+    assert.equal(m.costPerRequest, null); // not 0, and not Infinity
+    assert.ok(Math.abs(m.costDollars - 0.5) < 1e-9);
+  });
+
+  test('filterSessions matches on id and on model', () => {
+    const totals = sessionTotals(events);
+    assert.deepEqual(filterSessions(totals, 'conv-b').map((t) => t.sessionId), ['conv-b']);
+    // Nobody types a uuid from memory, so the models are searchable too.
+    assert.deepEqual(filterSessions(totals, 'GPT-5').map((t) => t.sessionId), ['conv-a']);
+    assert.equal(filterSessions(totals, '   ').length, totals.length);
+    assert.equal(filterSessions(totals, 'nothing-matches').length, 0);
   });
 }
 

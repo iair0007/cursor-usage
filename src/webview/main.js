@@ -36,6 +36,11 @@ import {
   projectExhaustionDate,
   groupByDay,
   filterByRange,
+  sessionTotals,
+  sessionSummary,
+  sessionMetrics,
+  filterSessions,
+  UNATTRIBUTED_SESSION,
 } from './logic.js';
 
 const vscode = acquireVsCodeApi();
@@ -148,8 +153,21 @@ const state = {
   page: 1,
   pageSize: 25,
   panel: 'requests',
-  /** Analyze tab sub-view: 'findings' | 'compare'. */
+  /** Analyze tab sub-view: 'findings' | 'compare' | 'sessions'. */
   analyzePanel: 'findings',
+  sessions: {
+    /** Substring filter over session ids and models. */
+    query: '',
+    /**
+     * The (at most two) session ids lined up for comparison, oldest choice
+     * first. A third selection pushes the oldest out rather than refusing the
+     * click — being told "deselect one first" is a dead end when the two you
+     * want are ten rows apart.
+     */
+    selected: [],
+    /** The list is capped until asked otherwise; a wide range holds hundreds. */
+    showAll: false,
+  },
   appView: 'overview',
   simMode: 'request',
   simRequestId: null,
@@ -1102,6 +1120,11 @@ function windowDays(window) {
  * floats instead would print "$0.07 vs $0.06 · no change" (a real difference
  * rounded away) or "+$0.07 (+0%)" (a real difference the percentage rounds
  * away) — both read as the panel contradicting itself.
+ *
+ * `betterWhen: 'neither'` drops the colour entirely, for comparisons where no
+ * direction is the good one. Two sessions are not a before and an after: one
+ * costing more than the other is a fact about the work, not a regression, and
+ * painting it amber would invent a verdict the numbers don't support.
  */
 function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
   if (format(current) === format(baseline)) return '<span class="delta delta-flat">no change</span>';
@@ -1126,6 +1149,9 @@ function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
     pct = '';
   }
 
+  if (betterWhen === 'neither') {
+    return `<span class="delta delta-neutral">${magnitude}${esc(pct)}</span>`;
+  }
   const good = betterWhen === 'up' ? up : !up;
   return `<span class="delta ${good ? 'delta-down' : 'delta-up'}">${magnitude}${esc(pct)}</span>`;
 }
@@ -1239,7 +1265,10 @@ function renderComparison() {
       </tbody>
     </table>
 
-    ${renderModelDeltaTable(currentEvents, baselineEvents, currentWindow, baseWindow)}`;
+    ${renderModelDeltaTable(currentEvents, baselineEvents, {
+      currentLabel: windowLabel(currentWindow),
+      baselineLabel: windowLabel(baseWindow),
+    })}`;
 
   // Caveats that make an honest reading possible. Both are artefacts of the
   // windows, not of the usage, and both have burned readers of the ▲/▼ badge
@@ -1274,8 +1303,22 @@ function cacheHitRate(events) {
  * Cost alone can't tell "I used it more" from "each call got dearer", so the
  * requests and the per-request average sit beside it — the three together name
  * the cause rather than just the symptom.
+ *
+ * Takes labels rather than date windows because it serves two callers now: two
+ * periods, where a model appearing on one side only really has started or
+ * stopped, and two sessions, where it just means the two conversations reached
+ * for different models. Same table, different words for the same shape — hence
+ * `tagNew`/`tagGone`.
  */
-function renderModelDeltaTable(currentEvents, baselineEvents, currentWindow, baseWindow) {
+function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
+  const {
+    currentLabel,
+    baselineLabel,
+    heading = 'What moved, by model',
+    tagNew = 'new',
+    tagGone = 'stopped',
+    betterWhen = 'down',
+  } = opts;
   const curCost = Object.fromEntries(costByModel(currentEvents));
   const baseCost = Object.fromEntries(costByModel(baselineEvents));
   const countBy = (events) => events.reduce((m, e) => {
@@ -1293,8 +1336,8 @@ function renderModelDeltaTable(currentEvents, baselineEvents, currentWindow, bas
     const cAvg = cN ? d.current / cN : 0;
     const bAvg = bN ? d.baseline / bN : 0;
     const tag = d.baseline === 0
-      ? ' <span class="compare-tag">new</span>'
-      : d.current === 0 ? ' <span class="compare-tag compare-tag-gone">stopped</span>' : '';
+      ? ` <span class="compare-tag">${esc(tagNew)}</span>`
+      : d.current === 0 ? ` <span class="compare-tag compare-tag-gone">${esc(tagGone)}</span>` : '';
     // Rows that didn't move are kept for completeness but stop competing for
     // attention with the ones that did.
     const quiet = Math.abs(d.delta) < 0.005 ? ' class="compare-row-quiet"' : '';
@@ -1302,18 +1345,18 @@ function renderModelDeltaTable(currentEvents, baselineEvents, currentWindow, bas
         <th scope="row">${esc(d.model)}${tag}${rangeDiscountBadge(d.model)}</th>
         <td>${fmt.money(d.current)}<span class="compare-sub">${fmt.num(cN)} req · ${fmt.money(cAvg)}/req</span></td>
         <td>${fmt.money(d.baseline)}<span class="compare-sub">${fmt.num(bN)} req · ${fmt.money(bAvg)}/req</span></td>
-        <td>${deltaCell(d.current, d.baseline)}</td>
+        <td>${deltaCell(d.current, d.baseline, fmt.money, betterWhen)}</td>
       </tr>`;
   }).join('');
 
   return `
-    <h4 class="compare-subhead">What moved, by model</h4>
+    <h4 class="compare-subhead">${esc(heading)}</h4>
     <table class="compare-table compare-models">
       <thead>
         <tr>
           <th scope="col">Model</th>
-          <th scope="col">${esc(windowLabel(currentWindow))}</th>
-          <th scope="col">${esc(windowLabel(baseWindow))}</th>
+          <th scope="col">${esc(currentLabel)}</th>
+          <th scope="col">${esc(baselineLabel)}</th>
           <th scope="col">Change</th>
         </tr>
       </thead>
@@ -1392,6 +1435,300 @@ function saveComparePrefs() {
     compareEnd: state.trend.customEnd,
     comparePrimaryStart: state.trend.primaryStart,
     comparePrimaryEnd: state.trend.primaryEnd,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+/** Rows rendered before the list asks to be expanded. */
+const SESSION_LIST_LIMIT = 25;
+
+/** The loaded requests belonging to one session. */
+function eventsForSession(sessionId) {
+  return state.filtered.filter((e) => (e.conversationId || UNATTRIBUTED_SESSION) === sessionId);
+}
+
+/**
+ * Conversation ids are uuids: unreadable at full length, and alike enough at
+ * the front that a plain truncation would print two different sessions
+ * identically. Keeping both ends is what makes the rows tell each other apart.
+ */
+function shortSessionId(id) {
+  if (id === UNATTRIBUTED_SESSION) return 'Unattributed';
+  return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+}
+
+function fmtDuration(ms) {
+  if (!ms || ms < 60 * 1000) return '<1 min';
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.floor(mins / 60);
+  const rest = mins % 60;
+  return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
+function toggleSessionSelected(id) {
+  const selected = state.sessions.selected;
+  const at = selected.indexOf(id);
+  if (at >= 0) selected.splice(at, 1);
+  else {
+    selected.push(id);
+    // Oldest choice makes way for the newest, rather than the click doing
+    // nothing until something is deselected first.
+    if (selected.length > 2) selected.shift();
+  }
+  renderSessions();
+}
+
+/**
+ * The requests of the selected period, grouped by the conversation they came
+ * from, with any two of them comparable side by side.
+ *
+ * Scoped to the filter bar deliberately: "pick the dates, then pick from the
+ * sessions in them" is the flow, and a second date control here would ask the
+ * same question the toolbar already answers.
+ */
+function renderSessions() {
+  const panel = $('sessionsPanel');
+  if (!panel) return;
+
+  const statusEl = $('sessionsStatus');
+  const summaryEl = $('sessionsSummary');
+  const compareEl = $('sessionsCompare');
+  const listEl = $('sessionsList');
+  const noteEl = $('sessionsNote');
+
+  // The filter only makes sense with a list under it — on an empty period, or
+  // on an account whose requests carry no conversation id, it's a control that
+  // can't do anything.
+  const search = $('sessionSearch')?.closest('.sessions-search');
+  const clear = (text) => {
+    statusEl.textContent = text || '';
+    statusEl.classList.toggle('hidden', !text);
+    summaryEl.innerHTML = '';
+    compareEl.innerHTML = '';
+    listEl.innerHTML = '';
+    noteEl.classList.add('hidden');
+    search?.classList.add('hidden');
+  };
+
+  if (!state.loaded) return clear('Load a date range to see the sessions in it.');
+  if (!state.filtered.length) return clear('No requests in this period, so there are no sessions to show.');
+
+  const totals = sessionTotals(state.filtered);
+  const summary = sessionSummary(totals);
+  const sessions = totals.filter((t) => t.sessionId !== UNATTRIBUTED_SESSION);
+
+  // Nothing came back with a conversation id. Say which half is missing rather
+  // than showing an empty table, which reads as "you had no sessions" when what
+  // happened is that the requests couldn't be attributed to any.
+  if (!sessions.length) {
+    return clear(`None of the ${fmt.num(summary.unattributedRequests)} requests in this period `
+      + 'came with a conversation id, so they can\'t be grouped into sessions. Cursor only reports one '
+      + 'on some plans and API versions — everything else on this tab is unaffected.');
+  }
+
+  statusEl.classList.add('hidden');
+  search?.classList.remove('hidden');
+
+  // A selection made in another range points at sessions that aren't here any
+  // more; keeping it would leave a comparison of two blanks on screen.
+  state.sessions.selected = state.sessions.selected.filter(
+    (id) => sessions.some((t) => t.sessionId === id),
+  );
+
+  const costNoun = costModeNoun();
+  const top = summary.topSession;
+  summaryEl.innerHTML = `
+    <div class="kpi-strip">
+      <article class="kpi">
+        <span class="kpi-label">Sessions</span>
+        <span class="kpi-value">${fmt.num(summary.sessions)}</span>
+        <span class="kpi-sub">in the selected period</span>
+      </article>
+      <article class="kpi kpi-primary">
+        <span class="kpi-label">${esc(costNoun)} / session</span>
+        <span class="kpi-value">${fmt.money(summary.costPerSession)}</span>
+        <span class="kpi-sub">average across ${fmt.num(summary.sessions)}</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Requests / session</span>
+        <span class="kpi-value">${fmt.rate(summary.requestsPerSession)}</span>
+        <span class="kpi-sub">average</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Most expensive</span>
+        <span class="kpi-value">${fmt.money(top ? top.costDollars : null)}</span>
+        <span class="kpi-sub">${top ? esc(shortSessionId(top.sessionId)) : '—'}</span>
+      </article>
+    </div>`;
+
+  renderSessionComparison(compareEl, sessions);
+  renderSessionList(listEl, sessions);
+
+  const notes = [];
+  if (summary.unattributedRequests > 0) {
+    notes.push(`${fmt.num(summary.unattributedRequests)} request${summary.unattributedRequests === 1 ? '' : 's'} `
+      + 'in this period carried no conversation id and are not listed above, so the session totals '
+      + 'add up to less than the period total.');
+  }
+  notes.push('Sessions are grouped by the conversation id on each request. Only the dates in the toolbar '
+    + 'above scope this list.');
+  noteEl.textContent = notes.join(' ');
+  noteEl.classList.remove('hidden');
+}
+
+function sessionCompareRow(label, aHtml, bHtml, deltaHtml) {
+  return `<tr>
+      <th scope="row">${esc(label)}</th>
+      <td>${aHtml}</td>
+      <td>${bHtml}</td>
+      <td>${deltaHtml}</td>
+    </tr>`;
+}
+
+/**
+ * Two sessions side by side.
+ *
+ * Differences are deliberately uncoloured. Unlike two periods, where spending
+ * more this week than last is a direction, two conversations have no before and
+ * after — one being dearer than the other is a fact about what was asked of it.
+ */
+function renderSessionComparison(root, sessions) {
+  const [aId, bId] = state.sessions.selected;
+  const a = sessions.find((t) => t.sessionId === aId);
+  const b = sessions.find((t) => t.sessionId === bId);
+
+  if (!a || !b) {
+    const picked = a ? 1 : 0;
+    root.innerHTML = `<p class="sessions-hint">${picked === 1
+      ? `One session picked (${esc(shortSessionId(a.sessionId))}) — pick a second to compare them.`
+      : 'Pick two sessions below to compare them side by side.'}</p>`;
+    return;
+  }
+
+  const am = sessionMetrics(a);
+  const bm = sessionMetrics(b);
+  const aEvents = eventsForSession(a.sessionId);
+  const bEvents = eventsForSession(b.sessionId);
+  const rate = (v) => (v == null ? '—' : fmt.rate(v));
+  // A rate that isn't defined on one side has no difference to report; saying
+  // "+100% (new)" about a session too short to measure would be inventing one.
+  const rateDelta = (x, y) => (x == null || y == null ? '—' : deltaCell(x, y, fmt.rate, 'neither'));
+
+  const head = (label, total) => `
+    <th scope="col">
+      <span class="compare-col-label">${esc(label)}</span>
+      <span class="compare-col-range" title="${esc(total.sessionId)}">${esc(shortSessionId(total.sessionId))}</span>
+      <span class="compare-col-days">${esc(fmt.date(total.firstMs))}</span>
+    </th>`;
+
+  root.innerHTML = `
+    <div class="sessions-compare-head">
+      <h4 class="compare-subhead">Session A vs Session B</h4>
+      <button type="button" class="btn-text" id="sessionsClear">Clear selection</button>
+    </div>
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th scope="col"></th>
+          ${head('Session A', a)}
+          ${head('Session B', b)}
+          <th scope="col">Difference</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${sessionCompareRow(`Total ${costModeNoun()}`, fmt.money(am.costDollars), fmt.money(bm.costDollars),
+          deltaCell(am.costDollars, bm.costDollars, fmt.money, 'neither'))}
+        ${sessionCompareRow('Requests', fmt.num(am.requests), fmt.num(bm.requests),
+          deltaCell(am.requests, bm.requests, fmt.num, 'neither'))}
+        ${sessionCompareRow('Avg / request', fmt.money(am.costPerRequest), fmt.money(bm.costPerRequest),
+          deltaCell(am.costPerRequest ?? 0, bm.costPerRequest ?? 0, fmt.money, 'neither'))}
+        ${sessionCompareRow('Active for', fmtDuration(am.durationMs), fmtDuration(bm.durationMs), '—')}
+        ${sessionCompareRow('Requests / hour', rate(am.requestsPerHour), rate(bm.requestsPerHour),
+          rateDelta(am.requestsPerHour, bm.requestsPerHour))}
+        ${sessionCompareRow(`${costModeNoun()} / hour`, fmt.money(am.costPerHour), fmt.money(bm.costPerHour),
+          am.costPerHour == null || bm.costPerHour == null ? '—' : deltaCell(am.costPerHour, bm.costPerHour, fmt.money, 'neither'))}
+        ${sessionCompareRow('Cache hit rate', fmt.pct(cacheHitRate(aEvents)), fmt.pct(cacheHitRate(bEvents)),
+          deltaCell(cacheHitRate(aEvents), cacheHitRate(bEvents), fmt.pct, 'neither'))}
+      </tbody>
+    </table>
+
+    ${renderModelDeltaTable(aEvents, bEvents, {
+      // Just "Session A" and "Session B": the ids are spelled out in the header
+      // directly above, and repeating them here only invites the reader to
+      // compare two truncated uuids character by character.
+      currentLabel: 'Session A',
+      baselineLabel: 'Session B',
+      heading: 'Which models each session used',
+      tagNew: 'only in A',
+      tagGone: 'only in B',
+      betterWhen: 'neither',
+    })}`;
+
+  $('sessionsClear')?.addEventListener('click', () => {
+    state.sessions.selected = [];
+    renderSessions();
+  });
+}
+
+function renderSessionList(root, sessions) {
+  const query = state.sessions.query;
+  const matches = filterSessions(sessions, query);
+
+  if (!matches.length) {
+    root.innerHTML = `<p class="compare-empty">No session matches “${esc(query)}”.</p>`;
+    return;
+  }
+
+  const capped = !state.sessions.showAll && matches.length > SESSION_LIST_LIMIT;
+  const shown = capped ? matches.slice(0, SESSION_LIST_LIMIT) : matches;
+
+  const rows = shown.map((t) => {
+    const m = sessionMetrics(t);
+    const slot = state.sessions.selected.indexOf(t.sessionId);
+    const picked = slot >= 0;
+    return `<tr data-session-id="${esc(t.sessionId)}"${picked ? ' class="session-row-picked"' : ''}>
+        <td class="session-pick">
+          <input type="checkbox" data-session-id="${esc(t.sessionId)}"${picked ? ' checked' : ''}
+            aria-label="Compare session ${esc(shortSessionId(t.sessionId))}" />
+          ${picked ? `<span class="session-slot">${slot === 0 ? 'A' : 'B'}</span>` : ''}
+        </td>
+        <th scope="row" class="session-id" title="${esc(t.sessionId)}">${esc(shortSessionId(t.sessionId))}</th>
+        <td>${esc(fmt.date(t.firstMs))}</td>
+        <td>${esc(fmtDuration(m.durationMs))}</td>
+        <td>${fmt.num(t.requests)}</td>
+        <td>${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req</span></td>
+        <td class="session-models">${t.models.slice(0, 3).map((x) => esc(displayModel(x))).join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
+      </tr>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div class="table-scroll">
+      <table class="compare-table sessions-table">
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr-only">Compare</span></th>
+            <th scope="col">Session</th>
+            <th scope="col">Started</th>
+            <th scope="col">Active for</th>
+            <th scope="col">Requests</th>
+            <th scope="col">${esc(costModeNoun())}</th>
+            <th scope="col">Models</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${capped
+      ? `<button type="button" class="btn-text" id="sessionsShowAll">Show all ${fmt.num(matches.length)} sessions</button>`
+      : ''}`;
+
+  $('sessionsShowAll')?.addEventListener('click', () => {
+    state.sessions.showAll = true;
+    renderSessions();
   });
 }
 
@@ -1798,7 +2135,7 @@ function setPanel(panel) {
   if (panel === 'analytics') renderCharts(state.filtered);
 }
 
-/** Findings vs. period comparison, the two views on the Analyze tab. */
+/** Findings, period comparison or sessions — the views on the Analyze tab. */
 function setAnalyzePanel(panel) {
   state.analyzePanel = panel;
   document.querySelectorAll(ANALYZE_TAB_SELECTOR).forEach((tab) => {
@@ -1806,8 +2143,8 @@ function setAnalyzePanel(panel) {
     tab.classList.toggle('active', active);
     tab.setAttribute('aria-selected', active ? 'true' : 'false');
   });
-  // One place decides which of the three boxes (empty note, findings,
-  // comparison) is visible, so a sub-tab switch can't leave two of them up.
+  // One place decides which of the boxes (empty note, findings, comparison,
+  // sessions) is visible, so a sub-tab switch can't leave two of them up.
   renderAnalyze();
 }
 
@@ -2787,18 +3124,26 @@ function renderAnalyze() {
   if (!empty || !content) return;
 
   // The comparison is worth showing with an empty period — "0 requests here
-  // against 120 last week" is a finding — so only the findings view collapses
-  // into the empty state, and the sub-tabs stay available either way.
+  // against 120 last week" is a finding — and Sessions explains its own empty
+  // period in the terms of this tab, so only the findings view collapses into
+  // the generic empty state. The sub-tabs stay available either way.
   const hasData = state.filtered.length > 0;
   const onCompare = state.analyzePanel === 'compare';
+  const onSessions = state.analyzePanel === 'sessions';
+  const onFindings = !onCompare && !onSessions;
   $('analyzeTabs')?.classList.toggle('hidden', !state.loaded);
-  empty.classList.toggle('hidden', hasData || onCompare);
+  empty.classList.toggle('hidden', hasData || !onFindings);
   $('analyzeCompare')?.classList.toggle('hidden', !onCompare);
-  content.classList.toggle('hidden', !hasData || onCompare);
+  $('analyzeSessions')?.classList.toggle('hidden', !onSessions);
+  content.classList.toggle('hidden', !hasData || !onFindings);
 
   if (onCompare) {
     renderComparison();
     void loadTrendComparison();
+    return;
+  }
+  if (onSessions) {
+    renderSessions();
     return;
   }
   if (!hasData) return;
@@ -3715,6 +4060,27 @@ async function init() {
   $('compareBody')?.addEventListener('click', (ev) => {
     const btn = ev.target.closest('[data-edit-window]');
     if (btn) openCompareEditor(btn.dataset.editWindow);
+  });
+
+  // Rows are rebuilt on every render, so both the checkbox and the row click
+  // are delegated to the container. A click that lands on the checkbox is left
+  // to its own change event — handling both would toggle the row twice.
+  $('sessionsList')?.addEventListener('click', (ev) => {
+    if (ev.target.closest('input[type="checkbox"]')) return;
+    const row = ev.target.closest('tr[data-session-id]');
+    if (row) toggleSessionSelected(row.dataset.sessionId);
+  });
+  $('sessionsList')?.addEventListener('change', (ev) => {
+    const box = ev.target.closest('input[data-session-id]');
+    if (box) toggleSessionSelected(box.dataset.sessionId);
+  });
+  // Filtering is local to the loaded rows, so it can run on every keystroke —
+  // there's no fetch behind it. The input lives outside the re-rendered list so
+  // that typing doesn't blur it.
+  $('sessionSearch')?.addEventListener('input', (ev) => {
+    state.sessions.query = ev.target.value;
+    state.sessions.showAll = false;
+    renderSessions();
   });
 
   // "Compare →" beside the trend badge: the badge raises the question, this

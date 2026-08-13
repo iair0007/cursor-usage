@@ -729,6 +729,62 @@ export function sessionSummary(totals: SessionTotal[]): SessionSummary {
 }
 
 /**
+ * Rates are only reported for sessions that ran longer than this. Two requests
+ * eight seconds apart are a 900/hour pace on paper, which says nothing about
+ * how the session was worked — it's an artefact of dividing by a tiny number.
+ */
+export const SESSION_RATE_MIN_MS = 60 * 1000;
+
+export interface SessionMetrics {
+  requests: number;
+  costDollars: number;
+  /** Null when the session has no counted requests (all errored or aborted). */
+  costPerRequest: number | null;
+  /** First to last request. Zero for a single-request session. */
+  durationMs: number;
+  /** Null for sessions too short to divide by — see SESSION_RATE_MIN_MS. */
+  requestsPerHour: number | null;
+  costPerHour: number | null;
+}
+
+/**
+ * One session's shape: what it cost, how long it ran, how hard it was worked.
+ *
+ * Duration is first-to-last request, so it measures the span the conversation
+ * was active rather than how long it was open — an idle tab costs nothing and
+ * shouldn't dilute the rate.
+ */
+export function sessionMetrics(total: SessionTotal): SessionMetrics {
+  const durationMs = total.lastMs > total.firstMs ? total.lastMs - total.firstMs : 0;
+  const hours = durationMs / (60 * 60 * 1000);
+  const ratesMeaningful = durationMs >= SESSION_RATE_MIN_MS;
+  return {
+    requests: total.requests,
+    costDollars: total.costDollars,
+    costPerRequest: total.requests > 0 ? total.costDollars / total.requests : null,
+    durationMs,
+    requestsPerHour: ratesMeaningful ? total.requests / hours : null,
+    costPerHour: ratesMeaningful ? total.costDollars / hours : null,
+  };
+}
+
+/**
+ * Substring match over a session's id and the models it used.
+ *
+ * Ids are the only handle a session has until the conversation titles can be
+ * read locally, and nobody types a uuid from memory — so matching the models
+ * too makes "show me the Opus sessions" work, which is the question actually
+ * being asked of this box.
+ */
+export function filterSessions(totals: SessionTotal[], query: string): SessionTotal[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return totals;
+  return totals.filter(
+    (t) => t.sessionId.toLowerCase().includes(q) || t.models.some((m) => m.toLowerCase().includes(q)),
+  );
+}
+
+/**
  * Straight-line projection of when `used` will hit `limit`, from the average
  * daily pace since `sinceMs`.
  */

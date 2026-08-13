@@ -3,6 +3,28 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## 0.7.0 — 2026-08-14
+
+- **Fixed a failed lookup being cached.** The quota, plan and spend-cap cache
+  stored the fallback that a failed request resolved to, so one dropped
+  connection meant up to ten minutes with no plan name or spend cap even though
+  the next request would have succeeded. Only successes are cached now.
+- **Fixed the Overview trend badge comparing two unrelated periods.** Once the
+  comparison's left column is pinned, its baseline belongs to that pinned
+  window, not to the range the Overview card is showing. The badge is now
+  hidden while a pin is in force; Compare periods keeps its own paired figures.
+- **Sessions**, a new sub-tab on Analyze. The requests in your selected period,
+  grouped by the conversation they came from: how many sessions, what each
+  cost, how long it ran and which models it reached for. Pick any two to line
+  them up side by side, down to a model-by-model breakdown. Pick the dates in
+  the toolbar first and the list follows — there is no second date control to
+  keep in sync.
+- Requests now carry the conversation id the API reports. It was being read and
+  then dropped before it reached the dashboard, so nothing could be grouped by
+  conversation. Where an account's requests carry no id — Cursor only reports
+  one on some plans and API versions — the tab says so plainly instead of
+  showing an empty list.
+
 ## 0.6.3 — 2026-08-13
 
 - **The Simulator now offers models cursor.com's pricing page doesn't name.**

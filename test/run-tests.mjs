@@ -1891,5 +1891,70 @@ if (sqliteAvailable) {
   }
 }
 
+console.log('conversationTitles');
+{
+  const titles = await loadTs('src/shared/conversationTitles.ts', 'conversationTitles.mjs');
+
+  test('reads names out of the composer index', () => {
+    const map = titles.parseTitleIndex(new Map([
+      ['composer.composerData', JSON.stringify({
+        allComposers: [
+          { composerId: 'c1', name: 'Fix the budget gauge' },
+          { composerId: 'c2', name: '  Refactor  the\tstatus bar  ' },
+          { composerId: 'c3' }, // unnamed conversations are skipped, not blanked
+          { name: 'no id here' },
+        ],
+      })],
+    ]));
+    assert.equal(map.get('c1'), 'Fix the budget gauge');
+    // Whitespace is collapsed: a tab or newline in a name would break both the
+    // table layout and the line-oriented sqlite output it arrived through.
+    assert.equal(map.get('c2'), 'Refactor the status bar');
+    assert.equal(map.has('c3'), false);
+    assert.equal(map.size, 2);
+  });
+
+  test('reads names out of the older chat-tab index', () => {
+    const map = titles.parseTitleIndex(new Map([
+      ['workbench.panel.aichat.view.aichat.chatdata', JSON.stringify({
+        tabs: [{ tabId: 't1', chatTitle: 'Why is Auto so expensive' }],
+      })],
+    ]));
+    assert.equal(map.get('t1'), 'Why is Auto so expensive');
+  });
+
+  test('an unparseable or unexpected row yields no names rather than throwing', () => {
+    // These shapes are undocumented and change between Cursor versions, so the
+    // failure mode has to be "sessions keep their ids", never a broken tab.
+    assert.equal(titles.parseTitleIndex(new Map([['composer.composerData', 'not json']])).size, 0);
+    assert.equal(titles.parseTitleIndex(new Map([['composer.composerData', '{"allComposers":"nope"}']])).size, 0);
+    assert.equal(titles.parseTitleIndex(new Map([['composer.composerData', '']])).size, 0);
+    assert.equal(titles.parseTitleIndex([]).size, 0);
+  });
+
+  test('a name longer than the cap is truncated', () => {
+    const long = 'x'.repeat(500);
+    const map = titles.parseTitleIndex(new Map([
+      ['composer.composerData', JSON.stringify({ allComposers: [{ composerId: 'c', name: long }] })],
+    ]));
+    assert.equal(map.get('c').length, titles.MAX_TITLE_LENGTH);
+    assert.ok(map.get('c').endsWith('…'));
+  });
+
+  test('per-conversation rows are keyed back to their id', () => {
+    const map = titles.parseComposerNames([
+      { key: 'composerData:abc-123', name: 'Session comparison POC' },
+      { key: 'composerData:def', name: null }, // json_extract found no name
+      { key: 'somethingElse:xyz', name: 'not a conversation row' },
+    ]);
+    assert.equal(map.get('abc-123'), 'Session comparison POC');
+    assert.equal(map.size, 1);
+  });
+
+  test('composerRowKey builds the key the rows are stored under', () => {
+    assert.equal(titles.composerRowKey('abc'), 'composerData:abc');
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

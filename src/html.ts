@@ -345,7 +345,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
           <div class="compare-head">
             <div>
               <h3>Sessions</h3>
-              <p class="panel-desc">Your selected period, grouped by conversation. Pick two to compare them side by side.</p>
+              <p class="panel-desc">Your selected period, grouped by conversation. Names are read from Cursor on this machine; sessions it can't name keep their id. Pick two to compare them side by side.</p>
             </div>
             <div class="compare-controls">
               <label class="sessions-search">

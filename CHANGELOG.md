@@ -21,6 +21,12 @@ All notable user-facing changes. Earlier releases predate this file; see the
   errored requests, and a model-by-model breakdown. Pick the dates in the
   toolbar first and the list follows — there is no second date control to keep
   in sync.
+- **Sessions are named, not numbered.** The conversation names Cursor shows in
+  its own chat list are read from its local database on your machine and joined
+  to the usage rows there — nothing from that database is sent anywhere, and
+  only names are read from it, never prompts, messages or code. The filter box
+  searches names too. Conversations that can't be named keep their id, which is
+  also what happens if the lookup isn't possible at all.
 - Differences between two sessions are coloured only where a direction exists:
   cheaper, better-cached and fewer cold starts are wins whichever session they
   belong to, while requests, tokens and pace stay neutral. Two conversations

@@ -809,18 +809,28 @@ export function sessionMetrics(total: SessionTotal): SessionMetrics {
 }
 
 /**
- * Substring match over a session's id and the models it used.
+ * Substring match over a session's name, its id and the models it used.
  *
- * Ids are the only handle a session has until the conversation titles can be
- * read locally, and nobody types a uuid from memory — so matching the models
- * too makes "show me the Opus sessions" work, which is the question actually
- * being asked of this box.
+ * All three because all three are things someone might remember about a
+ * conversation. Nobody types a uuid from memory, so an id-only filter would be
+ * useless on the sessions that have no name — matching the models keeps "show
+ * me the Opus sessions" working there.
+ *
+ * `titleOf` is passed in rather than read from the totals: names come from a
+ * local database lookup that resolves after the rows are already on screen,
+ * and this module has no business knowing where they came from.
  */
-export function filterSessions(totals: SessionTotal[], query: string): SessionTotal[] {
+export function filterSessions(
+  totals: SessionTotal[],
+  query: string,
+  titleOf: (sessionId: string) => string | null | undefined = () => null,
+): SessionTotal[] {
   const q = query.trim().toLowerCase();
   if (!q) return totals;
   return totals.filter(
-    (t) => t.sessionId.toLowerCase().includes(q) || t.models.some((m) => m.toLowerCase().includes(q)),
+    (t) => t.sessionId.toLowerCase().includes(q)
+      || (titleOf(t.sessionId) || '').toLowerCase().includes(q)
+      || t.models.some((m) => m.toLowerCase().includes(q)),
   );
 }
 

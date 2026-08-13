@@ -645,16 +645,23 @@ tfoot td {
 /* Each column names the window it covers: two periods are on screen at once,
    so a number that doesn't say which one it belongs to is worse than none. */
 .compare-col-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-/* An id is a literal, so it keeps its own case and font — the global uppercase
-   `th` styling would print a conversation id that was never issued. */
+/* A name or an id, so it keeps its own case — the global uppercase `th` styling
+   would print a conversation id that was never issued, and shout a title the
+   user wrote in ordinary prose. */
 .compare-col-range {
   display: block;
   color: var(--fg);
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   text-transform: none;
   letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+/* Only ids get the monospace treatment that makes their characters
+   distinguishable; a sentence is far more readable in the UI font. */
+.compare-col-range.is-id {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
 }
 .compare-col-days { display: block; font-size: 11px; font-weight: 400; }
 /* Row separators span the whole row. The global rules put a bottom border on
@@ -755,11 +762,20 @@ tfoot td {
 /* The id column is text, not a figure: its header has to sit over the ids
    rather than over the right edge the numeric columns share. */
 .sessions-table thead th:nth-child(2) { text-align: left; }
-.sessions-table .session-id {
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px;
+.sessions-table .session-name {
+  max-width: 320px;
   text-transform: none;
   letter-spacing: 0;
+  font-weight: 500;
+  /* A conversation name is a whole prompt's worth of text often enough that
+     wrapping it would give one row the height of three. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sessions-table .session-name.is-id {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
 }
 .sessions-table .session-models { color: var(--muted); font-size: 11px; }
 

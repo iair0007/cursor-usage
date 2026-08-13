@@ -167,6 +167,14 @@ const state = {
     selected: [],
     /** The list is capped until asked otherwise; a wide range holds hundreds. */
     showAll: false,
+    /**
+     * id → name from Cursor's local database, or null once we've looked and
+     * found none. The null matters: without it every render would re-ask for
+     * the same unnamed conversations.
+     */
+    titles: new Map(),
+    /** Ids currently being looked up, so a re-render doesn't ask twice. */
+    titlesPending: new Set(),
   },
   appView: 'overview',
   simMode: 'request',
@@ -1460,6 +1468,59 @@ function shortSessionId(id) {
   return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
 }
 
+/**
+ * How a session is named on screen: the name Cursor gave the conversation
+ * where we could find one, the shortened id where we couldn't.
+ *
+ * `isId` travels with it because the two want different typography — a uuid
+ * needs the monospace treatment that makes its characters distinguishable, and
+ * a sentence very much does not.
+ */
+function sessionLabel(id) {
+  const title = state.sessions.titles.get(id);
+  return title ? { text: title, isId: false } : { text: shortSessionId(id), isId: true };
+}
+
+/**
+ * Asks the extension host to name the conversations on screen.
+ *
+ * Only for ids we haven't already resolved or asked about, and only for what's
+ * actually rendered — the names come out of a local database that can be
+ * several gigabytes, so this stays a small, bounded lookup rather than an
+ * upfront index of every session in the period.
+ */
+async function loadSessionTitles(ids) {
+  const { titles, titlesPending } = state.sessions;
+  const wanted = ids.filter(
+    (id) => id !== UNATTRIBUTED_SESSION && !titles.has(id) && !titlesPending.has(id),
+  );
+  if (!wanted.length) return;
+  wanted.forEach((id) => titlesPending.add(id));
+
+  let found = {};
+  try {
+    found = (await rpc('sessionTitles', { ids: wanted })).titles || {};
+  } catch (e) {
+    // A missing database, no sqlite3 on PATH, a Cursor version that stores its
+    // chats elsewhere: all of them just mean the ids stay on screen, which is
+    // what they already say. Not worth an alert, and the extension host has
+    // already logged the reason.
+  }
+
+  // Ids that came back unnamed are recorded as null rather than left out, so
+  // the next render doesn't ask for them all over again.
+  let learned = false;
+  for (const id of wanted) {
+    titlesPending.delete(id);
+    const title = found[id] || null;
+    if (!titles.has(id)) {
+      titles.set(id, title);
+      if (title) learned = true;
+    }
+  }
+  if (learned && state.appView === 'analyze' && state.analyzePanel === 'sessions') renderSessions();
+}
+
 function fmtDuration(ms) {
   if (!ms || ms < 60 * 1000) return '<1 min';
   const mins = Math.round(ms / 60000);
@@ -1561,7 +1622,7 @@ function renderSessions() {
       <article class="kpi">
         <span class="kpi-label">Most expensive</span>
         <span class="kpi-value">${fmt.money(top ? top.costDollars : null)}</span>
-        <span class="kpi-sub">${top ? esc(shortSessionId(top.sessionId)) : '—'}</span>
+        <span class="kpi-sub">${top ? esc(sessionLabel(top.sessionId).text) : '—'}</span>
       </article>
     </div>`;
 
@@ -1623,7 +1684,7 @@ function renderSessionComparison(root, sessions) {
   if (!a || !b) {
     const picked = a ? 1 : 0;
     root.innerHTML = `<p class="sessions-hint">${picked === 1
-      ? `One session picked (${esc(shortSessionId(a.sessionId))}) — pick a second to compare them.`
+      ? `One session picked (${esc(sessionLabel(a.sessionId).text)}) — pick a second to compare them.`
       : 'Pick two sessions below to compare them side by side.'}</p>`;
     return;
   }
@@ -1641,12 +1702,15 @@ function renderSessionComparison(root, sessions) {
     (x == null || y == null ? '—' : deltaCell(x, y, format, betterWhen));
   const show = (v, format = fmt.money) => (v == null ? '—' : format(v));
 
-  const head = (label, total) => `
+  const head = (label, total) => {
+    const name = sessionLabel(total.sessionId);
+    return `
     <th scope="col">
       <span class="compare-col-label">${esc(label)}</span>
-      <span class="compare-col-range" title="${esc(total.sessionId)}">${esc(shortSessionId(total.sessionId))}</span>
+      <span class="compare-col-range${name.isId ? ' is-id' : ''}" title="${esc(total.sessionId)}">${esc(name.text)}</span>
       <span class="compare-col-days">${esc(fmt.date(total.firstMs))}</span>
     </th>`;
+  };
 
   root.innerHTML = `
     <div class="sessions-compare-head">
@@ -1710,7 +1774,7 @@ function renderSessionComparison(root, sessions) {
 
 function renderSessionList(root, sessions, periodCost) {
   const query = state.sessions.query;
-  const matches = filterSessions(sessions, query);
+  const matches = filterSessions(sessions, query, (id) => state.sessions.titles.get(id));
 
   if (!matches.length) {
     root.innerHTML = `<p class="compare-empty">No session matches “${esc(query)}”.</p>`;
@@ -1724,13 +1788,14 @@ function renderSessionList(root, sessions, periodCost) {
     const m = sessionMetrics(t);
     const slot = state.sessions.selected.indexOf(t.sessionId);
     const picked = slot >= 0;
+    const name = sessionLabel(t.sessionId);
     return `<tr data-session-id="${esc(t.sessionId)}"${picked ? ' class="session-row-picked"' : ''}>
         <td class="session-pick">
           <input type="checkbox" data-session-id="${esc(t.sessionId)}"${picked ? ' checked' : ''}
-            aria-label="Compare session ${esc(shortSessionId(t.sessionId))}" />
+            aria-label="Compare session ${esc(name.text)}" />
           ${picked ? `<span class="session-slot">${slot === 0 ? 'A' : 'B'}</span>` : ''}
         </td>
-        <th scope="row" class="session-id" title="${esc(t.sessionId)}">${esc(shortSessionId(t.sessionId))}</th>
+        <th scope="row" class="session-name${name.isId ? ' is-id' : ''}" title="${esc(t.sessionId)}">${esc(name.text)}</th>
         <td>${esc(fmt.date(t.firstMs))}</td>
         <td>${esc(fmtDuration(m.durationMs))}</td>
         <td>${fmt.num(t.requests)}${t.erroredRequests
@@ -1766,6 +1831,11 @@ function renderSessionList(root, sessions, periodCost) {
     state.sessions.showAll = true;
     renderSessions();
   });
+
+  // Only what's on screen, plus whatever is selected — a selected session can
+  // be scrolled out of the list or filtered away, and it's named in the
+  // comparison above regardless.
+  void loadSessionTitles([...shown.map((t) => t.sessionId), ...state.sessions.selected]);
 }
 
 function chartDefaults() {

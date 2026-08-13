@@ -1779,6 +1779,37 @@ console.log('sessionTotals / sessionSummary');
     assert.ok(Math.abs(m.costDollars - 0.5) < 1e-9);
   });
 
+  test('token, savings and error figures roll up per session', () => {
+    const tok = (conversationId, extra) =>
+      ({ conversationId, cost: 1, model: 'auto', timestampMs: at(1, 9), ...extra });
+    const [row] = sessionTotals([
+      tok('t', { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 8000, cacheWriteTokens: 800, cacheSavings: 0.4 }),
+      tok('t', { inputTokens: 500, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, cacheSavings: null, cost: 3 }),
+      tok('t', { inputTokens: 10, outputTokens: 0, cost: 0.5, counted: false }),
+    ]);
+    assert.equal(row.inputTokens, 1510);
+    assert.equal(row.outputTokens, 300);
+    assert.equal(row.cacheReadTokens, 8000);
+    assert.ok(Math.abs(row.savingsDollars - 0.4) < 1e-9); // a null saving is 0, not NaN
+    assert.equal(row.erroredRequests, 1);
+    assert.equal(row.requests, 2);
+    // The dearest request is the one to open, and an errored row can be it.
+    assert.equal(row.maxCostDollars, 3);
+  });
+
+  test('cache hit rate is null when no tokens were reported, not 0%', () => {
+    const withTokens = sessionTotals([
+      { conversationId: 'c', cost: 1, timestampMs: at(1, 9), inputTokens: 1000, cacheReadTokens: 3000 },
+    ]);
+    assert.equal(sessionMetrics(withTokens[0]).cacheHitRate, 75);
+
+    // An account whose API reports no token counts has an unknown hit rate;
+    // "0%" would read as a session that cached nothing at all.
+    const noTokens = sessionTotals([{ conversationId: 'c', cost: 1, timestampMs: at(1, 9) }]);
+    assert.equal(sessionMetrics(noTokens[0]).cacheHitRate, null);
+    assert.equal(sessionMetrics(noTokens[0]).totalTokens, 0);
+  });
+
   test('filterSessions matches on id and on model', () => {
     const totals = sessionTotals(events);
     assert.deepEqual(filterSessions(totals, 'conv-b').map((t) => t.sessionId), ['conv-b']);

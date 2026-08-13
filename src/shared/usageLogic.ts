@@ -629,6 +629,16 @@ export interface SessionTotal {
   lastMs: number;
   /** Distinct models used, most-used first. */
   models: string[];
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Dollars the cache kept off this session's bill. */
+  savingsDollars: number;
+  /** Requests that errored or aborted: charged for, but not counted as work. */
+  erroredRequests: number;
+  /** The single dearest request in the session. */
+  maxCostDollars: number;
 }
 
 /** Requests with no conversation id are grouped under this, never dropped. */
@@ -649,6 +659,11 @@ export function sessionTotals(
     model?: string;
     timestampMs?: number;
     counted?: boolean;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    cacheSavings?: number | null;
   }[],
 ): SessionTotal[] {
   const bySession = new Map<string, SessionTotal & { modelCounts: Map<string, number> }>();
@@ -664,15 +679,31 @@ export function sessionTotals(
         firstMs: Infinity,
         lastMs: -Infinity,
         models: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        savingsDollars: 0,
+        erroredRequests: 0,
+        maxCostDollars: 0,
         modelCounts: new Map(),
       };
       bySession.set(sessionId, row);
     }
     // Errored and aborted rows still cost tokens, so they keep their spend but
     // don't inflate the request count — the same rule the rest of the dashboard
-    // applies through `counted`.
+    // applies through `counted`. They are counted separately instead, because
+    // "this session cost more and a third of it errored" is the explanation.
     if (e.counted !== false) row.requests += 1;
-    row.costDollars += e.cost ?? 0;
+    else row.erroredRequests += 1;
+    const cost = e.cost ?? 0;
+    row.costDollars += cost;
+    row.maxCostDollars = Math.max(row.maxCostDollars, cost);
+    row.inputTokens += e.inputTokens ?? 0;
+    row.outputTokens += e.outputTokens ?? 0;
+    row.cacheReadTokens += e.cacheReadTokens ?? 0;
+    row.cacheWriteTokens += e.cacheWriteTokens ?? 0;
+    row.savingsDollars += e.cacheSavings ?? 0;
     const ts = e.timestampMs ?? 0;
     if (ts > 0) {
       row.firstMs = Math.min(row.firstMs, ts);
@@ -745,6 +776,9 @@ export interface SessionMetrics {
   /** Null for sessions too short to divide by — see SESSION_RATE_MIN_MS. */
   requestsPerHour: number | null;
   costPerHour: number | null;
+  /** Share of tokens served from cache. Null when the session moved no tokens. */
+  cacheHitRate: number | null;
+  totalTokens: number;
 }
 
 /**
@@ -758,6 +792,8 @@ export function sessionMetrics(total: SessionTotal): SessionMetrics {
   const durationMs = total.lastMs > total.firstMs ? total.lastMs - total.firstMs : 0;
   const hours = durationMs / (60 * 60 * 1000);
   const ratesMeaningful = durationMs >= SESSION_RATE_MIN_MS;
+  const totalTokens = total.inputTokens + total.outputTokens
+    + total.cacheReadTokens + total.cacheWriteTokens;
   return {
     requests: total.requests,
     costDollars: total.costDollars,
@@ -765,6 +801,10 @@ export function sessionMetrics(total: SessionTotal): SessionMetrics {
     durationMs,
     requestsPerHour: ratesMeaningful ? total.requests / hours : null,
     costPerHour: ratesMeaningful ? total.costDollars / hours : null,
+    // Null, not 0%: a session the API reported no token counts for has an
+    // unknown hit rate, and "0%" would read as a session that cached nothing.
+    cacheHitRate: totalTokens > 0 ? (total.cacheReadTokens / totalTokens) * 100 : null,
+    totalTokens,
   };
 }
 

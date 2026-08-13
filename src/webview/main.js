@@ -1566,7 +1566,11 @@ function renderSessions() {
     </div>`;
 
   renderSessionComparison(compareEl, sessions);
-  renderSessionList(listEl, sessions);
+  // Share is against the whole period, unattributed requests included, so the
+  // percentages answer "how much of my bill was this" rather than "how much of
+  // the part we could attribute".
+  const periodCost = totals.reduce((s, t) => s + t.costDollars, 0);
+  renderSessionList(listEl, sessions, periodCost);
 
   const notes = [];
   if (summary.unattributedRequests > 0) {
@@ -1578,6 +1582,19 @@ function renderSessions() {
     + 'above scope this list.');
   noteEl.textContent = notes.join(' ');
   noteEl.classList.remove('hidden');
+}
+
+/**
+ * Total tokens with the three parts that make it up.
+ *
+ * Cached tokens are named rather than left implicit: on a well-cached session
+ * they are most of the total, and "614,151 · 64,224 in · 16,541 out" reads as
+ * an arithmetic error unless the missing half a million is accounted for.
+ */
+function tokenBreakdown(total, metrics) {
+  const cached = total.cacheReadTokens + total.cacheWriteTokens;
+  return `${fmt.num(metrics.totalTokens)}<span class="compare-sub">${fmt.num(total.inputTokens)} in · `
+    + `${fmt.num(total.outputTokens)} out · ${fmt.num(cached)} cached</span>`;
 }
 
 function sessionCompareRow(label, aHtml, bHtml, deltaHtml) {
@@ -1592,9 +1609,11 @@ function sessionCompareRow(label, aHtml, bHtml, deltaHtml) {
 /**
  * Two sessions side by side.
  *
- * Differences are deliberately uncoloured. Unlike two periods, where spending
- * more this week than last is a direction, two conversations have no before and
- * after — one being dearer than the other is a fact about what was asked of it.
+ * Coloured only where a direction exists. Cheaper, better-cached and fewer cold
+ * starts are wins whichever session they belong to, so those go green/amber
+ * like the period comparison. Volume — requests, tokens, pace — stays neutral:
+ * two conversations are not a before and an after, and a longer one having more
+ * requests is a fact about what was asked of it, not a regression to flag.
  */
 function renderSessionComparison(root, sessions) {
   const [aId, bId] = state.sessions.selected;
@@ -1613,10 +1632,14 @@ function renderSessionComparison(root, sessions) {
   const bm = sessionMetrics(b);
   const aEvents = eventsForSession(a.sessionId);
   const bEvents = eventsForSession(b.sessionId);
-  const rate = (v) => (v == null ? '—' : fmt.rate(v));
-  // A rate that isn't defined on one side has no difference to report; saying
+  const coldStarts = (events) => events.filter(
+    (e) => e.cacheReadTokens === 0 && e.inputTokens > state.analyzeThresholds.coldStartInputTokens,
+  ).length;
+  // A figure that isn't defined on one side has no difference to report: saying
   // "+100% (new)" about a session too short to measure would be inventing one.
-  const rateDelta = (x, y) => (x == null || y == null ? '—' : deltaCell(x, y, fmt.rate, 'neither'));
+  const delta = (x, y, format = fmt.money, betterWhen = 'down') =>
+    (x == null || y == null ? '—' : deltaCell(x, y, format, betterWhen));
+  const show = (v, format = fmt.money) => (v == null ? '—' : format(v));
 
   const head = (label, total) => `
     <th scope="col">
@@ -1641,18 +1664,30 @@ function renderSessionComparison(root, sessions) {
       </thead>
       <tbody>
         ${sessionCompareRow(`Total ${costModeNoun()}`, fmt.money(am.costDollars), fmt.money(bm.costDollars),
-          deltaCell(am.costDollars, bm.costDollars, fmt.money, 'neither'))}
+          delta(am.costDollars, bm.costDollars))}
         ${sessionCompareRow('Requests', fmt.num(am.requests), fmt.num(bm.requests),
-          deltaCell(am.requests, bm.requests, fmt.num, 'neither'))}
-        ${sessionCompareRow('Avg / request', fmt.money(am.costPerRequest), fmt.money(bm.costPerRequest),
-          deltaCell(am.costPerRequest ?? 0, bm.costPerRequest ?? 0, fmt.money, 'neither'))}
+          delta(am.requests, bm.requests, fmt.num, 'neither'))}
+        ${a.erroredRequests || b.erroredRequests
+          ? sessionCompareRow('Errored or aborted', fmt.num(a.erroredRequests), fmt.num(b.erroredRequests),
+            delta(a.erroredRequests, b.erroredRequests, fmt.num))
+          : ''}
+        ${sessionCompareRow('Avg / request', show(am.costPerRequest), show(bm.costPerRequest),
+          delta(am.costPerRequest, bm.costPerRequest))}
+        ${sessionCompareRow('Priciest request', fmt.money(a.maxCostDollars), fmt.money(b.maxCostDollars),
+          delta(a.maxCostDollars, b.maxCostDollars))}
         ${sessionCompareRow('Active for', fmtDuration(am.durationMs), fmtDuration(bm.durationMs), '—')}
-        ${sessionCompareRow('Requests / hour', rate(am.requestsPerHour), rate(bm.requestsPerHour),
-          rateDelta(am.requestsPerHour, bm.requestsPerHour))}
-        ${sessionCompareRow(`${costModeNoun()} / hour`, fmt.money(am.costPerHour), fmt.money(bm.costPerHour),
-          am.costPerHour == null || bm.costPerHour == null ? '—' : deltaCell(am.costPerHour, bm.costPerHour, fmt.money, 'neither'))}
-        ${sessionCompareRow('Cache hit rate', fmt.pct(cacheHitRate(aEvents)), fmt.pct(cacheHitRate(bEvents)),
-          deltaCell(cacheHitRate(aEvents), cacheHitRate(bEvents), fmt.pct, 'neither'))}
+        ${sessionCompareRow('Requests / hour', show(am.requestsPerHour, fmt.rate), show(bm.requestsPerHour, fmt.rate),
+          delta(am.requestsPerHour, bm.requestsPerHour, fmt.rate, 'neither'))}
+        ${sessionCompareRow(`${costModeNoun()} / hour`, show(am.costPerHour), show(bm.costPerHour),
+          delta(am.costPerHour, bm.costPerHour))}
+        ${sessionCompareRow('Tokens', tokenBreakdown(a, am), tokenBreakdown(b, bm),
+          delta(am.totalTokens, bm.totalTokens, fmt.num, 'neither'))}
+        ${sessionCompareRow('Cache hit rate', show(am.cacheHitRate, fmt.pct), show(bm.cacheHitRate, fmt.pct),
+          delta(am.cacheHitRate, bm.cacheHitRate, fmt.pct, 'up'))}
+        ${sessionCompareRow('Cache savings', fmt.money(a.savingsDollars), fmt.money(b.savingsDollars),
+          delta(a.savingsDollars, b.savingsDollars, fmt.money, 'up'))}
+        ${sessionCompareRow('Cold starts', fmt.num(coldStarts(aEvents)), fmt.num(coldStarts(bEvents)),
+          delta(coldStarts(aEvents), coldStarts(bEvents), fmt.num))}
       </tbody>
     </table>
 
@@ -1665,7 +1700,6 @@ function renderSessionComparison(root, sessions) {
       heading: 'Which models each session used',
       tagNew: 'only in A',
       tagGone: 'only in B',
-      betterWhen: 'neither',
     })}`;
 
   $('sessionsClear')?.addEventListener('click', () => {
@@ -1674,7 +1708,7 @@ function renderSessionComparison(root, sessions) {
   });
 }
 
-function renderSessionList(root, sessions) {
+function renderSessionList(root, sessions, periodCost) {
   const query = state.sessions.query;
   const matches = filterSessions(sessions, query);
 
@@ -1699,8 +1733,10 @@ function renderSessionList(root, sessions) {
         <th scope="row" class="session-id" title="${esc(t.sessionId)}">${esc(shortSessionId(t.sessionId))}</th>
         <td>${esc(fmt.date(t.firstMs))}</td>
         <td>${esc(fmtDuration(m.durationMs))}</td>
-        <td>${fmt.num(t.requests)}</td>
-        <td>${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req</span></td>
+        <td>${fmt.num(t.requests)}${t.erroredRequests
+          ? `<span class="compare-sub">+${fmt.num(t.erroredRequests)} errored</span>` : ''}</td>
+        <td>${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req${
+          periodCost > 0 ? ` · ${fmt.pct((t.costDollars / periodCost) * 100)} of period` : ''}</span></td>
         <td class="session-models">${t.models.slice(0, 3).map((x) => esc(displayModel(x))).join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
       </tr>`;
   }).join('');

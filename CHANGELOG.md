@@ -15,10 +15,17 @@ All notable user-facing changes. Earlier releases predate this file; see the
   hidden while a pin is in force; Compare periods keeps its own paired figures.
 - **Sessions**, a new sub-tab on Analyze. The requests in your selected period,
   grouped by the conversation they came from: how many sessions, what each
-  cost, how long it ran and which models it reached for. Pick any two to line
-  them up side by side, down to a model-by-model breakdown. Pick the dates in
-  the toolbar first and the list follows — there is no second date control to
-  keep in sync.
+  cost, its share of the period, how long it ran and which models it reached
+  for. Pick any two to line them up side by side — cost, requests, priciest
+  request, tokens in/out/cached, cache hit rate and savings, cold starts,
+  errored requests, and a model-by-model breakdown. Pick the dates in the
+  toolbar first and the list follows — there is no second date control to keep
+  in sync.
+- Differences between two sessions are coloured only where a direction exists:
+  cheaper, better-cached and fewer cold starts are wins whichever session they
+  belong to, while requests, tokens and pace stay neutral. Two conversations
+  aren't a before and an after, so a longer one having more requests isn't a
+  regression to paint amber.
 - Requests now carry the conversation id the API reports. It was being read and
   then dropped before it reached the dashboard, so nothing could be grouped by
   conversation. Where an account's requests carry no id — Cursor only reports

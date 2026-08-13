@@ -60,6 +60,7 @@ const {
   sessionSummary,
   sessionMetrics,
   filterSessions,
+  sortSessions,
   UNATTRIBUTED_SESSION,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
@@ -1808,6 +1809,49 @@ console.log('sessionTotals / sessionSummary');
     const noTokens = sessionTotals([{ conversationId: 'c', cost: 1, timestampMs: at(1, 9) }]);
     assert.equal(sessionMetrics(noTokens[0]).cacheHitRate, null);
     assert.equal(sessionMetrics(noTokens[0]).totalTokens, 0);
+  });
+
+  test('sortSessions orders by each column, both ways', () => {
+    const totals = sessionTotals(events); // conv-a $5.00/3req, conv-b $0.75/1req
+    const ids = (key, dir) => sortSessions(totals, key, dir).map((t) => t.sessionId);
+    assert.deepEqual(ids('cost', 'desc'), ['conv-a', 'conv-b', UNATTRIBUTED_SESSION]);
+    assert.deepEqual(ids('cost', 'asc'), [UNATTRIBUTED_SESSION, 'conv-b', 'conv-a']);
+    assert.deepEqual(ids('requests', 'desc')[0], 'conv-a');
+    // conv-a ran on the 3rd, conv-b and the unattributed rows on the 4th.
+    assert.equal(ids('started', 'asc')[0], 'conv-a');
+    assert.equal(ids('duration', 'desc')[0], 'conv-a');
+    assert.equal(sortSessions(totals, 'cost', 'desc').length, totals.length);
+  });
+
+  test('sorting by name uses the name where there is one, the id where there is not', () => {
+    // The list never shows the unattributed bucket, so neither does the sort.
+    const totals = sessionTotals(events).filter((t) => t.sessionId !== UNATTRIBUTED_SESSION);
+    const named = { 'conv-b': 'Aardvark refactor' };
+    const byName = sortSessions(totals, 'name', 'asc', (id) => named[id]).map((t) => t.sessionId);
+    // "Aardvark…" sorts ahead of "conv-a" — the named row is ordered by its
+    // name, not herded to one end of the list.
+    assert.deepEqual(byName, ['conv-b', 'conv-a']);
+    // And reversing it is a straight reversal, not "unnamed last" again.
+    assert.deepEqual(
+      sortSessions(totals, 'name', 'desc', (id) => named[id]).map((t) => t.sessionId),
+      ['conv-a', 'conv-b'],
+    );
+  });
+
+  test('sortSessions leaves the input untouched and ties break stably', () => {
+    const totals = sessionTotals(events);
+    const before = totals.map((t) => t.sessionId);
+    sortSessions(totals, 'name', 'asc');
+    assert.deepEqual(totals.map((t) => t.sessionId), before);
+
+    // Same request count, different cost: the cost tie-break decides, so the
+    // order doesn't shuffle between renders.
+    const tied = sessionTotals([
+      ev('cheap', 1, 'auto', at(1, 9)),
+      ev('dear', 5, 'auto', at(1, 9)),
+    ]);
+    assert.deepEqual(sortSessions(tied, 'requests', 'desc').map((t) => t.sessionId), ['dear', 'cheap']);
+    assert.deepEqual(sortSessions(tied, 'requests', 'asc').map((t) => t.sessionId), ['dear', 'cheap']);
   });
 
   test('filterSessions matches on id and on model', () => {

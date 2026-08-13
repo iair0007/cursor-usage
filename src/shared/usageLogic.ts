@@ -834,6 +834,52 @@ export function filterSessions(
   );
 }
 
+export type SessionSortKey = 'name' | 'started' | 'duration' | 'requests' | 'cost';
+
+/** The direction a column sorts on its first click: biggest-first for figures. */
+export const SESSION_SORT_DEFAULT_DIR: Record<SessionSortKey, 'asc' | 'desc'> = {
+  name: 'asc',
+  started: 'desc',
+  duration: 'desc',
+  requests: 'desc',
+  cost: 'desc',
+};
+
+/**
+ * Sorts sessions by one column, cost-descending by default.
+ *
+ * Sorting is by what's on screen: the name column orders by the name where a
+ * session has one, and unnamed sessions sort among them by their id rather
+ * than being herded to one end — the list is a mix and a sort that reshuffles
+ * which rows are named would be a worse handle than the one it replaced.
+ *
+ * Ties break on cost so the order is stable across renders. Without it a group
+ * of same-length sessions would swap places on every re-render, which reads as
+ * the table flickering.
+ */
+export function sortSessions(
+  totals: SessionTotal[],
+  key: SessionSortKey,
+  dir: 'asc' | 'desc',
+  titleOf: (sessionId: string) => string | null | undefined = () => null,
+): SessionTotal[] {
+  const sign = dir === 'asc' ? 1 : -1;
+  const label = (t: SessionTotal) => (titleOf(t.sessionId) || t.sessionId).toLowerCase();
+  const duration = (t: SessionTotal) => Math.max(0, t.lastMs - t.firstMs);
+
+  const compare = (a: SessionTotal, b: SessionTotal): number => {
+    switch (key) {
+      case 'name': return label(a).localeCompare(label(b));
+      case 'started': return a.firstMs - b.firstMs;
+      case 'duration': return duration(a) - duration(b);
+      case 'requests': return a.requests - b.requests;
+      default: return a.costDollars - b.costDollars;
+    }
+  };
+
+  return [...totals].sort((a, b) => sign * compare(a, b) || b.costDollars - a.costDollars);
+}
+
 /**
  * Straight-line projection of when `used` will hit `limit`, from the average
  * daily pace since `sinceMs`.

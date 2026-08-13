@@ -40,6 +40,8 @@ import {
   sessionSummary,
   sessionMetrics,
   filterSessions,
+  sortSessions,
+  SESSION_SORT_DEFAULT_DIR,
   UNATTRIBUTED_SESSION,
 } from './logic.js';
 
@@ -167,6 +169,9 @@ const state = {
     selected: [],
     /** The list is capped until asked otherwise; a wide range holds hundreds. */
     showAll: false,
+    /** Which column orders the list: 'name' | 'started' | 'duration' | 'requests' | 'cost'. */
+    sortKey: 'cost',
+    sortDir: 'desc',
     /**
      * id → name from Cursor's local database, or null once we've looked and
      * found none. The null matters: without it every render would re-ask for
@@ -844,6 +849,14 @@ function manualEntryCoversModel(entry, modelRaw) {
 const COMPARE_MODES = ['previous', 'prevMonth', 'custom'];
 
 /** Restores the comparison baseline chosen in a previous session. */
+function initSessionPrefs() {
+  const prefs = loadPrefs();
+  if (SESSION_SORT_DEFAULT_DIR[prefs?.sessionSortKey]) state.sessions.sortKey = prefs.sessionSortKey;
+  if (prefs?.sessionSortDir === 'asc' || prefs?.sessionSortDir === 'desc') {
+    state.sessions.sortDir = prefs.sessionSortDir;
+  }
+}
+
 function initPeriodComparePrefs() {
   const prefs = loadPrefs();
   if (COMPARE_MODES.includes(prefs?.compareMode)) state.trend.mode = prefs.compareMode;
@@ -1530,6 +1543,25 @@ function fmtDuration(ms) {
   return rest ? `${hours}h ${rest}m` : `${hours}h`;
 }
 
+/**
+ * Clicking a column sorts by it; clicking the one already sorted reverses it.
+ *
+ * A fresh column starts in the direction its data is usually read — biggest
+ * cost, longest, most recent first — rather than always ascending, which would
+ * put the cheapest sessions on top of a panel about where the money went.
+ */
+function setSessionSort(key) {
+  const sessions = state.sessions;
+  if (sessions.sortKey === key) {
+    sessions.sortDir = sessions.sortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    sessions.sortKey = key;
+    sessions.sortDir = SESSION_SORT_DEFAULT_DIR[key] || 'desc';
+  }
+  savePrefs({ sessionSortKey: sessions.sortKey, sessionSortDir: sessions.sortDir });
+  renderSessions();
+}
+
 function toggleSessionSelected(id) {
   const selected = state.sessions.selected;
   const at = selected.indexOf(id);
@@ -1774,15 +1806,19 @@ function renderSessionComparison(root, sessions) {
 
 function renderSessionList(root, sessions, periodCost) {
   const query = state.sessions.query;
-  const matches = filterSessions(sessions, query, (id) => state.sessions.titles.get(id));
+  const titleOf = (id) => state.sessions.titles.get(id);
+  const matches = filterSessions(sessions, query, titleOf);
 
   if (!matches.length) {
     root.innerHTML = `<p class="compare-empty">No session matches “${esc(query)}”.</p>`;
     return;
   }
 
-  const capped = !state.sessions.showAll && matches.length > SESSION_LIST_LIMIT;
-  const shown = capped ? matches.slice(0, SESSION_LIST_LIMIT) : matches;
+  // Sorted before capping, so "show me the longest" reaches past the first 25
+  // rather than reordering them among themselves.
+  const sorted = sortSessions(matches, state.sessions.sortKey, state.sessions.sortDir, titleOf);
+  const capped = !state.sessions.showAll && sorted.length > SESSION_LIST_LIMIT;
+  const shown = capped ? sorted.slice(0, SESSION_LIST_LIMIT) : sorted;
 
   const rows = shown.map((t) => {
     const m = sessionMetrics(t);
@@ -1806,17 +1842,28 @@ function renderSessionList(root, sessions, periodCost) {
       </tr>`;
   }).join('');
 
+  // Models is the one column with no sort: a session's models are a set, and
+  // ordering rows by "claude before gpt" answers nothing anyone asks.
+  const sortHead = (key, label) => {
+    const active = state.sessions.sortKey === key;
+    const cls = active ? ` sorted-${state.sessions.sortDir}` : '';
+    const aria = active ? (state.sessions.sortDir === 'asc' ? 'ascending' : 'descending') : 'none';
+    return `<th scope="col" class="session-sort${cls}" data-session-sort="${key}" aria-sort="${aria}">
+        <button type="button" class="session-sort-btn">${esc(label)}</button>
+      </th>`;
+  };
+
   root.innerHTML = `
     <div class="table-scroll">
       <table class="compare-table sessions-table">
         <thead>
           <tr>
             <th scope="col"><span class="sr-only">Compare</span></th>
-            <th scope="col">Session</th>
-            <th scope="col">Started</th>
-            <th scope="col">Active for</th>
-            <th scope="col">Requests</th>
-            <th scope="col">${esc(costModeNoun())}</th>
+            ${sortHead('name', 'Session')}
+            ${sortHead('started', 'Started')}
+            ${sortHead('duration', 'Active for')}
+            ${sortHead('requests', 'Requests')}
+            ${sortHead('cost', costModeNoun())}
             <th scope="col">Models</th>
           </tr>
         </thead>
@@ -4102,6 +4149,7 @@ async function init() {
   initPeriodComparePrefs();
   initCompareModelPrefs();
   initDiscountPrefs();
+  initSessionPrefs();
 
   const storedMode = storage.getItem(COST_MODE_KEY);
   if (storedMode === 'billed' || storedMode === 'value') state.costMode = storedMode;
@@ -4173,6 +4221,11 @@ async function init() {
   // to its own change event — handling both would toggle the row twice.
   $('sessionsList')?.addEventListener('click', (ev) => {
     if (ev.target.closest('input[type="checkbox"]')) return;
+    const sortable = ev.target.closest('[data-session-sort]');
+    if (sortable) {
+      setSessionSort(sortable.dataset.sessionSort);
+      return;
+    }
     const row = ev.target.closest('tr[data-session-id]');
     if (row) toggleSessionSelected(row.dataset.sessionId);
   });

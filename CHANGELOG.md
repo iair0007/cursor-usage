@@ -21,6 +21,11 @@ All notable user-facing changes. Earlier releases predate this file; see the
   errored requests, and a model-by-model breakdown. Pick the dates in the
   toolbar first and the list follows — there is no second date control to keep
   in sync.
+- The session list sorts by any of its columns — name, start, how long it ran,
+  requests or cost — from the column headers, the same way the request log
+  does. Sorting happens before the list is capped, so ordering by duration
+  reaches past the first 25 rather than reshuffling them. The choice is
+  remembered between sessions.
 - **Sessions are named, not numbered.** The conversation names Cursor shows in
   its own chat list are read from its local database on your machine and joined
   to the usage rows there — nothing from that database is sent anywhere, and

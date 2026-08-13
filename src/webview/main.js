@@ -2771,12 +2771,20 @@ function requestOptionLabel(e) {
   return `${fmt.date(e.timestampMs)} · ${e.model} · ${fmt.num(e.totalTokens)} tok · ${fmt.money(e.cost)}`;
 }
 
-function isSameModel(modelKey, eventModelRaw) {
+function isSameModel(modelKey, eventModelRaw, pricing) {
   const a = normModel(modelKey);
   const b = normModel(eventModelRaw);
   if (a === b) return true;
   if (a === 'default' && (b === 'default' || b.includes('auto'))) return true;
   if (b === 'default' && (a === 'default' || a.includes('auto'))) return true;
+  // Names differ (e.g. a catalog key "grok-4-6" vs. a billed variant string
+  // "cursor-grok-4.6-high") but can still price against the same published
+  // rate row — that's the same model, not an alternative to compare against.
+  if (pricing) {
+    const ra = matchPricing(modelKey, pricing);
+    const rb = matchPricing(eventModelRaw, pricing);
+    if (ra && rb && ra.label === rb.label) return true;
+  }
   return false;
 }
 
@@ -2954,7 +2962,7 @@ function populateCompareModelFilters(event) {
   const container = $('simCompareModelFilters');
   if (!container || !state.pricing) return;
 
-  const models = getCompareModels(state.pricing).filter((m) => !isSameModel(m.key, event.modelRaw));
+  const models = getCompareModels(state.pricing).filter((m) => !isSameModel(m.key, event.modelRaw, state.pricing));
   // The list is partly derived from the events in the loaded range, so a range
   // change can add or drop models while the selected request stays the same —
   // keying the rebuild on the request alone would leave stale checkboxes.
@@ -3007,7 +3015,7 @@ function buildCompareRows(event) {
 
   const altRows = [];
   for (const m of getCompareModels(state.pricing)) {
-    if (isSameModel(m.key, event.modelRaw)) continue;
+    if (isSameModel(m.key, event.modelRaw, state.pricing)) continue;
     const rates = m.rates;
     // Unpriced models stay in the table with an empty cost cell. Dropping them
     // made a model the user had just run look like it didn't exist.
@@ -3015,8 +3023,7 @@ function buildCompareRows(event) {
     const savings = rates ? cacheSavingsFor({ cacheRead: tokens.cacheRead }, rates) : null;
     const diff = actualCost != null && estCost != null ? estCost - actualCost : null;
     // The rates that priced this row, when they came from a differently-named
-    // catalog entry — "cursor-grok-4.6-high" priced off the "Grok 4.6" row is an
-    // approximation the user should be able to see.
+    // catalog entry, are an approximation the user should be able to see.
     const via = rates && normModel(rates.label) !== normModel(m.key) ? rates.label : null;
     altRows.push({ key: m.key, label: m.label, via, estCost, savings, diff, isActual: false });
   }

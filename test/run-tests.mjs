@@ -86,7 +86,6 @@ test('parses Auto rates', () => {
   assert.equal(pricing.auto.output, 6.0);
 });
 test('parses model table incl. links and missing cells', () => {
-  assert.equal(pricing.models.length, 4);
   const sonnet = pricing.models.find((m) => m.display === 'Claude 4.5 Sonnet');
   assert.deepEqual(
     [sonnet.input, sonnet.cacheWrite, sonnet.cacheRead, sonnet.output],
@@ -94,6 +93,15 @@ test('parses model table incl. links and missing cells', () => {
   );
   const gpt = pricing.models.find((m) => m.display === 'GPT-5.2');
   assert.equal(gpt.cacheWrite, null);
+});
+test('parses the Cursor Models pool table, a differently-shaped table under its own heading', () => {
+  assert.equal(pricing.models.length, 9);
+  const grok = pricing.models.find((m) => m.display === 'Grok 4.6');
+  assert.deepEqual([grok.input, grok.cacheWrite, grok.cacheRead, grok.output], [2, null, 0.5, 6]);
+  const grokFast = pricing.models.find((m) => m.display === 'Grok 4.6 (Fast)');
+  assert.deepEqual([grokFast.input, grokFast.cacheWrite, grokFast.cacheRead, grokFast.output], [4, null, 1, 12]);
+  const composer = pricing.models.find((m) => m.display === 'Composer 2.5');
+  assert.deepEqual([composer.input, composer.cacheWrite, composer.cacheRead, composer.output], [0.5, null, 0.2, 2.5]);
 });
 test('real scrape is not flagged as fallback', () => {
   assert.equal(pricing.fallback, false);
@@ -120,6 +128,14 @@ test('alias and partial matching', () => {
   assert.equal(matchPricing('claude-4.5-sonnet', pricing).label, 'Claude 4.5 Sonnet');
   assert.equal(matchPricing('claude-4-5-sonnet-thinking', pricing).label, 'Claude 4.5 Sonnet');
 });
+test('a billed variant string prices off the base model, not a model of its own', () => {
+  // Cursor bills reasoning effort as part of the model string; there is no
+  // separate published rate per effort level, only per model.
+  assert.equal(matchPricing('cursor-grok-4.6-high', pricing).label, 'Grok 4.6');
+});
+test('the longest matching catalog name wins, so a Fast variant prices off its own row', () => {
+  assert.equal(matchPricing('cursor-grok-4.6-fast-high', pricing).label, 'Grok 4.6 (Fast)');
+});
 test('unknown model returns null', () => {
   assert.equal(matchPricing('mystery-model-9000', pricing), null);
 });
@@ -131,22 +147,31 @@ test('lists Auto plus every priced catalog model', () => {
   assert.ok(keys.includes('claude-4-5-sonnet'));
   assert.ok(keys.includes('composer-2-5'));
 });
-test('adds models seen in usage that the pricing table does not name', () => {
-  const events = [{ modelRaw: 'cursor-grok-4.6-high' }, { modelRaw: 'cursor-grok-4.6-high' }];
+test('adds models seen in usage that the pricing table truly does not name', () => {
+  const events = [{ modelRaw: 'cursor-mystery-model-9000-high' }, { modelRaw: 'cursor-mystery-model-9000-high' }];
   const models = simulatorModels(pricing, events);
-  const grok = models.find((m) => m.key === 'cursor-grok-4.6-high');
-  assert.ok(grok, 'model from usage data must be offered');
-  assert.equal(grok.source, 'usage');
-  // Fixture pricing has no grok row, so there is nothing to price it with —
-  // it is still listed, just flagged.
-  assert.equal(grok.priced, false);
-  assert.equal(grok.rates, null);
+  const unknown = models.find((m) => m.key === 'cursor-mystery-model-9000-high');
+  assert.ok(unknown, 'model from usage data must be offered');
+  assert.equal(unknown.source, 'usage');
+  // Nothing in the fixture prices this — it is still listed, just flagged.
+  assert.equal(unknown.priced, false);
+  assert.equal(unknown.rates, null);
 });
-test('a usage model the table does name is priced off the closest row', () => {
+test('a billed variant string that prices off a catalog row is not offered as a duplicate entry', () => {
+  // "cursor-grok-4.6-high" is Grok 4.6 billed at a reasoning effort, not a
+  // separate model — the catalog's own "Grok 4.6" row already covers it.
+  const models = simulatorModels(pricing, [{ modelRaw: 'cursor-grok-4.6-high' }]);
+  assert.ok(!models.some((m) => m.key === 'cursor-grok-4.6-high'));
+  const grok = models.find((m) => m.key === 'grok-4-6');
+  assert.ok(grok, 'Grok 4.6 catalog entry must still be offered');
+  assert.equal(grok.priced, true);
+});
+test('same for a variant of a model already carrying a "-thinking" suffix', () => {
   const models = simulatorModels(pricing, [{ modelRaw: 'claude-4-5-sonnet-thinking' }]);
-  const variant = models.find((m) => m.key === 'claude-4-5-sonnet-thinking');
-  assert.equal(variant.priced, true);
-  assert.equal(variant.rates.label, 'Claude 4.5 Sonnet');
+  assert.ok(!models.some((m) => m.key === 'claude-4-5-sonnet-thinking'));
+  const sonnet = models.find((m) => m.key === 'claude-4-5-sonnet');
+  assert.equal(sonnet.priced, true);
+  assert.equal(sonnet.rates.label, 'Claude 4.5 Sonnet');
 });
 test('usage models already in the catalog are not duplicated', () => {
   const models = simulatorModels(pricing, [{ modelRaw: 'GPT-5.2' }, { modelRaw: 'gpt-5-2' }]);
@@ -175,10 +200,10 @@ test('falls back to the head of the list when usage is too thin to rank', () => 
   assert.deepEqual([...picked], models.slice(0, 3).map((m) => m.key));
 });
 test('never defaults to a model it cannot price', () => {
-  const events = [...Array(9).fill({ modelRaw: 'cursor-grok-4.6-high' }), { modelRaw: 'gpt-5.2' }];
+  const events = [...Array(9).fill({ modelRaw: 'cursor-mystery-model-9000-high' }), { modelRaw: 'gpt-5.2' }];
   const models = simulatorModels(pricing, events);
   const picked = defaultCompareSelection(models, events, 4);
-  assert.ok(!picked.has('cursor-grok-4.6-high'));
+  assert.ok(!picked.has('cursor-mystery-model-9000-high'));
 });
 
 console.log('mergeCompareSelection');

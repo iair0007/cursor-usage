@@ -78,7 +78,12 @@ const FALLBACK_PRICING = {
     { display: 'Claude 4.5 Sonnet', input: 3.0, cacheWrite: 3.75, cacheRead: 0.3, output: 15.0 },
     { display: 'Claude 4.5 Haiku', input: 1.0, cacheWrite: 1.25, cacheRead: 0.1, output: 5.0 },
     { display: 'GPT-5.2', input: 1.75, cacheWrite: null, cacheRead: 0.18, output: 14.0 },
-    { display: 'Composer 2.5', input: 1.25, cacheWrite: 1.55, cacheRead: 0.13, output: 10.0 },
+    // Cursor's own hosted pool (cursor.com/docs/models-and-pricing, "Cursor
+    // Models" table) — a single published rate per model, regardless of the
+    // reasoning-effort level a request used.
+    { display: 'Grok 4.6', input: 2.0, cacheWrite: null, cacheRead: 0.5, output: 6.0 },
+    { display: 'Grok 4.5', input: 2.0, cacheWrite: null, cacheRead: 0.5, output: 6.0 },
+    { display: 'Composer 2.5', input: 0.5, cacheWrite: null, cacheRead: 0.2, output: 2.5 },
   ],
 };
 
@@ -91,11 +96,55 @@ function buildAliasIndex(models) {
   return aliasIndex;
 }
 
-export function parsePricing(md) {
-  const auto = { input: null, cacheWrite: null, cacheRead: null, output: null };
-  const models = [];
+/** True for a markdown table separator row ("| :--- | --- |"). */
+function isTableSeparatorRow(line) {
+  return /^\|?[\s:|-]+\|?$/.test(line) && line.includes('-');
+}
 
-  const autoSec = (md || '').match(/### Auto pricing[\s\S]*?(?=###|## )/i);
+function splitRowCells(line) {
+  return line.split('|').map((c) => c.trim()).filter(Boolean);
+}
+
+/**
+ * Extracts model rate rows from one markdown table, given its already-split
+ * header cells and raw data rows. Column position isn't assumed — cursor.com
+ * publishes more than one shape of pricing table (the frontier-model table
+ * has a "Context" column the Cursor-hosted "Cursor Models" pool table
+ * doesn't), so columns are located by header text instead of by index.
+ */
+function parseModelTableRows(headerCells, rows) {
+  const idx = (pred) => headerCells.findIndex((c) => pred(c.toLowerCase()));
+  const inputIdx = idx((c) => c.includes('input'));
+  const outputIdx = idx((c) => c.includes('output'));
+  if (inputIdx === -1 || outputIdx === -1) return [];
+  const cacheWriteIdx = idx((c) => c.includes('cache') && c.includes('write'));
+  const cacheReadIdx = idx((c) => c.includes('cache') && c.includes('read'));
+
+  const models = [];
+  for (const cells of rows) {
+    if (cells.length <= Math.max(inputIdx, outputIdx)) continue;
+    const display = cells[0]
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .trim();
+    if (!display) continue;
+    models.push({
+      name: normModel(display),
+      display,
+      input: parseDollar(cells[inputIdx]),
+      cacheWrite: cacheWriteIdx === -1 ? null : parseDollar(cells[cacheWriteIdx]),
+      cacheRead: cacheReadIdx === -1 ? null : parseDollar(cells[cacheReadIdx]),
+      output: parseDollar(cells[outputIdx]),
+    });
+  }
+  return models;
+}
+
+export function parsePricing(md) {
+  const text = md || '';
+  const auto = { input: null, cacheWrite: null, cacheRead: null, output: null };
+
+  const autoSec = text.match(/### Auto pricing[\s\S]*?(?=###|## )/i);
   if (autoSec) {
     for (const row of autoSec[0].match(/\|\s*([^|]+)\s*\|\s*\$?([\d.]+)\s*\|/g) || []) {
       const [, label, rate] = row.match(/\|\s*([^|]+)\s*\|\s*\$?([\d.]+)\s*\|/) || [];
@@ -110,22 +159,31 @@ export function parsePricing(md) {
     }
   }
 
-  const modelSec = (md || '').match(/### Model pricing[\s\S]*?(?=### Premium|## Plans|$)/i);
-  if (modelSec) {
-    for (const line of modelSec[0].split('\n')) {
-      if (!line.startsWith('|') || line.includes(':---') || /model/i.test(line.split('|')[1])) continue;
-      const cells = line.split('|').map((c) => c.trim()).filter(Boolean);
-      if (cells.length < 6) continue;
-      const display = cells[0].replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-      models.push({
-        name: normModel(display),
-        display,
-        input: parseDollar(cells[2]),
-        cacheWrite: parseDollar(cells[3]),
-        cacheRead: parseDollar(cells[4]),
-        output: parseDollar(cells[5]),
-      });
+  // Scan every markdown table in the doc for one that prices models, rather
+  // than anchoring to a single "### Model pricing" heading. cursor.com prices
+  // its own hosted pool (Grok, Composer — the "Cursor Models" table) in a
+  // separate table from third-party frontier models, and past versions of
+  // this parser only ever looked at the frontier-model table — so a model
+  // that's really on the pricing page (just under a different heading) came
+  // back with no rate and got treated as unpriced.
+  const models = [];
+  const seenNames = new Set();
+  const lines = text.split('\n').map((l) => l.trim());
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (!lines[i].startsWith('|') || !isTableSeparatorRow(lines[i + 1])) continue;
+    const headerCells = splitRowCells(lines[i]);
+    const rows = [];
+    let j = i + 2;
+    while (j < lines.length && lines[j].startsWith('|')) {
+      rows.push(splitRowCells(lines[j]));
+      j++;
     }
+    for (const m of parseModelTableRows(headerCells, rows)) {
+      if (seenNames.has(m.name)) continue;
+      seenNames.add(m.name);
+      models.push(m);
+    }
+    i = j - 1;
   }
 
   // Scrape found nothing usable (empty/unreachable doc, or page restructured) — fall back.
@@ -168,7 +226,17 @@ export function matchPricing(model, pricing) {
       };
     }
   }
-  const partial = pricing.models.find((m) => n.includes(m.name) || m.name.includes(n));
+  // Longest-name match wins, not first-found: a billed variant string can
+  // contain more than one candidate substring (e.g. "cursor-grok-4.6-fast-high"
+  // contains both "grok-4-6" and the more specific "grok-4-6-fast"), and the
+  // more specific catalog row is the one whose rate actually applies.
+  let partial = null;
+  for (const m of pricing.models) {
+    if (!m.name) continue;
+    if (n.includes(m.name) || m.name.includes(n)) {
+      if (!partial || m.name.length > partial.name.length) partial = m;
+    }
+  }
   if (partial?.input != null) {
     return {
       input: partial.input,
@@ -185,14 +253,20 @@ export function matchPricing(model, pricing) {
  * Every model the simulator can offer, in picker order.
  *
  * Two sources, because neither is complete on its own. cursor.com's pricing
- * table carries the rates, but it lists canonical names ("Grok 4.6") while
- * requests are billed under variant strings that encode the reasoning level
- * ("cursor-grok-4.6-high"), and Cursor-hosted variants sometimes never reach
- * the published table at all. A picker built from the table alone therefore
- * hides the models the user demonstrably ran — exactly the ones they came to
- * compare. The usage data supplies the names; the table supplies the rates.
+ * table carries the rates, but requests are billed under variant strings that
+ * encode extra detail the table doesn't ("cursor-grok-4.6-high" bills Grok 4.6
+ * at a chosen reasoning effort — the effort changes token usage, not price, so
+ * it isn't a separate rate row). Genuinely Cursor-hosted models can also go
+ * unpriced if they haven't reached the published table at all. A picker built
+ * from the table alone would hide any model only ever seen under a variant
+ * string. The usage data supplies names the table doesn't otherwise offer;
+ * the table supplies the rates.
  *
- * A model seen in usage but absent from the table comes back with
+ * A usage-only name that turns out to price against a catalog row (matched via
+ * matchPricing, e.g. "cursor-grok-4.6-high" against "Grok 4.6") is skipped
+ * here rather than added as its own row — it is that catalog model, not a
+ * different one, and listing both would offer the same rate twice under two
+ * names. Only names matchPricing genuinely cannot place come back with
  * `rates: null` instead of being dropped: "no published rate for this" is
  * information, and silently omitting a model the user just ran reads as a bug.
  */
@@ -217,7 +291,8 @@ export function simulatorModels(pricing, events = []) {
   const fromUsage = [...new Set((events || []).map((e) => e.modelRaw).filter(Boolean))]
     .filter((raw) => {
       const n = normModel(raw);
-      return n && n !== 'unknown' && n !== 'default' && !n.includes('auto');
+      if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) return false;
+      return !matchPricing(raw, pricing);
     })
     .sort((a, b) => a.localeCompare(b));
   for (const raw of fromUsage) add(raw, raw, 'usage');

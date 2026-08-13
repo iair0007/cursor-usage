@@ -56,6 +56,9 @@ const {
   comparisonWindow,
   modelCostDeltas,
   shiftMonths,
+  sessionTotals,
+  sessionSummary,
+  UNATTRIBUTED_SESSION,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
 let passed = 0;
@@ -856,6 +859,31 @@ test('the intro is shown once, not on every visit to the Simulator', () => {
 const authCore = await loadTs('src/authCore.ts', 'authCore.mjs');
 const api = await loadTs('src/api.ts', 'api.mjs');
 
+console.log('api.pickConversationId / toRawEvent');
+test('the conversation id is read under each spelling the endpoints use', () => {
+  assert.equal(api.pickConversationId({ conversationId: 'c1' }), 'c1');
+  assert.equal(api.pickConversationId({ conversation_id: 'c2' }), 'c2');
+  assert.equal(api.pickConversationId({ composerId: 'c3' }), 'c3');
+  assert.equal(api.pickConversationId({ threadId: 'c4' }), 'c4');
+  assert.equal(api.pickConversationId({ chatId: 'c5' }), 'c5');
+  assert.equal(api.pickConversationId({ conversationId: 42 }), '42');
+});
+test('an absent or blank conversation id is undefined, not a session key', () => {
+  // A blank id would otherwise gather every unattributed request into one
+  // conversation that does not exist.
+  assert.equal(api.pickConversationId({}), undefined);
+  assert.equal(api.pickConversationId({ conversationId: null }), undefined);
+  assert.equal(api.pickConversationId({ conversationId: '' }), undefined);
+  assert.equal(api.pickConversationId({ conversationId: '   ' }), undefined);
+  assert.equal(api.pickConversationId(undefined), undefined);
+});
+test('toRawEvent carries the conversation id through instead of dropping it', () => {
+  const withId = api.toRawEvent({ id: 'e1', timestamp: 1, model: 'auto', conversationId: 'c1' });
+  assert.equal(withId.conversationId, 'c1');
+  // Absent stays absent, so consumers can tell "no conversation" from "".
+  assert.equal(api.toRawEvent({ id: 'e2', timestamp: 1, model: 'auto' }).conversationId, undefined);
+});
+
 function fakeJwt(payload) {
   const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   return `${b64({ alg: 'none' })}.${b64(payload)}.sig`;
@@ -1623,6 +1651,97 @@ console.log('comparisonWindow / shiftMonths / modelCostDeltas');
     const sonnet = rows.find((r) => r.model === 'sonnet');
     assert.deepEqual(opus, { model: 'opus', current: 5, baseline: 0, delta: 5 });
     assert.deepEqual(sonnet, { model: 'sonnet', current: 0, baseline: 4, delta: -4 });
+  });
+}
+
+console.log('sessionTotals / sessionSummary');
+{
+  const at = (d, h) => Date.UTC(2026, 7, d, h);
+  // Mirrors what the API gives us once conversationId survives toRawEvent:
+  // a couple of real conversations plus rows carrying no id at all.
+  const ev = (conversationId, cost, model, ts, extra = {}) =>
+    ({ conversationId, cost, model, timestampMs: ts, ...extra });
+
+  const events = [
+    ev('conv-a', 1.5, 'claude-4.5-sonnet', at(3, 9)),
+    ev('conv-a', 2.5, 'claude-4.5-sonnet', at(3, 11)),
+    ev('conv-a', 1.0, 'gpt-5.2', at(3, 14)),
+    ev('conv-b', 0.75, 'composer-2.5', at(4, 10)),
+    ev(null, 0.25, 'auto', at(4, 12)),
+    ev('', 0.1, 'auto', at(4, 13)), // blank id is absent, not its own session
+  ];
+
+  test('rolls requests up per conversation, most expensive first', () => {
+    const totals = sessionTotals(events);
+    assert.deepEqual(totals.map((t) => t.sessionId), ['conv-a', 'conv-b', UNATTRIBUTED_SESSION]);
+    assert.equal(totals[0].requests, 3);
+    assert.ok(Math.abs(totals[0].costDollars - 5.0) < 1e-9);
+    assert.equal(totals[0].firstMs, at(3, 9));
+    assert.equal(totals[0].lastMs, at(3, 14));
+  });
+
+  test('a session lists its models, most used first', () => {
+    assert.deepEqual(sessionTotals(events)[0].models, ['claude-4.5-sonnet', 'gpt-5.2']);
+  });
+
+  test('requests with no conversation id are collected, never dropped', () => {
+    const totals = sessionTotals(events);
+    const un = totals.find((t) => t.sessionId === UNATTRIBUTED_SESSION);
+    // Both the null and the blank id land here — a blank would otherwise become
+    // a session of its own, and the totals must still add up to the whole set.
+    assert.equal(un.requests, 2);
+    assert.equal(totals.reduce((n, t) => n + t.requests, 0), events.length);
+    assert.ok(Math.abs(totals.reduce((c, t) => c + t.costDollars, 0) - 6.1) < 1e-9);
+  });
+
+  test('errored rows keep their cost but do not count as requests', () => {
+    const withError = [...events, ev('conv-b', 0.4, 'composer-2.5', at(4, 15), { counted: false })];
+    const b = sessionTotals(withError).find((t) => t.sessionId === 'conv-b');
+    assert.equal(b.requests, 1);
+    assert.ok(Math.abs(b.costDollars - 1.15) < 1e-9);
+  });
+
+  test('sessionSummary reports per-session shape, excluding the unattributed bucket', () => {
+    const s = sessionSummary(sessionTotals(events));
+    assert.equal(s.sessions, 2);
+    assert.equal(s.unattributedRequests, 2);
+    assert.ok(Math.abs(s.costPerSession - (5.75 / 2)) < 1e-9);
+    assert.equal(s.requestsPerSession, 2);
+    assert.equal(s.topSession.sessionId, 'conv-a');
+  });
+
+  test('two periods can be compared on session shape', () => {
+    // The point of the session view: same spend, very different working style.
+    const spread = [
+      ev('s1', 1, 'auto', at(1, 9)), ev('s2', 1, 'auto', at(2, 9)),
+      ev('s3', 1, 'auto', at(3, 9)), ev('s4', 1, 'auto', at(4, 9)),
+    ];
+    const concentrated = [
+      ev('s9', 1, 'auto', at(1, 9)), ev('s9', 1, 'auto', at(1, 10)),
+      ev('s9', 1, 'auto', at(1, 11)), ev('s9', 1, 'auto', at(1, 12)),
+    ];
+    const a = sessionSummary(sessionTotals(spread));
+    const b = sessionSummary(sessionTotals(concentrated));
+    assert.equal(a.sessions, 4);
+    assert.equal(b.sessions, 1);
+    assert.equal(a.costPerSession, 1);
+    assert.equal(b.costPerSession, 4);
+    assert.equal(b.requestsPerSession, 4);
+  });
+
+  test('no events yields an empty summary rather than NaN', () => {
+    const s = sessionSummary(sessionTotals([]));
+    assert.equal(s.sessions, 0);
+    assert.equal(s.costPerSession, null);
+    assert.equal(s.requestsPerSession, null);
+    assert.equal(s.topSession, null);
+  });
+
+  test('a period with only unattributed requests reports no sessions', () => {
+    const s = sessionSummary(sessionTotals([ev(null, 2, 'auto', at(1, 9))]));
+    assert.equal(s.sessions, 0);
+    assert.equal(s.unattributedRequests, 1);
+    assert.equal(s.topSession, null);
   });
 }
 

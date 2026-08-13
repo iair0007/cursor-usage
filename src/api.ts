@@ -6,6 +6,16 @@ export interface RawUsageEvent {
   timestamp: number | string;
   model: string;
   kind?: string;
+  /**
+   * The IDE conversation a request belongs to, when the API reports one.
+   *
+   * Carried through rather than dropped so spend can be attributed per
+   * conversation. Optional by necessity: it is undocumented, the field name
+   * varies across endpoints, and the session-cookie and Admin API paths do not
+   * agree on whether it is present at all — so every consumer has to handle
+   * its absence rather than assume it.
+   */
+  conversationId?: string;
   isTokenBasedCall: boolean;
   chargedCents: number | null;
   cursorTokenFee: number | null;
@@ -99,6 +109,18 @@ function pickChargedCents(e: any): number | null {
   return toCents(e.requestsCosts);
 }
 
+/**
+ * The conversation id, under whichever of its several spellings this endpoint
+ * uses. Blank strings are treated as absent — an empty id would otherwise
+ * collect every unattributed request into one fictitious conversation.
+ */
+export function pickConversationId(e: any): string | undefined {
+  const raw = e?.conversationId ?? e?.conversation_id ?? e?.composerId ?? e?.threadId ?? e?.chatId;
+  if (raw == null) return undefined;
+  const id = String(raw).trim();
+  return id ? id : undefined;
+}
+
 export function toRawEvent(e: any): RawUsageEvent {
   const tu = e.tokenUsage || null;
   return {
@@ -106,6 +128,7 @@ export function toRawEvent(e: any): RawUsageEvent {
     timestamp: e.timestamp ?? e.timestampEpoch ?? 0,
     model: e.model || e.modelIntent || 'unknown',
     kind: e.kind || e.kindLabel,
+    conversationId: pickConversationId(e),
     isTokenBasedCall: Boolean(e.isTokenBasedCall),
     chargedCents: pickChargedCents(e),
     cursorTokenFee: num(e.cursorTokenFee ?? tu?.cursorTokenFee),

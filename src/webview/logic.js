@@ -15,11 +15,14 @@ import {
   projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
+  sessionSummary,
+  sessionTotals,
   shiftMonths,
   statusBarText,
   sumBilledCostDollars,
   sumPlanMeteredDollars,
   sumTokenCostDollars,
+  UNATTRIBUTED_SESSION,
 } from '../shared/usageLogic.ts';
 
 export {
@@ -34,11 +37,14 @@ export {
   projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
+  sessionSummary,
+  sessionTotals,
   shiftMonths,
   statusBarText,
   sumBilledCostDollars,
   sumPlanMeteredDollars,
   sumTokenCostDollars,
+  UNATTRIBUTED_SESSION,
 };
 
 export const MODEL_ALIASES = {
@@ -717,6 +723,7 @@ export function normalize(raw, pricing, opts = {}) {
     modelRaw,
     model: displayModel(modelRaw),
     kind: raw.kind || null,
+    conversationId: raw.conversationId || null,
     counted: isCountedRequest(raw.kind, totalTokens, chargedCents),
     cost,
     valueCost: cost,

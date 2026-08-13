@@ -621,6 +621,113 @@ export function modelCostDeltas(
     .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.current - a.current);
 }
 
+export interface SessionTotal {
+  sessionId: string;
+  requests: number;
+  costDollars: number;
+  firstMs: number;
+  lastMs: number;
+  /** Distinct models used, most-used first. */
+  models: string[];
+}
+
+/** Requests with no conversation id are grouped under this, never dropped. */
+export const UNATTRIBUTED_SESSION = '(unattributed)';
+
+/**
+ * Rolls usage up per IDE conversation, most expensive first.
+ *
+ * Requests the API reports no conversation for are collected under
+ * `UNATTRIBUTED_SESSION` rather than discarded: dropping them would make the
+ * session totals disagree with every other figure on the dashboard, and an
+ * unexplained gap is worse than an explicit "we don't know" row.
+ */
+export function sessionTotals(
+  events: {
+    conversationId?: string | null;
+    cost?: number | null;
+    model?: string;
+    timestampMs?: number;
+    counted?: boolean;
+  }[],
+): SessionTotal[] {
+  const bySession = new Map<string, SessionTotal & { modelCounts: Map<string, number> }>();
+
+  for (const e of events) {
+    const sessionId = e.conversationId || UNATTRIBUTED_SESSION;
+    let row = bySession.get(sessionId);
+    if (!row) {
+      row = {
+        sessionId,
+        requests: 0,
+        costDollars: 0,
+        firstMs: Infinity,
+        lastMs: -Infinity,
+        models: [],
+        modelCounts: new Map(),
+      };
+      bySession.set(sessionId, row);
+    }
+    // Errored and aborted rows still cost tokens, so they keep their spend but
+    // don't inflate the request count — the same rule the rest of the dashboard
+    // applies through `counted`.
+    if (e.counted !== false) row.requests += 1;
+    row.costDollars += e.cost ?? 0;
+    const ts = e.timestampMs ?? 0;
+    if (ts > 0) {
+      row.firstMs = Math.min(row.firstMs, ts);
+      row.lastMs = Math.max(row.lastMs, ts);
+    }
+    if (e.model) row.modelCounts.set(e.model, (row.modelCounts.get(e.model) ?? 0) + 1);
+  }
+
+  return [...bySession.values()]
+    .map(({ modelCounts, ...row }) => ({
+      ...row,
+      firstMs: Number.isFinite(row.firstMs) ? row.firstMs : 0,
+      lastMs: Number.isFinite(row.lastMs) ? row.lastMs : 0,
+      models: [...modelCounts.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m),
+    }))
+    .sort((a, b) => b.costDollars - a.costDollars || b.requests - a.requests);
+}
+
+export interface SessionSummary {
+  /** Conversations seen, excluding the unattributed bucket. */
+  sessions: number;
+  /** Requests that carried no conversation id. */
+  unattributedRequests: number;
+  costPerSession: number | null;
+  requestsPerSession: number | null;
+  /** The single most expensive conversation, or null when there are none. */
+  topSession: SessionTotal | null;
+}
+
+/**
+ * Period-level session figures, for comparing one period against another.
+ *
+ * Deliberately aggregate rather than per-conversation. Conversations are
+ * short-lived, so the same id almost never appears in both periods — a
+ * session-by-session diff of the kind `modelCostDeltas` does for models would
+ * be two disjoint lists side by side, every row reading "new" or "stopped".
+ * What actually differs between two periods is how work was shaped: how many
+ * conversations, how much each cost, how many requests each took.
+ */
+export function sessionSummary(totals: SessionTotal[]): SessionSummary {
+  const attributed = totals.filter((t) => t.sessionId !== UNATTRIBUTED_SESSION);
+  const unattributed = totals.find((t) => t.sessionId === UNATTRIBUTED_SESSION);
+  const sessions = attributed.length;
+  const cost = attributed.reduce((s, t) => s + t.costDollars, 0);
+  const requests = attributed.reduce((s, t) => s + t.requests, 0);
+  return {
+    sessions,
+    unattributedRequests: unattributed?.requests ?? 0,
+    costPerSession: sessions ? cost / sessions : null,
+    requestsPerSession: sessions ? requests / sessions : null,
+    // totals is cost-sorted, so the first attributed row is the priciest.
+    topSession: attributed[0] ?? null,
+  };
+}
+
 /**
  * Straight-line projection of when `used` will hit `limit`, from the average
  * daily pace since `sinceMs`.

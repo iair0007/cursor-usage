@@ -1925,7 +1925,12 @@ async function loadTrendComparison() {
 
 /** The Overview cost card's sub-line: trend badge plus any plan-change note. */
 function overviewCostSubHtml(summary) {
-  const badge = state.trend.key === currentTrendKey() && state.trend.previous
+  // Once the comparison's left column is pinned, its baseline belongs to that
+  // pinned window rather than to the range this card is showing — the two
+  // totals are no longer about the same period, so there is no honest delta to
+  // put here. The Compare tab keeps its own, correctly paired, figures.
+  const comparable = !hasPrimaryOverride() && state.trend.key === currentTrendKey();
+  const badge = comparable && state.trend.previous
     ? trendBadge(summary.totalCost, state.trend.previous.totalCost)
     : '';
   // The badge poses a question it can't answer on its own — against what, and

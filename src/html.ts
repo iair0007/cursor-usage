@@ -357,11 +357,50 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
 
           <p class="compare-status hidden" id="sessionsStatus"></p>
           <div id="sessionsSummary"></div>
-          <div id="sessionsCompare"></div>
           <div id="sessionsList"></div>
+          <div id="sessionsPager"></div>
           <p class="compare-note hidden" id="sessionsNote"></p>
         </article>
+
+        <!--
+          The selection tray. Ticking a row used to draw a comparison table at
+          the top of the panel, which meant selecting two sessions from the
+          bottom of a long list looked like nothing had happened at all. A tray
+          pinned to the bottom of the view puts the feedback where the clicking
+          is, and makes opening the comparison a deliberate act rather than
+          something that happens under the scroll position.
+        -->
+        <div class="sessions-tray hidden" id="sessionsTray" role="region" aria-label="Selected sessions">
+          <div class="tray-chips" id="trayChips"></div>
+          <div class="tray-actions">
+            <span class="tray-count" id="trayCount"></span>
+            <button type="button" class="btn" id="trayClear">Clear</button>
+            <button type="button" class="btn primary" id="trayCompare">Compare</button>
+          </div>
+        </div>
       </div>
+
+      <!--
+        The comparison itself is a focused view rather than another block in an
+        already long page: a dialog gets it out of the list's way, keeps the
+        row labels next to the figures, and closes on Escape.
+      -->
+      <dialog id="sessionsDialog" class="sessions-dialog">
+        <header class="sessions-dialog-head">
+          <div>
+            <h3 id="sessionsDialogTitle">Compare sessions</h3>
+            <p class="panel-desc" id="sessionsDialogDesc"></p>
+          </div>
+          <div class="sessions-dialog-controls">
+            <label class="sessions-diff-toggle">
+              <input type="checkbox" id="sessionsDiffOnly" />
+              <span>Only rows that differ</span>
+            </label>
+            <button type="button" class="btn" id="sessionsDialogClose">Close</button>
+          </div>
+        </header>
+        <div class="sessions-dialog-body" id="sessionsDialogBody"></div>
+      </dialog>
 
       <div id="analyzeContent" class="analyze-layout hidden">
         <div class="analyze-main">

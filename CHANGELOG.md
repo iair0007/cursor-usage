@@ -21,6 +21,21 @@ All notable user-facing changes. Earlier releases predate this file; see the
   errored requests, and a model-by-model breakdown. Pick the dates in the
   toolbar first and the list follows — there is no second date control to keep
   in sync.
+- **The session comparison moved into its own dialog, opened from a selection
+  tray.** Ticking rows used to draw a table at the top of the panel, so picking
+  two sessions from the bottom of a long list looked like nothing had happened.
+  Selected sessions now appear as removable chips in a bar pinned to the bottom
+  of the view, with a Compare button that opens the comparison over the list
+  instead of under the scroll position. Escape or the backdrop closes it.
+- **Up to four sessions can be compared at once.** With two, the Difference
+  column stays and reads A against B. With three or four it gives way to the
+  best and worst figure in each row being highlighted, and every column saying
+  how it differs from the base — any session can be made the base.
+- **"Only rows that differ"** hides the figures the selected sessions agree on,
+  judged at the precision on screen.
+- The session list is paged — 20 at a time, or 50 or 100 — instead of showing
+  25 with a "show all". Sorting and filtering apply across the whole list, not
+  just the visible page.
 - The session list sorts by any of its columns — name, start, how long it ran,
   requests or cost — from the column headers, the same way the request log
   does. Sorting happens before the list is capped, so ordering by duration

@@ -161,17 +161,19 @@ const state = {
     /** Substring filter over session ids and models. */
     query: '',
     /**
-     * The (at most two) session ids lined up for comparison, oldest choice
-     * first. A third selection pushes the oldest out rather than refusing the
-     * click — being told "deselect one first" is a dead end when the two you
-     * want are ten rows apart.
+     * Session ids lined up for comparison, in the order they were picked —
+     * which is also the order of the columns and the A/B/C/D labels.
      */
     selected: [],
-    /** The list is capped until asked otherwise; a wide range holds hundreds. */
-    showAll: false,
     /** Which column orders the list: 'name' | 'started' | 'duration' | 'requests' | 'cost'. */
     sortKey: 'cost',
     sortDir: 'desc',
+    page: 1,
+    pageSize: 20,
+    /** The session everything else is measured against in the comparison. */
+    baseId: null,
+    /** Hide comparison rows whose values all match — see sameAcross(). */
+    diffOnly: false,
     /**
      * id → name from Cursor's local database, or null once we've looked and
      * found none. The null matters: without it every render would re-ask for
@@ -855,6 +857,8 @@ function initSessionPrefs() {
   if (prefs?.sessionSortDir === 'asc' || prefs?.sessionSortDir === 'desc') {
     state.sessions.sortDir = prefs.sessionSortDir;
   }
+  const size = Number(prefs?.sessionPageSize);
+  if (SESSION_PAGE_SIZES.includes(size)) state.sessions.pageSize = size;
 }
 
 function initPeriodComparePrefs() {
@@ -1154,7 +1158,10 @@ function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
   const sign = up ? '+' : '−';
   // The values differ on screen but the gap is under one displayed unit — say
   // "<$0.01" rather than "$0.00", which reads as no difference at all.
-  const smallestUnit = format === fmt.num ? 1 : format === fmt.rate || format === fmt.pct ? 0.1 : 0.01;
+  const smallestUnit = format === fmt.num ? 1
+    : format === fmt.rate || format === fmt.pct ? 0.1
+      : format === fmtDuration ? 60 * 1000 // durations are printed in whole minutes
+        : 0.01;
   const exactMagnitude = format(Math.abs(delta));
   const belowUnit = exactMagnitude === format(0);
   // "<$0.01" carries its own qualifier; "+<$0.01" reads as two operators in a
@@ -1458,13 +1465,21 @@ function saveComparePrefs() {
     comparePrimaryEnd: state.trend.primaryEnd,
   });
 }
-
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
-/** Rows rendered before the list asks to be expanded. */
-const SESSION_LIST_LIMIT = 25;
+const SESSION_PAGE_SIZES = [20, 50, 100];
+
+/**
+ * How many sessions can be compared at once.
+ *
+ * Comparison tables stop being scannable past a handful of columns — the
+ * guidance is to keep it to about five and make users narrow down first, which
+ * the filter and the sort above are there to do. Four columns plus the row
+ * labels also still fits without horizontal scrolling.
+ */
+const MAX_COMPARE_SESSIONS = 4;
 
 /** The loaded requests belonging to one session. */
 function eventsForSession(sessionId) {
@@ -1513,7 +1528,7 @@ async function loadSessionTitles(ids) {
   let found = {};
   try {
     found = (await rpc('sessionTitles', { ids: wanted })).titles || {};
-  } catch (e) {
+  } catch {
     // A missing database, no sqlite3 on PATH, a Cursor version that stores its
     // chats elsewhere: all of them just mean the ids stay on screen, which is
     // what they already say. Not worth an alert, and the extension host has
@@ -1558,26 +1573,40 @@ function setSessionSort(key) {
     sessions.sortKey = key;
     sessions.sortDir = SESSION_SORT_DEFAULT_DIR[key] || 'desc';
   }
+  sessions.page = 1;
   savePrefs({ sessionSortKey: sessions.sortKey, sessionSortDir: sessions.sortDir });
   renderSessions();
 }
 
 function toggleSessionSelected(id) {
-  const selected = state.sessions.selected;
-  const at = selected.indexOf(id);
-  if (at >= 0) selected.splice(at, 1);
-  else {
-    selected.push(id);
-    // Oldest choice makes way for the newest, rather than the click doing
-    // nothing until something is deselected first.
-    if (selected.length > 2) selected.shift();
+  const sessions = state.sessions;
+  const at = sessions.selected.indexOf(id);
+  if (at >= 0) {
+    sessions.selected.splice(at, 1);
+    if (sessions.baseId === id) sessions.baseId = sessions.selected[0] ?? null;
+  } else {
+    if (sessions.selected.length >= MAX_COMPARE_SESSIONS) {
+      showAlert('info', `You can compare up to ${MAX_COMPARE_SESSIONS} sessions at once — clear one first.`);
+      return;
+    }
+    sessions.selected.push(id);
+    if (!sessions.baseId) sessions.baseId = id;
   }
+  renderSessions();
+  // The dialog stays truthful if a session is added or dropped behind it.
+  if ($('sessionsDialog')?.open) renderSessionCompare();
+}
+
+function clearSessionSelection() {
+  state.sessions.selected = [];
+  state.sessions.baseId = null;
+  $('sessionsDialog')?.close();
   renderSessions();
 }
 
 /**
  * The requests of the selected period, grouped by the conversation they came
- * from, with any two of them comparable side by side.
+ * from, with any two to four of them comparable side by side.
  *
  * Scoped to the filter bar deliberately: "pick the dates, then pick from the
  * sessions in them" is the flow, and a second date control here would ask the
@@ -1589,8 +1618,8 @@ function renderSessions() {
 
   const statusEl = $('sessionsStatus');
   const summaryEl = $('sessionsSummary');
-  const compareEl = $('sessionsCompare');
   const listEl = $('sessionsList');
+  const pagerEl = $('sessionsPager');
   const noteEl = $('sessionsNote');
 
   // The filter only makes sense with a list under it — on an empty period, or
@@ -1601,10 +1630,11 @@ function renderSessions() {
     statusEl.textContent = text || '';
     statusEl.classList.toggle('hidden', !text);
     summaryEl.innerHTML = '';
-    compareEl.innerHTML = '';
     listEl.innerHTML = '';
+    pagerEl.innerHTML = '';
     noteEl.classList.add('hidden');
     search?.classList.add('hidden');
+    renderSessionTray([]);
   };
 
   if (!state.loaded) return clear('Load a date range to see the sessions in it.');
@@ -1627,10 +1657,12 @@ function renderSessions() {
   search?.classList.remove('hidden');
 
   // A selection made in another range points at sessions that aren't here any
-  // more; keeping it would leave a comparison of two blanks on screen.
-  state.sessions.selected = state.sessions.selected.filter(
-    (id) => sessions.some((t) => t.sessionId === id),
-  );
+  // more; keeping it would leave a comparison of blanks on screen.
+  const present = new Set(sessions.map((t) => t.sessionId));
+  state.sessions.selected = state.sessions.selected.filter((id) => present.has(id));
+  if (!state.sessions.selected.includes(state.sessions.baseId)) {
+    state.sessions.baseId = state.sessions.selected[0] ?? null;
+  }
 
   const costNoun = costModeNoun();
   const top = summary.topSession;
@@ -1658,12 +1690,12 @@ function renderSessions() {
       </article>
     </div>`;
 
-  renderSessionComparison(compareEl, sessions);
   // Share is against the whole period, unattributed requests included, so the
   // percentages answer "how much of my bill was this" rather than "how much of
   // the part we could attribute".
   const periodCost = totals.reduce((s, t) => s + t.costDollars, 0);
-  renderSessionList(listEl, sessions, periodCost);
+  renderSessionList(listEl, pagerEl, sessions, periodCost);
+  renderSessionTray(sessions);
 
   const notes = [];
   if (summary.unattributedRequests > 0) {
@@ -1677,170 +1709,27 @@ function renderSessions() {
   noteEl.classList.remove('hidden');
 }
 
-/**
- * Total tokens with the three parts that make it up.
- *
- * Cached tokens are named rather than left implicit: on a well-cached session
- * they are most of the total, and "614,151 · 64,224 in · 16,541 out" reads as
- * an arithmetic error unless the missing half a million is accounted for.
- */
-function tokenBreakdown(total, metrics) {
-  const cached = total.cacheReadTokens + total.cacheWriteTokens;
-  return `${fmt.num(metrics.totalTokens)}<span class="compare-sub">${fmt.num(total.inputTokens)} in · `
-    + `${fmt.num(total.outputTokens)} out · ${fmt.num(cached)} cached</span>`;
-}
-
-function sessionCompareRow(label, aHtml, bHtml, deltaHtml) {
-  return `<tr>
-      <th scope="row">${esc(label)}</th>
-      <td>${aHtml}</td>
-      <td>${bHtml}</td>
-      <td>${deltaHtml}</td>
-    </tr>`;
-}
-
-/**
- * Two sessions side by side.
- *
- * Coloured only where a direction exists. Cheaper, better-cached and fewer cold
- * starts are wins whichever session they belong to, so those go green/amber
- * like the period comparison. Volume — requests, tokens, pace — stays neutral:
- * two conversations are not a before and an after, and a longer one having more
- * requests is a fact about what was asked of it, not a regression to flag.
- */
-function renderSessionComparison(root, sessions) {
-  const [aId, bId] = state.sessions.selected;
-  const a = sessions.find((t) => t.sessionId === aId);
-  const b = sessions.find((t) => t.sessionId === bId);
-
-  if (!a || !b) {
-    const picked = a ? 1 : 0;
-    root.innerHTML = `<p class="sessions-hint">${picked === 1
-      ? `One session picked (${esc(sessionLabel(a.sessionId).text)}) — pick a second to compare them.`
-      : 'Pick two sessions below to compare them side by side.'}</p>`;
-    return;
-  }
-
-  const am = sessionMetrics(a);
-  const bm = sessionMetrics(b);
-  const aEvents = eventsForSession(a.sessionId);
-  const bEvents = eventsForSession(b.sessionId);
-  const coldStarts = (events) => events.filter(
-    (e) => e.cacheReadTokens === 0 && e.inputTokens > state.analyzeThresholds.coldStartInputTokens,
-  ).length;
-  // A figure that isn't defined on one side has no difference to report: saying
-  // "+100% (new)" about a session too short to measure would be inventing one.
-  const delta = (x, y, format = fmt.money, betterWhen = 'down') =>
-    (x == null || y == null ? '—' : deltaCell(x, y, format, betterWhen));
-  const show = (v, format = fmt.money) => (v == null ? '—' : format(v));
-
-  const head = (label, total) => {
-    const name = sessionLabel(total.sessionId);
-    return `
-    <th scope="col">
-      <span class="compare-col-label">${esc(label)}</span>
-      <span class="compare-col-range${name.isId ? ' is-id' : ''}" title="${esc(total.sessionId)}">${esc(name.text)}</span>
-      <span class="compare-col-days">${esc(fmt.date(total.firstMs))}</span>
-    </th>`;
-  };
-
-  root.innerHTML = `
-    <div class="sessions-compare-head">
-      <h4 class="compare-subhead">Session A vs Session B</h4>
-      <button type="button" class="btn-text" id="sessionsClear">Clear selection</button>
-    </div>
-    <table class="compare-table">
-      <thead>
-        <tr>
-          <th scope="col"></th>
-          ${head('Session A', a)}
-          ${head('Session B', b)}
-          <th scope="col">Difference</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${sessionCompareRow(`Total ${costModeNoun()}`, fmt.money(am.costDollars), fmt.money(bm.costDollars),
-          delta(am.costDollars, bm.costDollars))}
-        ${sessionCompareRow('Requests', fmt.num(am.requests), fmt.num(bm.requests),
-          delta(am.requests, bm.requests, fmt.num, 'neither'))}
-        ${a.erroredRequests || b.erroredRequests
-          ? sessionCompareRow('Errored or aborted', fmt.num(a.erroredRequests), fmt.num(b.erroredRequests),
-            delta(a.erroredRequests, b.erroredRequests, fmt.num))
-          : ''}
-        ${sessionCompareRow('Avg / request', show(am.costPerRequest), show(bm.costPerRequest),
-          delta(am.costPerRequest, bm.costPerRequest))}
-        ${sessionCompareRow('Priciest request', fmt.money(a.maxCostDollars), fmt.money(b.maxCostDollars),
-          delta(a.maxCostDollars, b.maxCostDollars))}
-        ${sessionCompareRow('Active for', fmtDuration(am.durationMs), fmtDuration(bm.durationMs), '—')}
-        ${sessionCompareRow('Requests / hour', show(am.requestsPerHour, fmt.rate), show(bm.requestsPerHour, fmt.rate),
-          delta(am.requestsPerHour, bm.requestsPerHour, fmt.rate, 'neither'))}
-        ${sessionCompareRow(`${costModeNoun()} / hour`, show(am.costPerHour), show(bm.costPerHour),
-          delta(am.costPerHour, bm.costPerHour))}
-        ${sessionCompareRow('Tokens', tokenBreakdown(a, am), tokenBreakdown(b, bm),
-          delta(am.totalTokens, bm.totalTokens, fmt.num, 'neither'))}
-        ${sessionCompareRow('Cache hit rate', show(am.cacheHitRate, fmt.pct), show(bm.cacheHitRate, fmt.pct),
-          delta(am.cacheHitRate, bm.cacheHitRate, fmt.pct, 'up'))}
-        ${sessionCompareRow('Cache savings', fmt.money(a.savingsDollars), fmt.money(b.savingsDollars),
-          delta(a.savingsDollars, b.savingsDollars, fmt.money, 'up'))}
-        ${sessionCompareRow('Cold starts', fmt.num(coldStarts(aEvents)), fmt.num(coldStarts(bEvents)),
-          delta(coldStarts(aEvents), coldStarts(bEvents), fmt.num))}
-      </tbody>
-    </table>
-
-    ${renderModelDeltaTable(aEvents, bEvents, {
-      // Just "Session A" and "Session B": the ids are spelled out in the header
-      // directly above, and repeating them here only invites the reader to
-      // compare two truncated uuids character by character.
-      currentLabel: 'Session A',
-      baselineLabel: 'Session B',
-      heading: 'Which models each session used',
-      tagNew: 'only in A',
-      tagGone: 'only in B',
-    })}`;
-
-  $('sessionsClear')?.addEventListener('click', () => {
-    state.sessions.selected = [];
-    renderSessions();
-  });
-}
-
-function renderSessionList(root, sessions, periodCost) {
+function renderSessionList(root, pagerRoot, sessions, periodCost) {
   const query = state.sessions.query;
   const titleOf = (id) => state.sessions.titles.get(id);
   const matches = filterSessions(sessions, query, titleOf);
 
   if (!matches.length) {
     root.innerHTML = `<p class="compare-empty">No session matches “${esc(query)}”.</p>`;
+    pagerRoot.innerHTML = '';
     return;
   }
 
-  // Sorted before capping, so "show me the longest" reaches past the first 25
-  // rather than reordering them among themselves.
+  // Sorted before paging, so "show me the longest" reaches the whole period
+  // rather than reordering one page of it.
   const sorted = sortSessions(matches, state.sessions.sortKey, state.sessions.sortDir, titleOf);
-  const capped = !state.sessions.showAll && sorted.length > SESSION_LIST_LIMIT;
-  const shown = capped ? sorted.slice(0, SESSION_LIST_LIMIT) : sorted;
-
-  const rows = shown.map((t) => {
-    const m = sessionMetrics(t);
-    const slot = state.sessions.selected.indexOf(t.sessionId);
-    const picked = slot >= 0;
-    const name = sessionLabel(t.sessionId);
-    return `<tr data-session-id="${esc(t.sessionId)}"${picked ? ' class="session-row-picked"' : ''}>
-        <td class="session-pick">
-          <input type="checkbox" data-session-id="${esc(t.sessionId)}"${picked ? ' checked' : ''}
-            aria-label="Compare session ${esc(name.text)}" />
-          ${picked ? `<span class="session-slot">${slot === 0 ? 'A' : 'B'}</span>` : ''}
-        </td>
-        <th scope="row" class="session-name${name.isId ? ' is-id' : ''}" title="${esc(t.sessionId)}">${esc(name.text)}</th>
-        <td>${esc(fmt.date(t.firstMs))}</td>
-        <td>${esc(fmtDuration(m.durationMs))}</td>
-        <td>${fmt.num(t.requests)}${t.erroredRequests
-          ? `<span class="compare-sub">+${fmt.num(t.erroredRequests)} errored</span>` : ''}</td>
-        <td>${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req${
-          periodCost > 0 ? ` · ${fmt.pct((t.costDollars / periodCost) * 100)} of period` : ''}</span></td>
-        <td class="session-models">${t.models.slice(0, 3).map((x) => esc(displayModel(x))).join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
-      </tr>`;
-  }).join('');
+  const pageSize = state.sessions.pageSize;
+  const pages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  // A filter or a sort can leave the current page past the end of the list.
+  const page = Math.min(Math.max(1, state.sessions.page), pages);
+  state.sessions.page = page;
+  const from = (page - 1) * pageSize;
+  const shown = sorted.slice(from, from + pageSize);
 
   // Models is the one column with no sort: a session's models are a set, and
   // ordering rows by "claude before gpt" answers nothing anyone asks.
@@ -1852,6 +1741,28 @@ function renderSessionList(root, sessions, periodCost) {
         <button type="button" class="session-sort-btn">${esc(label)}</button>
       </th>`;
   };
+
+  const rows = shown.map((t) => {
+    const m = sessionMetrics(t);
+    const slot = state.sessions.selected.indexOf(t.sessionId);
+    const picked = slot >= 0;
+    const name = sessionLabel(t.sessionId);
+    return `<tr data-session-id="${esc(t.sessionId)}"${picked ? ' class="session-row-picked"' : ''}>
+        <td class="session-pick">
+          <input type="checkbox" data-session-id="${esc(t.sessionId)}"${picked ? ' checked' : ''}
+            aria-label="Compare session ${esc(name.text)}" />
+          ${picked ? `<span class="session-slot">${SESSION_SLOTS[slot]}</span>` : ''}
+        </td>
+        <th scope="row" class="session-name${name.isId ? ' is-id' : ''}" title="${esc(t.sessionId)}">${esc(name.text)}</th>
+        <td>${esc(fmt.date(t.firstMs))}</td>
+        <td>${esc(fmtDuration(m.durationMs))}</td>
+        <td>${fmt.num(t.requests)}${t.erroredRequests
+          ? `<span class="compare-sub">+${fmt.num(t.erroredRequests)} errored</span>` : ''}</td>
+        <td>${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req${
+          periodCost > 0 ? ` · ${fmt.pct((t.costDollars / periodCost) * 100)} of period` : ''}</span></td>
+        <td class="session-models">${t.models.slice(0, 3).map((x) => esc(displayModel(x))).join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
+      </tr>`;
+  }).join('');
 
   root.innerHTML = `
     <div class="table-scroll">
@@ -1869,20 +1780,325 @@ function renderSessionList(root, sessions, periodCost) {
         </thead>
         <tbody>${rows}</tbody>
       </table>
-    </div>
-    ${capped
-      ? `<button type="button" class="btn-text" id="sessionsShowAll">Show all ${fmt.num(matches.length)} sessions</button>`
-      : ''}`;
+    </div>`;
 
-  $('sessionsShowAll')?.addEventListener('click', () => {
-    state.sessions.showAll = true;
-    renderSessions();
-  });
+  pagerRoot.innerHTML = `
+    <div class="sessions-pager">
+      <span class="pager-range">${fmt.num(from + 1)}–${fmt.num(from + shown.length)} of ${fmt.num(sorted.length)}</span>
+      <label class="pager-size">
+        <span>Per page</span>
+        <select id="sessionPageSize">
+          ${SESSION_PAGE_SIZES.map((n) => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n}</option>`).join('')}
+        </select>
+      </label>
+      <div class="pager-nav">
+        <button type="button" class="btn" data-session-page="prev"${page <= 1 ? ' disabled' : ''}>Previous</button>
+        <span class="pager-count">Page ${fmt.num(page)} of ${fmt.num(pages)}</span>
+        <button type="button" class="btn" data-session-page="next"${page >= pages ? ' disabled' : ''}>Next</button>
+      </div>
+    </div>`;
 
   // Only what's on screen, plus whatever is selected — a selected session can
-  // be scrolled out of the list or filtered away, and it's named in the
-  // comparison above regardless.
+  // be paged past or filtered away, and it's named in the tray regardless.
   void loadSessionTitles([...shown.map((t) => t.sessionId), ...state.sessions.selected]);
+}
+
+/** Column letters, so a picked row and its column carry the same handle. */
+const SESSION_SLOTS = ['A', 'B', 'C', 'D'];
+
+/**
+ * The selection tray: what's picked, and the way into the comparison.
+ *
+ * Pinned to the bottom of the view because it is the feedback for a click that
+ * can happen anywhere in a long list. Its chips are removable, so a session
+ * picked by accident can be dropped without hunting for its row again.
+ */
+function renderSessionTray(sessions) {
+  const tray = $('sessionsTray');
+  if (!tray) return;
+  const selected = state.sessions.selected;
+  tray.classList.toggle('hidden', selected.length === 0);
+  if (!selected.length) return;
+
+  $('trayChips').innerHTML = selected.map((id, i) => {
+    const name = sessionLabel(id);
+    const total = sessions.find((t) => t.sessionId === id);
+    return `<span class="tray-chip">
+        <span class="session-slot">${SESSION_SLOTS[i]}</span>
+        <span class="tray-chip-name${name.isId ? ' is-id' : ''}" title="${esc(id)}">${esc(name.text)}</span>
+        ${total ? `<span class="tray-chip-cost">${fmt.money(total.costDollars)}</span>` : ''}
+        <button type="button" class="tray-chip-drop" data-drop-session="${esc(id)}"
+          aria-label="Remove ${esc(name.text)} from the comparison">×</button>
+      </span>`;
+  }).join('');
+
+  const enough = selected.length >= 2;
+  $('trayCount').textContent = enough
+    ? `${selected.length} selected`
+    : 'Pick one more to compare';
+  $('trayCompare').disabled = !enough;
+}
+
+// ---------------------------------------------------------------------------
+// Session comparison (dialog)
+// ---------------------------------------------------------------------------
+
+/**
+ * One definition of every comparable figure, used for both the two-column and
+ * the many-column layouts.
+ *
+ * `betterWhen` says whether a direction exists at all. Cheaper, better-cached
+ * and fewer cold starts are wins whichever session they belong to; requests,
+ * tokens and pace only say how big a session was, so they are marked
+ * 'neither' and highlighted as extremes rather than judged.
+ */
+function sessionMetricDefs() {
+  const noun = costModeNoun();
+  return [
+    { label: `Total ${noun}`, value: (c) => c.m.costDollars, format: fmt.money, betterWhen: 'down' },
+    { label: 'Requests', value: (c) => c.m.requests, format: fmt.num, betterWhen: 'neither' },
+    {
+      label: 'Errored or aborted',
+      value: (c) => c.t.erroredRequests,
+      format: fmt.num,
+      betterWhen: 'down',
+      // A row of zeroes on every comparison is noise; it earns its place only
+      // when something actually errored.
+      when: (ctxs) => ctxs.some((c) => c.t.erroredRequests > 0),
+    },
+    { label: 'Avg / request', value: (c) => c.m.costPerRequest, format: fmt.money, betterWhen: 'down' },
+    { label: 'Priciest request', value: (c) => c.t.maxCostDollars, format: fmt.money, betterWhen: 'down' },
+    { label: 'Active for', value: (c) => c.m.durationMs, format: fmtDuration, betterWhen: 'neither' },
+    { label: 'Requests / hour', value: (c) => c.m.requestsPerHour, format: fmt.rate, betterWhen: 'neither' },
+    { label: `${noun} / hour`, value: (c) => c.m.costPerHour, format: fmt.money, betterWhen: 'down' },
+    {
+      label: 'Tokens',
+      value: (c) => c.m.totalTokens,
+      format: fmt.num,
+      betterWhen: 'neither',
+      // Cached tokens are named rather than left implicit: on a well-cached
+      // session they are most of the total, and the in/out figures alone read
+      // as an arithmetic error against it.
+      sub: (c) => `${fmt.num(c.t.inputTokens)} in · ${fmt.num(c.t.outputTokens)} out · `
+        + `${fmt.num(c.t.cacheReadTokens + c.t.cacheWriteTokens)} cached`,
+    },
+    { label: 'Cache hit rate', value: (c) => c.m.cacheHitRate, format: fmt.pct, betterWhen: 'up' },
+    { label: 'Cache savings', value: (c) => c.t.savingsDollars, format: fmt.money, betterWhen: 'up' },
+    { label: 'Cold starts', value: (c) => c.coldStarts, format: fmt.num, betterWhen: 'down' },
+  ];
+}
+
+/** Everything one column of the comparison needs, gathered once. */
+function sessionCompareContext(sessionId, sessions) {
+  const t = sessions.find((s) => s.sessionId === sessionId);
+  if (!t) return null;
+  const events = eventsForSession(sessionId);
+  return {
+    id: sessionId,
+    t,
+    m: sessionMetrics(t),
+    events,
+    coldStarts: events.filter(
+      (e) => e.cacheReadTokens === 0 && e.inputTokens > state.analyzeThresholds.coldStartInputTokens,
+    ).length,
+  };
+}
+
+function openSessionCompare() {
+  const dialog = $('sessionsDialog');
+  if (!dialog || state.sessions.selected.length < 2) return;
+  renderSessionCompare();
+  if (!dialog.open) dialog.showModal();
+}
+
+/**
+ * Whether a row's values are all the same once rounded to what's displayed.
+ *
+ * Judged at display precision for the same reason the delta cells are: a row
+ * reading "$0.07, $0.07" is not a difference worth keeping on screen when the
+ * user has asked to see only what differs.
+ */
+function sameAcross(def, ctxs) {
+  const shown = ctxs.map((c) => {
+    const v = def.value(c);
+    return v == null ? '—' : def.format(v);
+  });
+  return shown.every((v) => v === shown[0]);
+}
+
+/**
+ * Marks the best and worst value in a row.
+ *
+ * With three or more columns there is no single "difference" to report, so the
+ * comparison happens down each row instead: the extremes carry the colour and
+ * everything between them stays plain, which is what makes a wide table
+ * scannable. Where a metric has no better direction, most is amber and least
+ * is green purely as a high/low marker.
+ */
+function extremeClasses(def, ctxs) {
+  const values = ctxs.map((c) => def.value(c));
+  const present = values.filter((v) => v != null);
+  if (present.length < 2) return values.map(() => '');
+  const max = Math.max(...present);
+  const min = Math.min(...present);
+  if (def.format(max) === def.format(min)) return values.map(() => '');
+  const highClass = def.betterWhen === 'up' ? 'cell-good' : 'cell-bad';
+  const lowClass = def.betterWhen === 'up' ? 'cell-bad' : 'cell-good';
+  return values.map((v) => {
+    if (v == null) return '';
+    if (v === max) return highClass;
+    if (v === min) return lowClass;
+    return '';
+  });
+}
+
+function renderSessionCompare() {
+  const body = $('sessionsDialogBody');
+  if (!body) return;
+
+  const sessions = sessionTotals(state.filtered).filter((t) => t.sessionId !== UNATTRIBUTED_SESSION);
+  const ctxs = state.sessions.selected
+    .map((id) => sessionCompareContext(id, sessions))
+    .filter(Boolean);
+
+  if (ctxs.length < 2) {
+    body.innerHTML = '<p class="compare-empty">Pick at least two sessions to compare.</p>';
+    return;
+  }
+
+  // Two columns need no base: the left one is the reference, the way the period
+  // comparison reads, and the Difference column names its own direction. A base
+  // only earns its keep once there are too many columns for a single delta.
+  const pair = ctxs.length === 2;
+  const baseIndex = pair ? 0 : Math.max(0, ctxs.findIndex((c) => c.id === state.sessions.baseId));
+  $('sessionsDialogDesc').textContent = pair
+    ? 'Two sessions side by side, with what separates them.'
+    : `${ctxs.length} sessions. The best and worst figure in each row is highlighted, `
+      + 'and every column says how it differs from the base — pick a different base to re-read them all against it.';
+
+  const defs = sessionMetricDefs().filter((d) => !d.when || d.when(ctxs));
+  const visible = state.sessions.diffOnly ? defs.filter((d) => !sameAcross(d, ctxs)) : defs;
+
+  const head = ctxs.map((c, i) => {
+    const name = sessionLabel(c.id);
+    const isBase = !pair && i === baseIndex;
+    const baseBtn = pair ? '' : `<button type="button" class="compare-base-btn${isBase ? ' active' : ''}"
+        data-base-session="${esc(c.id)}" aria-pressed="${isBase ? 'true' : 'false'}"
+        >${isBase ? 'Base' : 'Set as base'}</button>`;
+    return `<th scope="col" class="${isBase ? 'compare-col-base' : ''}">
+        <span class="compare-col-label">${SESSION_SLOTS[i]}${isBase ? ' · base' : ''}</span>
+        <span class="compare-col-range${name.isId ? ' is-id' : ''}" title="${esc(c.id)}">${esc(name.text)}</span>
+        <span class="compare-col-days">${esc(fmt.date(c.t.firstMs))}</span>
+        ${baseBtn}
+      </th>`;
+  }).join('');
+
+  const rows = visible.map((def) => {
+    const marks = pair ? ctxs.map(() => '') : extremeClasses(def, ctxs);
+    const base = def.value(ctxs[baseIndex]);
+    const cells = ctxs.map((c, i) => {
+      const v = def.value(c);
+      const shown = v == null ? '—' : def.format(v);
+      const sub = def.sub ? `<span class="compare-sub">${def.sub(c)}</span>` : '';
+      // Every non-base column says how it stands against the base, which is
+      // what the base is for once the Difference column is gone.
+      const vsBase = !pair && i !== baseIndex && v != null && base != null && def.format(v) !== def.format(base)
+        ? `<span class="compare-sub">${deltaCell(v, base, def.format, 'neither')} vs ${SESSION_SLOTS[baseIndex]}</span>`
+        : '';
+      return `<td class="${marks[i]}">${shown}${sub}${vsBase}</td>`;
+    }).join('');
+
+    // With two columns the difference is the point of the table, so it keeps
+    // its own column and its colour. Always A against B, in that order, so the
+    // sign means the same thing on every row.
+    const diff = pair
+      ? `<td>${(() => {
+        const a = def.value(ctxs[0]);
+        const b = def.value(ctxs[1]);
+        return a == null || b == null ? '—' : deltaCell(a, b, def.format, def.betterWhen);
+      })()}</td>`
+      : '';
+
+    return `<tr><th scope="row">${esc(def.label)}</th>${cells}${diff}</tr>`;
+  }).join('');
+
+  const emptyNote = visible.length
+    ? ''
+    : '<p class="compare-empty">These sessions match on every figure shown.</p>';
+
+  body.innerHTML = `
+    <div class="sessions-dialog-scroll">
+      <table class="compare-table sessions-compare-table">
+        <thead>
+          <tr>
+            <th scope="col"></th>
+            ${head}
+            ${pair ? `<th scope="col">
+              <span class="compare-col-label">Difference</span>
+              <span class="compare-col-days">A against B</span>
+            </th>` : ''}
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${emptyNote}
+      ${renderSessionModelTable(ctxs, baseIndex, pair)}
+    </div>`;
+}
+
+/**
+ * Which models each session used.
+ *
+ * Two sessions get the delta table the period comparison uses; more than two
+ * get a straight matrix, since a column of deltas against a base repeated four
+ * times is a worse read than the costs themselves with the extremes marked.
+ */
+function renderSessionModelTable(ctxs, baseIndex, pair) {
+  if (pair) {
+    // Same column order and the same direction as the table above it.
+    return renderModelDeltaTable(ctxs[0].events, ctxs[1].events, {
+      currentLabel: 'Session A',
+      baselineLabel: 'Session B',
+      heading: 'Which models each session used',
+      tagNew: 'only in A',
+      tagGone: 'only in B',
+    });
+  }
+
+  const costs = ctxs.map((c) => Object.fromEntries(costByModel(c.events)));
+  const models = [...new Set(costs.flatMap((byModel) => Object.keys(byModel)))];
+  if (!models.length) return '';
+  // Biggest spend across all the sessions first — the model that explains the
+  // most of what's on screen leads.
+  models.sort((a, b) => costs.reduce((s, c) => s + (c[b] || 0), 0) - costs.reduce((s, c) => s + (c[a] || 0), 0));
+
+  const rows = models.map((model) => {
+    const values = costs.map((byModel) => byModel[model] || 0);
+    const used = values.filter((v) => v > 0);
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    const cells = values.map((v) => {
+      // A model one session never touched is a blank, not a $0.00 to compare:
+      // "didn't use it" and "used it for nothing" are different statements.
+      if (v === 0) return '<td class="cell-absent">—</td>';
+      const cls = used.length < 2 || fmt.money(max) === fmt.money(min) ? ''
+        : v === max ? 'cell-bad' : v === min ? 'cell-good' : '';
+      return `<td class="${cls}">${fmt.money(v)}</td>`;
+    }).join('');
+    return `<tr><th scope="row">${esc(model)}</th>${cells}</tr>`;
+  }).join('');
+
+  return `
+    <h4 class="compare-subhead">Which models each session used</h4>
+    <table class="compare-table compare-models sessions-compare-table">
+      <thead>
+        <tr>
+          <th scope="col">Model</th>
+          ${ctxs.map((c, i) => `<th scope="col">${SESSION_SLOTS[i]}</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 }
 
 function chartDefaults() {
@@ -4238,8 +4454,46 @@ async function init() {
   // that typing doesn't blur it.
   $('sessionSearch')?.addEventListener('input', (ev) => {
     state.sessions.query = ev.target.value;
-    state.sessions.showAll = false;
+    state.sessions.page = 1;
     renderSessions();
+  });
+
+  $('sessionsPager')?.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-session-page]');
+    if (!btn) return;
+    state.sessions.page += btn.dataset.sessionPage === 'next' ? 1 : -1;
+    renderSessions();
+  });
+  $('sessionsPager')?.addEventListener('change', (ev) => {
+    if (ev.target.id !== 'sessionPageSize') return;
+    state.sessions.pageSize = Number(ev.target.value);
+    state.sessions.page = 1;
+    savePrefs({ sessionPageSize: String(state.sessions.pageSize) });
+    renderSessions();
+  });
+
+  // The tray and the dialog it opens.
+  $('trayCompare')?.addEventListener('click', openSessionCompare);
+  $('trayClear')?.addEventListener('click', clearSessionSelection);
+  $('trayChips')?.addEventListener('click', (ev) => {
+    const drop = ev.target.closest('[data-drop-session]');
+    if (drop) toggleSessionSelected(drop.dataset.dropSession);
+  });
+  $('sessionsDialogClose')?.addEventListener('click', () => $('sessionsDialog')?.close());
+  $('sessionsDiffOnly')?.addEventListener('change', (ev) => {
+    state.sessions.diffOnly = ev.target.checked;
+    renderSessionCompare();
+  });
+  $('sessionsDialogBody')?.addEventListener('click', (ev) => {
+    const base = ev.target.closest('[data-base-session]');
+    if (!base) return;
+    state.sessions.baseId = base.dataset.baseSession;
+    renderSessionCompare();
+    renderSessions();
+  });
+  // Clicking the backdrop closes it, the way a modal is expected to behave.
+  $('sessionsDialog')?.addEventListener('click', (ev) => {
+    if (ev.target === $('sessionsDialog')) $('sessionsDialog').close();
   });
 
   // "Compare →" beside the trend badge: the badge raises the question, this

@@ -240,6 +240,38 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <p class="analytics-intro">Trends for your filtered period. For actionable recommendations and Cursor Chat briefs, open the <button type="button" class="btn-link-inline" id="goAnalyzeTab">Analyze</button> tab.</p>
         <p id="analyticsEmpty" class="panel analytics-empty hidden">No requests in this period, so there is nothing to chart yet. Widen the date range or clear the model filter.</p>
         <div class="analytics-stats" id="analyticsStats"></div>
+
+        <!--
+          The baseline picker lives here rather than in the filter bar above.
+          The filter bar is the one answer to "what period am I looking at" on
+          every tab; a second range next to it reads as a competing filter
+          rather than as this panel's comparison. Both windows are always
+          spelled out in the column headers, so neither can be guessed at.
+        -->
+        <article class="panel compare-panel" id="comparePanel">
+          <div class="compare-head">
+            <div>
+              <h3>Compare periods</h3>
+              <p class="panel-desc">Your selected period against another, and which models moved.</p>
+            </div>
+            <div class="compare-controls">
+              <div class="date-presets" role="group" aria-label="Compare against">
+                <span class="presets-label">Against</span>
+                <button type="button" class="preset-btn compare-mode-btn active" data-compare-mode="previous">Previous period</button>
+                <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="prevMonth">Same dates last month</button>
+                <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="custom">Custom</button>
+              </div>
+              <div class="compare-custom-fields hidden" id="compareCustomFields">
+                <label><span>From</span><input type="date" id="compareStartDate" /></label>
+                <label><span>To</span><input type="date" id="compareEndDate" /></label>
+              </div>
+            </div>
+          </div>
+          <p class="compare-status hidden" id="compareStatus"></p>
+          <div id="compareBody"></div>
+          <p class="compare-note hidden" id="compareNote"></p>
+        </article>
+
         <article class="panel analytics-chart-main" id="analyticsChartMain">
           <h3 id="chartCostTitle">Daily token cost</h3>
           <p class="panel-desc" id="chartCostDesc">How spend changed day to day · excludes flat usage fees</p>

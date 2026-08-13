@@ -66,6 +66,14 @@ Date presets are **Today / 7 days / 30 days / Month to date / Custom**. If your 
 
 ![Analytics charts](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analytics.png)
 
+#### Comparing periods
+
+Analytics also puts your selected period next to another one and shows **which models account for the difference** — sorted by biggest mover, not biggest spender, because a model that went from $2 to $14 is the answer to "why did my bill move".
+
+![Comparing two periods](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-compare.png)
+
+Compare against the **previous period** (the equal-length window immediately before), the **same dates last month**, or any **custom** window — useful for "did switching models actually help?" or "this sprint vs the last one". Both windows are always named in the column headers, and the panel warns you when the two aren't the same length or when your period includes today, which isn't over yet.
+
 ### Analyze
 
 ![Analyze tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analyze.png)

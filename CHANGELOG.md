@@ -3,6 +3,18 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## Unreleased
+
+- **Compare periods** on the Analytics tab. Your selected range next to another
+  one — cost, requests, avg per request, avg per day and cache savings — plus a
+  model-by-model breakdown of what actually moved, sorted by biggest change
+  rather than biggest total.
+- Choose the baseline: the previous equal-length period, the same dates last
+  month, or a custom window. The choice is remembered between sessions.
+- The panel names both windows in its column headers, and says so when the two
+  aren't the same length or when the selected period includes today — the two
+  things that most often make the ▲/▼ badge read wrong.
+
 ## 0.6.1 — 2026-08-12
 
 - The plan card and the budget projection now name the window they cover

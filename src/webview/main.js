@@ -16,8 +16,10 @@ import {
   normModel,
   normalize,
   summarize,
+  comparisonWindow,
   detectBillingMode,
   detectPlanChange,
+  modelCostDeltas,
   percentile,
   projectExhaustionDate,
   groupByDay,
@@ -130,7 +132,21 @@ const state = {
   planChangeDay: null,
   /** The auto-switch to the current-plan range happens once, not on every load. */
   planChangeAnnounced: false,
-  trend: { key: null, previous: null },
+  trend: {
+    key: null,
+    /** summarize() of the baseline period — drives the ▲/▼ badges. */
+    previous: null,
+    /** Baseline events, kept so the comparison can break the change down by model. */
+    previousEvents: null,
+    /** Which window to compare against: 'previous' | 'prevMonth' | 'custom'. */
+    mode: 'previous',
+    customStart: '',
+    customEnd: '',
+    /** The resolved baseline window, for labelling the columns. */
+    range: null,
+    loading: false,
+    error: null,
+  },
   analyzeThresholds: { ...ANALYZE_THRESHOLD_DEFAULTS },
   /** Severity of the banner currently shown, so view switches can keep the ones that still apply. */
   alertType: null,
@@ -581,11 +597,17 @@ function loadPrefs() {
   }
 }
 
+/**
+ * Merges into whatever is already stored, so a caller only has to name the keys
+ * it owns. Callers write disjoint slices — the date range, the comparison
+ * baseline, the Analyze template — and a replacing write would silently drop
+ * every slice but its own.
+ */
 function savePrefs(prefs) {
   try {
-    // planChangeDay is discovered, not chosen — every other caller writes only
-    // the range, so carry it through rather than making each remember it.
-    storage.setItem(STORAGE_KEY, JSON.stringify({ planChangeDay: state.planChangeDay, ...prefs }));
+    // planChangeDay is discovered, not chosen, so state is authoritative for it.
+    const merged = { ...loadPrefs(), planChangeDay: state.planChangeDay, ...prefs };
+    storage.setItem(STORAGE_KEY, JSON.stringify(merged));
   } catch {
     // ignore
   }
@@ -620,6 +642,22 @@ function applyDateRange(start, end, preset) {
   setActivePreset(resolved);
   savePrefs({ preset: resolved, startDate: start, endDate: end });
   updateFilterSummary();
+}
+
+const COMPARE_MODES = ['previous', 'prevMonth', 'custom'];
+
+/** Restores the comparison baseline chosen in a previous session. */
+function initPeriodComparePrefs() {
+  const prefs = loadPrefs();
+  if (COMPARE_MODES.includes(prefs?.compareMode)) state.trend.mode = prefs.compareMode;
+  if (prefs?.compareStart) state.trend.customStart = prefs.compareStart;
+  if (prefs?.compareEnd) state.trend.customEnd = prefs.compareEnd;
+  if ($('compareStartDate')) $('compareStartDate').value = state.trend.customStart;
+  if ($('compareEndDate')) $('compareEndDate').value = state.trend.customEnd;
+  // A stored "custom" with no dates would leave the panel prompting forever.
+  if (state.trend.mode === 'custom' && !(state.trend.customStart && state.trend.customEnd)) {
+    state.trend.mode = 'previous';
+  }
 }
 
 function initDateRange() {
@@ -863,6 +901,216 @@ function renderAnalyticsStats(events, summary, previousSummary) {
     <div class="analytics-stat"><span>Cache read share</span><strong>${fmt.pct(cachePct)}</strong><small>${fmt.money(summary.totalSavings)} saved</small></div>`;
 }
 
+// ---------------------------------------------------------------------------
+// Period comparison
+// ---------------------------------------------------------------------------
+
+/** "Jul 15 – Aug 13" for a window in epoch ms. */
+function windowLabel(window) {
+  if (!window) return '—';
+  const d = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const start = d(window.startMs);
+  const end = d(window.endMs);
+  return start === end ? start : `${start} – ${end}`;
+}
+
+/** Whole days a window spans, counting both ends. */
+function windowDays(window) {
+  if (!window) return 0;
+  return Math.max(1, Math.round((window.endMs - window.startMs) / (24 * 60 * 60 * 1000)));
+}
+
+/**
+ * A signed delta, coloured by what the movement means rather than by its sign:
+ * spending more is amber and spending less is green, but for cache savings
+ * that flips — `betterWhen: 'up'` says which direction is the good one.
+ *
+ * "No change" is judged at the precision actually on screen. Comparing the raw
+ * floats instead would print "$0.07 vs $0.06 · no change" (a real difference
+ * rounded away) or "+$0.07 (+0%)" (a real difference the percentage rounds
+ * away) — both read as the panel contradicting itself.
+ */
+function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
+  if (format(current) === format(baseline)) return '<span class="delta delta-flat">no change</span>';
+  const delta = current - baseline;
+  const up = delta > 0;
+  const sign = up ? '+' : '−';
+  // The values differ on screen but the gap is under one displayed unit — say
+  // "<$0.01" rather than "$0.00", which reads as no difference at all.
+  const smallestUnit = format === fmt.num ? 1 : 0.01;
+  const exactMagnitude = format(Math.abs(delta));
+  const belowUnit = exactMagnitude === format(0);
+  // "<$0.01" carries its own qualifier; "+<$0.01" reads as two operators in a
+  // row. Direction still comes through in the colour and the percentage.
+  const magnitude = belowUnit ? `<${format(smallestUnit)}` : `${sign}${exactMagnitude}`;
+
+  let pct = ' (new)';
+  if (baseline > 0) {
+    const exact = Math.abs((delta / baseline) * 100);
+    // A visible dollar move whose percentage rounds to zero is "<1%", never "0%".
+    pct = exact < 0.5 ? ' (<1%)' : ` (${sign}${exact.toFixed(0)}%)`;
+  } else if (baseline === 0 && current === 0) {
+    pct = '';
+  }
+
+  const good = betterWhen === 'up' ? up : !up;
+  return `<span class="delta ${good ? 'delta-down' : 'delta-up'}">${magnitude}${esc(pct)}</span>`;
+}
+
+function compareMetricRow(label, current, baseline, format = fmt.money, betterWhen = 'down') {
+  return `<tr>
+      <th scope="row">${esc(label)}</th>
+      <td>${format(current)}</td>
+      <td>${format(baseline)}</td>
+      <td>${deltaCell(current, baseline, format, betterWhen)}</td>
+    </tr>`;
+}
+
+/**
+ * Side-by-side view of the selected period and its baseline, plus which models
+ * account for the difference.
+ *
+ * Both windows are always named in the column headers. The whole point of the
+ * panel is that two periods are on screen at once, so a figure that doesn't say
+ * which period it belongs to is worse than no figure at all.
+ */
+function renderComparison() {
+  const panel = $('comparePanel');
+  if (!panel) return;
+
+  const modeButtons = document.querySelectorAll('.compare-mode-btn');
+  modeButtons.forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.compareMode === state.trend.mode);
+  });
+  $('compareCustomFields')?.classList.toggle('hidden', state.trend.mode !== 'custom');
+
+  const statusEl = $('compareStatus');
+  const bodyEl = $('compareBody');
+  const noteEl = $('compareNote');
+  const setStatus = (text) => {
+    statusEl.textContent = text || '';
+    statusEl.classList.toggle('hidden', !text);
+  };
+
+  // Nothing loaded at all: the panel would be a grid of em-dashes.
+  if (!state.loaded) {
+    setStatus('Load a date range to compare periods.');
+    bodyEl.innerHTML = '';
+    noteEl.classList.add('hidden');
+    return;
+  }
+
+  if (state.trend.mode === 'custom' && !state.trend.range) {
+    setStatus('Pick both ends of the period you want to compare against.');
+    bodyEl.innerHTML = '';
+    noteEl.classList.add('hidden');
+    return;
+  }
+
+  if (state.trend.loading) {
+    setStatus(`Loading ${windowLabel(state.trend.range)}…`);
+    noteEl.classList.add('hidden');
+    return;
+  }
+
+  if (state.trend.error) {
+    setStatus(state.trend.error);
+    bodyEl.innerHTML = '';
+    noteEl.classList.add('hidden');
+    return;
+  }
+
+  const baseline = state.trend.previous;
+  const baselineEvents = state.trend.previousEvents;
+  if (!baseline || !baselineEvents) {
+    setStatus('No comparison loaded yet.');
+    bodyEl.innerHTML = '';
+    noteEl.classList.add('hidden');
+    return;
+  }
+
+  setStatus('');
+  const current = summarize(state.filtered);
+  const currentWindow = { startMs: toMs($('startDate').value), endMs: toMs($('endDate').value, true) };
+  const baseWindow = state.trend.range;
+
+  // An empty baseline makes every delta "+100% (new)", which is noise dressed
+  // as insight — say plainly that there's nothing on the other side.
+  if (!baselineEvents.length) {
+    bodyEl.innerHTML = `<p class="compare-empty">No requests in ${esc(windowLabel(baseWindow))}, so there's nothing to compare against.
+      ${state.trend.mode === 'previous' ? 'Try a longer period, or pick a custom baseline.' : 'Pick a different baseline.'}</p>`;
+    noteEl.classList.add('hidden');
+    return;
+  }
+
+  const curDays = windowDays(currentWindow);
+  const baseDays = windowDays(baseWindow);
+  const curByModel = Object.fromEntries(costByModel(state.filtered));
+  const baseByModel = Object.fromEntries(costByModel(baselineEvents));
+  const deltas = modelCostDeltas(curByModel, baseByModel);
+
+  const costNoun = costModeNoun();
+  bodyEl.innerHTML = `
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th scope="col"></th>
+          <th scope="col">
+            <span class="compare-col-label">This period</span>
+            <span class="compare-col-range">${esc(windowLabel(currentWindow))}</span>
+            <span class="compare-col-days">${fmt.num(curDays)} day${curDays === 1 ? '' : 's'}</span>
+          </th>
+          <th scope="col">
+            <span class="compare-col-label">Compared with</span>
+            <span class="compare-col-range">${esc(windowLabel(baseWindow))}</span>
+            <span class="compare-col-days">${fmt.num(baseDays)} day${baseDays === 1 ? '' : 's'}</span>
+          </th>
+          <th scope="col">Change</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${compareMetricRow(`Total ${costNoun}`, current.totalCost, baseline.totalCost)}
+        ${compareMetricRow('Requests', current.count, baseline.count, fmt.num)}
+        ${compareMetricRow('Avg / request', current.avg ?? 0, baseline.avg ?? 0)}
+        ${compareMetricRow('Avg / day', current.totalCost / curDays, baseline.totalCost / baseDays)}
+        ${compareMetricRow('Cache savings', current.totalSavings, baseline.totalSavings, fmt.money, 'up')}
+      </tbody>
+    </table>
+
+    <h4 class="compare-subhead">What moved, by model</h4>
+    <table class="compare-table compare-models">
+      <thead>
+        <tr>
+          <th scope="col">Model</th>
+          <th scope="col">${esc(windowLabel(currentWindow))}</th>
+          <th scope="col">${esc(windowLabel(baseWindow))}</th>
+          <th scope="col">Change</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${deltas.map((d) => `<tr>
+            <th scope="row">${esc(d.model)}${d.baseline === 0 ? ' <span class="compare-tag">new</span>' : ''}${d.current === 0 ? ' <span class="compare-tag compare-tag-gone">stopped</span>' : ''}</th>
+            <td>${fmt.money(d.current)}</td>
+            <td>${fmt.money(d.baseline)}</td>
+            <td>${deltaCell(d.current, d.baseline)}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+
+  // Two caveats that make an honest reading of the numbers possible. Both are
+  // artefacts of the windows, not of the usage, and both have burned readers of
+  // the ▲/▼ badge that this panel exists to explain.
+  const notes = [];
+  if (currentWindow.endMs > Date.now()) {
+    notes.push('This period includes today, which isn\'t over yet — expect it to look lower than a comparison period of whole days.');
+  }
+  if (curDays !== baseDays) {
+    notes.push(`The two periods aren't the same length (${fmt.num(curDays)} vs ${fmt.num(baseDays)} days) — compare "Avg / day" rather than the totals.`);
+  }
+  noteEl.textContent = notes.join(' ');
+  noteEl.classList.toggle('hidden', !notes.length);
+}
+
 function chartDefaults() {
   return {
     responsive: true,
@@ -889,7 +1137,9 @@ function destroyCharts() {
 }
 
 function currentTrendKey() {
-  return `${$('startDate').value}|${$('endDate').value}|${$('modelFilter').value}|${state.costMode}`;
+  const { mode, customStart, customEnd } = state.trend;
+  return `${$('startDate').value}|${$('endDate').value}|${$('modelFilter').value}|${state.costMode}`
+    + `|${mode}|${mode === 'custom' ? `${customStart}..${customEnd}` : ''}`;
 }
 
 function renderCharts(events) {
@@ -903,6 +1153,9 @@ function renderCharts(events) {
   ['analyticsStats', 'analyticsChartMain', 'analyticsChartRow'].forEach((id) => {
     $(id)?.classList.toggle('hidden', !hasData);
   });
+  // The comparison stays up even with nothing in this period: "0 requests here
+  // against 120 last week" is a finding, not an empty state.
+  renderComparison();
   if (!hasData) return;
 
   const summary = summarize(events);
@@ -1266,11 +1519,26 @@ function setPanel(panel) {
   }
 }
 
+/** The baseline window for the current selection, or null if it can't be resolved. */
+function currentBaselineWindow() {
+  const startStr = $('startDate').value;
+  const endStr = $('endDate').value;
+  if (!startStr || !endStr) return null;
+  return comparisonWindow({
+    startMs: toMs(startStr),
+    endMs: toMs(endStr, true),
+    mode: state.trend.mode,
+    customStartMs: state.trend.customStart ? toMs(state.trend.customStart) : null,
+    customEndMs: state.trend.customEnd ? toMs(state.trend.customEnd, true) : null,
+  });
+}
+
 /**
- * Fetches the previous equal-length period (same model filter + cost mode)
- * so Analytics can show "▲12% vs prior period" badges. Cached per date
- * range/filter/cost-mode combo; re-renders just the stats row when it lands
- * (charts aren't touched, so this never causes a flicker/reflow of them).
+ * Fetches the baseline period (same model filter + cost mode) so Analytics can
+ * show "▲12% vs prior period" badges and the model-by-model breakdown of what
+ * changed. Cached per range/baseline/filter/cost-mode combo; re-renders only
+ * the stats row and the comparison panel when it lands, so the charts above
+ * never flicker or reflow.
  */
 async function loadTrendComparison() {
   const startStr = $('startDate').value;
@@ -1285,28 +1553,44 @@ async function loadTrendComparison() {
   // it while the new one is in flight would compare this period against a
   // different period's total and label it "vs prior period".
   state.trend.previous = null;
+  state.trend.previousEvents = null;
+  state.trend.error = null;
 
-  const startMs = toMs(startStr);
-  const endMs = toMs(endStr, true);
-  const prevEndMs = startMs - 1;
-  const prevStartMs = prevEndMs - (endMs - startMs);
+  const window = currentBaselineWindow();
+  state.trend.range = window;
+  if (!window) {
+    // Custom baseline with a half-filled picker: prompt for the missing end
+    // rather than silently comparing against something the user didn't choose.
+    state.trend.loading = false;
+    renderComparison();
+    return;
+  }
+
+  state.trend.loading = true;
+  renderComparison();
 
   try {
-    const usage = await rpc('usage', { startDate: prevStartMs, endDate: prevEndMs });
+    const usage = await rpc('usage', { startDate: window.startMs, endDate: window.endMs });
     if (state.trend.key !== key) return; // superseded by a newer request
     const normOpts = { freePlan: isFreePlan() };
     let events = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
     if (modelVal) events = events.filter((e) => e.modelRaw === modelVal);
     events = applyCostMode(events);
+    state.trend.previousEvents = events;
     state.trend.previous = summarize(events);
-  } catch {
+  } catch (e) {
+    if (state.trend.key !== key) return;
     state.trend.previous = null;
+    state.trend.previousEvents = null;
+    state.trend.error = e?.message || 'Could not load the comparison period.';
   }
 
   if (state.trend.key !== key) return;
+  state.trend.loading = false;
   if (state.panel === 'analytics' && state.appView === 'usage') {
     renderAnalyticsStats(state.filtered, summarize(state.filtered), state.trend.previous);
   }
+  renderComparison();
   if (state.appView === 'overview') {
     // Rebuilt through the same helper renderOverview() uses: writing the badge
     // on its own here dropped the plan-change reconciliation note that shares
@@ -2653,6 +2937,7 @@ function setAppView(view) {
 
 async function init() {
   initDateRange();
+  initPeriodComparePrefs();
   initCompareModelPrefs();
 
   const storedMode = storage.getItem(COST_MODE_KEY);
@@ -2686,6 +2971,41 @@ async function init() {
 
   document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
     btn.addEventListener('click', () => onPresetClick(btn.dataset.preset));
+  });
+
+  document.querySelectorAll('.compare-mode-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (state.trend.mode === btn.dataset.compareMode) return;
+      state.trend.mode = btn.dataset.compareMode;
+      // Seed the custom pickers with the window they'd otherwise replace, so
+      // switching to Custom starts from what was already on screen instead of
+      // two empty inputs.
+      if (state.trend.mode === 'custom' && !state.trend.customStart && state.trend.range) {
+        state.trend.customStart = toDateInputValue(new Date(state.trend.range.startMs));
+        state.trend.customEnd = toDateInputValue(new Date(state.trend.range.endMs));
+        $('compareStartDate').value = state.trend.customStart;
+        $('compareEndDate').value = state.trend.customEnd;
+      }
+      savePrefs({ compareMode: state.trend.mode });
+      renderComparison();
+      void loadTrendComparison();
+    });
+  });
+
+  // Committed on change, not on every keystroke: each baseline is a fresh
+  // paginated fetch of cursor.com, and a half-typed year is a range nobody
+  // asked for.
+  ['compareStartDate', 'compareEndDate'].forEach((id) => {
+    $(id)?.addEventListener('change', () => {
+      state.trend.customStart = $('compareStartDate').value;
+      state.trend.customEnd = $('compareEndDate').value;
+      savePrefs({
+        compareMode: state.trend.mode,
+        compareStart: state.trend.customStart,
+        compareEnd: state.trend.customEnd,
+      });
+      void loadTrendComparison();
+    });
   });
 
   $('modelFilter').addEventListener('change', () => { state.page = 1; destroyCharts(); refresh(); });

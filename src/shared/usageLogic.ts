@@ -530,6 +530,97 @@ export function projectBudgetRunway(opts: {
   };
 }
 
+/** Which period the selected range is measured against on the Analytics tab. */
+export type ComparisonMode = 'previous' | 'prevMonth' | 'custom';
+
+export interface DateWindow {
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * Shift a timestamp by whole calendar months, keeping the time of day.
+ *
+ * The day is clamped to the target month's length before the month moves:
+ * `setMonth` on the 31st lands in the month *after* the one asked for
+ * (Mar 31 − 1 month = Mar 3), which would silently compare against the wrong
+ * month for anyone whose range ends on the 29th–31st.
+ */
+export function shiftMonths(ms: number, delta: number): number {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return NaN;
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + delta);
+  const daysInTargetMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(day, daysInTargetMonth));
+  return d.getTime();
+}
+
+/**
+ * The window the selected range is compared against.
+ *
+ * - `previous`  — the equal-length window ending the instant before the range
+ *   starts. Slides with the range; never calendar-aligned.
+ * - `prevMonth` — the same calendar dates one month earlier. Lengths can
+ *   differ (Mar 1–31 vs Feb 1–28), which is the point: it answers "same dates
+ *   last month", not "same number of days".
+ * - `custom`    — whatever the user picked; null until both ends are valid, so
+ *   a half-filled picker shows a prompt instead of a wrong baseline.
+ */
+export function comparisonWindow(opts: {
+  startMs: number;
+  endMs: number;
+  mode: ComparisonMode;
+  customStartMs?: number | null;
+  customEndMs?: number | null;
+}): DateWindow | null {
+  const { startMs, endMs, mode, customStartMs, customEndMs } = opts;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return null;
+
+  if (mode === 'custom') {
+    if (!customStartMs || !customEndMs) return null;
+    if (!Number.isFinite(customStartMs) || !Number.isFinite(customEndMs)) return null;
+    if (customEndMs < customStartMs) return null;
+    return { startMs: customStartMs, endMs: customEndMs };
+  }
+
+  if (mode === 'prevMonth') {
+    const shiftedStart = shiftMonths(startMs, -1);
+    const shiftedEnd = shiftMonths(endMs, -1);
+    if (Number.isNaN(shiftedStart) || Number.isNaN(shiftedEnd)) return null;
+    return { startMs: shiftedStart, endMs: shiftedEnd };
+  }
+
+  const prevEndMs = startMs - 1;
+  return { startMs: prevEndMs - (endMs - startMs), endMs: prevEndMs };
+}
+
+/**
+ * Per-model cost across two periods, biggest mover first.
+ *
+ * Sorted by the absolute size of the change rather than by spend: a model that
+ * went from $2 to $14 is the answer to "why did my bill move", and sorting by
+ * total would bury it under a model that cost more but didn't budge. Models
+ * present in only one period are kept, with 0 on the side they're missing —
+ * dropping them would hide exactly the "I switched models" case.
+ */
+export function modelCostDeltas(
+  current: Map<string, number> | Record<string, number>,
+  baseline: Map<string, number> | Record<string, number>,
+): { model: string; current: number; baseline: number; delta: number }[] {
+  const cur = current instanceof Map ? current : new Map(Object.entries(current));
+  const base = baseline instanceof Map ? baseline : new Map(Object.entries(baseline));
+  const models = new Set([...cur.keys(), ...base.keys()]);
+  return [...models]
+    .map((model) => {
+      const c = cur.get(model) ?? 0;
+      const b = base.get(model) ?? 0;
+      return { model, current: c, baseline: b, delta: c - b };
+    })
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.current - a.current);
+}
+
 /**
  * Straight-line projection of when `used` will hit `limit`, from the average
  * daily pace since `sinceMs`.

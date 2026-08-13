@@ -41,6 +41,9 @@ const {
   groupByDay,
   filterByRange,
   detectPlanChange,
+  comparisonWindow,
+  modelCostDeltas,
+  shiftMonths,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
 let passed = 0;
@@ -1155,6 +1158,85 @@ test('normal limit computes a percentage', () => {
 test('usage over the limit is not clamped to 100 — callers need the true % to show "limit reached"', () => {
   assert.equal(service.quotaPercentUsed({ used: 512, limit: 500 }), 102.4);
 });
+
+console.log('comparisonWindow / shiftMonths / modelCostDeltas');
+{
+  const at = (y, m, d, hh = 0, mm = 0, ss = 0, ms = 0) => new Date(y, m - 1, d, hh, mm, ss, ms).getTime();
+  const iso = (ms) => new Date(ms).toLocaleDateString('en-CA'); // YYYY-MM-DD, local
+
+  test('"previous" is the equal-length window ending the instant before the range', () => {
+    const startMs = at(2026, 8, 13);
+    const endMs = at(2026, 8, 13, 23, 59, 59, 999);
+    const w = comparisonWindow({ startMs, endMs, mode: 'previous' });
+    assert.equal(iso(w.startMs), '2026-08-12');
+    assert.equal(iso(w.endMs), '2026-08-12');
+    assert.equal(w.endMs, startMs - 1);
+  });
+
+  test('"previous" over a week lands on the seven days before it', () => {
+    const w = comparisonWindow({
+      startMs: at(2026, 8, 7),
+      endMs: at(2026, 8, 13, 23, 59, 59, 999),
+      mode: 'previous',
+    });
+    assert.equal(iso(w.startMs), '2026-07-31');
+    assert.equal(iso(w.endMs), '2026-08-06');
+  });
+
+  test('"prevMonth" keeps the calendar dates, not the length', () => {
+    const w = comparisonWindow({
+      startMs: at(2026, 3, 1),
+      endMs: at(2026, 3, 31, 23, 59, 59, 999),
+      mode: 'prevMonth',
+    });
+    assert.equal(iso(w.startMs), '2026-02-01');
+    // Clamped to the last day of February rather than rolling into March.
+    assert.equal(iso(w.endMs), '2026-02-28');
+  });
+
+  test('shiftMonths clamps the day instead of overflowing into the next month', () => {
+    assert.equal(iso(shiftMonths(at(2026, 3, 31), -1)), '2026-02-28');
+    assert.equal(iso(shiftMonths(at(2026, 5, 31), -1)), '2026-04-30');
+    assert.equal(iso(shiftMonths(at(2026, 8, 15), -1)), '2026-07-15');
+  });
+
+  test('"custom" needs both ends, and rejects a backwards range', () => {
+    const base = { startMs: at(2026, 8, 1), endMs: at(2026, 8, 13), mode: 'custom' };
+    assert.equal(comparisonWindow(base), null);
+    assert.equal(comparisonWindow({ ...base, customStartMs: at(2026, 7, 1) }), null);
+    assert.equal(
+      comparisonWindow({ ...base, customStartMs: at(2026, 7, 10), customEndMs: at(2026, 7, 1) }),
+      null,
+    );
+    const w = comparisonWindow({ ...base, customStartMs: at(2026, 7, 1), customEndMs: at(2026, 7, 10) });
+    assert.equal(iso(w.startMs), '2026-07-01');
+    assert.equal(iso(w.endMs), '2026-07-10');
+  });
+
+  test('an invalid or backwards selected range yields no baseline', () => {
+    assert.equal(comparisonWindow({ startMs: NaN, endMs: at(2026, 8, 1), mode: 'previous' }), null);
+    assert.equal(comparisonWindow({ startMs: at(2026, 8, 5), endMs: at(2026, 8, 1), mode: 'previous' }), null);
+  });
+
+  test('modelCostDeltas sorts by biggest mover, not by biggest spender', () => {
+    const rows = modelCostDeltas(
+      { sonnet: 14, haiku: 20, gpt: 3 },
+      { sonnet: 2, haiku: 19, gpt: 3 },
+    );
+    assert.equal(rows[0].model, 'sonnet'); // +12 beats haiku's larger total
+    assert.equal(rows[0].delta, 12);
+    assert.equal(rows[1].model, 'haiku');
+    assert.equal(rows[2].delta, 0);
+  });
+
+  test('modelCostDeltas keeps models that appear in only one period', () => {
+    const rows = modelCostDeltas({ opus: 5 }, { sonnet: 4 });
+    const opus = rows.find((r) => r.model === 'opus');
+    const sonnet = rows.find((r) => r.model === 'sonnet');
+    assert.deepEqual(opus, { model: 'opus', current: 5, baseline: 0, delta: 5 });
+    assert.deepEqual(sonnet, { model: 'sonnet', current: 0, baseline: 4, delta: -4 });
+  });
+}
 
 console.log('projectExhaustionDate (shared usageLogic via logic.js)');
 const DAY = 24 * 60 * 60 * 1000;

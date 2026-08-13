@@ -3,7 +3,30 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
-## Unreleased
+## 0.6.3 — 2026-08-13
+
+- **The Simulator now offers models cursor.com's pricing page doesn't name.**
+  Cursor bills some requests under variant strings that encode a reasoning
+  level — `cursor-grok-4.6-high`, for instance — which the published pricing
+  table never lists under that name, so those models were unselectable in
+  either Simulator picker even with requests using them sitting right there in
+  your log. The model list is now the union of the pricing table and the
+  models in your own usage data. A model with no published rate stays listed
+  rather than disappearing, flagged "no published rate" instead of priced.
+- The Simulator's default comparison models are no longer a fixed list of
+  names that went stale every time Cursor shipped a new model — they're now
+  whichever models you actually run, most-used first.
+- **Your Simulator comparison selection survives closing the dashboard.** It
+  was kept only in the webview's own state, which is discarded when the panel
+  closes; reopening reset it to the defaults every time. Preferences (compare
+  selection, date range, cost mode, Analyze prefs) now live in the extension's
+  persistent storage instead.
+- Fixed the comparison selection changing on its own: unchecking a model while
+  comparing a request that used a different model no longer silently dropped
+  that request's model from your saved selection, an emptied selection is no
+  longer mistaken for "never chosen" and reset to the defaults, and a saved
+  selection with nothing in common with the current request is honored rather
+  than replaced.
 
 - **Far fewer calls to cursor.com.** The quota, plan and spend-cap lookups now
   sit behind a short cache with in-flight de-duplication. Opening the dashboard

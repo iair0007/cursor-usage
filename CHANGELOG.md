@@ -5,6 +5,23 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## Unreleased
 
+- **Far fewer calls to cursor.com.** The quota, plan and spend-cap lookups now
+  sit behind a short cache with in-flight de-duplication. Opening the dashboard
+  used to fire dozens of identical requests: the panel asks for usage and for
+  the budget, the budget asks for cycle usage, that asks for the quota, and the
+  status bar refreshes after each one. Usage responses were already cached;
+  these three were not.
+- **Both comparison columns are editable**, from their own headers. The custom
+  option previously only moved the baseline, which made "this sprint vs last
+  sprint" impossible to express. Pinning the left column detaches the
+  comparison from the filter bar and says so.
+- The comparison gained requests-per-day and cache hit rate, and its model
+  table now carries request counts and per-request averages — cost alone can't
+  separate "used it more" from "each call got dearer". Rows that didn't move
+  are dimmed.
+- A **Compare periods →** link sits beside the ▲/▼ trend badge on Overview,
+  since the badge raises a question the comparison is what answers.
+
 - **Fixed a plan change being reported on accounts that never had one.** A
   request that simply wasn't token-metered — an included request charged $0 —
   was read as "priced per request under your previous plan". On an account

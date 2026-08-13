@@ -80,7 +80,9 @@ Puts your selected period next to another one and shows **which models account f
 
 ![Comparing two periods](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-compare.png)
 
-Compare against the **previous period** (the equal-length window immediately before), the **same dates last month**, or any **custom** window — useful for "did switching models actually help?" or "this sprint vs the last one". Both windows are always named in the column headers, and the panel warns you when the two aren't the same length or when your period includes today, which isn't over yet.
+Compare against the **previous period** (the equal-length window immediately before), the **same dates last month**, or any **custom** window. **Either column's dates can be edited from its own header** — click the range under "This period" or "Compared with" — so "this sprint vs the last one" is two clicks rather than a filter change. Pinning the left column detaches the comparison from the filter bar, and the panel says so.
+
+Alongside cost it shows requests, avg per request, per-day rates and cache hit rate, and the model table carries request counts and per-request averages — enough to tell "I used it more" apart from "each call got dearer". The panel also warns when the two windows aren't the same length, or when your period includes today, which isn't over yet.
 
 ### Simulator
 

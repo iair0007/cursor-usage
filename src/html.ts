@@ -299,12 +299,26 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
                 <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="prevMonth">Same dates last month</button>
                 <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="custom">Custom</button>
               </div>
-              <div class="compare-custom-fields hidden" id="compareCustomFields">
-                <label><span>From</span><input type="date" id="compareStartDate" /></label>
-                <label><span>To</span><input type="date" id="compareEndDate" /></label>
-              </div>
             </div>
           </div>
+
+          <!--
+            Either column's dates can be edited, from its own header. A
+            comparison where only one side moves is half a control: picking
+            "this sprint vs last sprint" needs both. Editing the left column
+            detaches the comparison from the filter bar, which the panel then
+            says outright rather than leaving two periods on screen with no
+            clue which one the toolbar above is driving.
+          -->
+          <div class="compare-editor hidden" id="compareEditor">
+            <span class="compare-editor-label" id="compareEditorLabel"></span>
+            <label><span>From</span><input type="date" id="compareEditStart" /></label>
+            <label><span>To</span><input type="date" id="compareEditEnd" /></label>
+            <button type="button" class="btn primary" id="compareEditApply">Apply</button>
+            <button type="button" class="btn" id="compareEditReset">Reset</button>
+            <button type="button" class="btn" id="compareEditCancel">Cancel</button>
+          </div>
+
           <p class="compare-status hidden" id="compareStatus"></p>
           <div id="compareBody"></div>
           <p class="compare-note hidden" id="compareNote"></p>

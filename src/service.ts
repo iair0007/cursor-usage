@@ -82,6 +82,10 @@ export interface UsageResult {
 
 const SESSION_CACHE_TTL_MS = 5 * 60 * 1000;
 const USAGE_CACHE_TTL_MS = 2 * 60 * 1000;
+/** Quota moves with usage, so it tracks the usage cache. */
+const QUOTA_CACHE_TTL_MS = 2 * 60 * 1000;
+/** Plan and spend cap change on billing events, not on requests. */
+const PROFILE_CACHE_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Shared data layer for the dashboard panel and the status bar. Mirrors the
@@ -93,6 +97,8 @@ export class UsageService {
   private sessionCache: { session: CursorSession | null; fetchedAt: number } | null = null;
   private usageCache = new Map<string, { result: UsageResult; fetchedAt: number }>();
   private usageInflight = new Map<string, Promise<UsageResult>>();
+  private lookupCache = new Map<string, { value: unknown; fetchedAt: number }>();
+  private lookupInflight = new Map<string, Promise<unknown>>();
   /** undefined = not looked up yet; null = looked up and nothing found. */
   private budgetLookup: BudgetLookup | null | undefined = undefined;
 
@@ -106,7 +112,68 @@ export class UsageService {
     this.sessionCache = null;
     this.usageCache.clear();
     this.usageInflight.clear();
+    this.lookupCache.clear();
+    this.lookupInflight.clear();
     this.budgetLookup = undefined;
+  }
+
+  /**
+   * Memoizes the small per-account lookups (quota, plan, spend cap) that hang
+   * off almost every operation.
+   *
+   * Without this, one dashboard open produced dozens of identical calls: the
+   * panel asks for usage and for the budget, the budget asks for cycle usage,
+   * the cycle lookup asks for the quota, the status bar refreshes after every
+   * one of those, and each comparison period adds another round. The usage
+   * responses were already cached; these three were not, so they were the ones
+   * left hammering cursor.com.
+   *
+   * Concurrent callers join the in-flight promise rather than starting their
+   * own, which is what collapses the burst that happens on open.
+   */
+  private async cachedLookup<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
+    const hit = this.lookupCache.get(key);
+    if (hit && Date.now() - hit.fetchedAt < ttlMs) return hit.value as T;
+
+    const inflight = this.lookupInflight.get(key);
+    if (inflight) return inflight as Promise<T>;
+
+    const promise = fn()
+      .then((value) => {
+        this.lookupCache.set(key, { value, fetchedAt: Date.now() });
+        this.lookupInflight.delete(key);
+        return value;
+      })
+      .catch((e) => {
+        this.lookupInflight.delete(key);
+        throw e;
+      });
+    this.lookupInflight.set(key, promise as Promise<unknown>);
+    return promise;
+  }
+
+  private quota(session: CursorSession): Promise<PlanQuota | null | undefined> {
+    return this.cachedLookup(`quota:${session.userId}`, QUOTA_CACHE_TTL_MS, () =>
+      fetchPlanQuota(session).catch((e) => {
+        this.log(`Quota lookup failed (non-fatal): ${e?.message || e}`);
+        return undefined;
+      }));
+  }
+
+  private plan(session: CursorSession): Promise<PlanInfo | undefined> {
+    return this.cachedLookup(`plan:${session.userId}`, PROFILE_CACHE_TTL_MS, () =>
+      fetchStripeProfile(session).catch((e) => {
+        this.log(`Plan lookup failed (non-fatal): ${e?.message || e}`);
+        return undefined;
+      }));
+  }
+
+  private hardLimit(session: CursorSession): Promise<number | null | undefined> {
+    return this.cachedLookup(`hardLimit:${session.userId}`, PROFILE_CACHE_TTL_MS, () =>
+      fetchHardLimit(session).catch((e) => {
+        this.log(`Hard-limit lookup failed (non-fatal): ${e?.message || e}`);
+        return undefined;
+      }));
   }
 
   async getSession(): Promise<CursorSession | null> {
@@ -153,10 +220,7 @@ export class UsageService {
     const session = await this.getSession();
     if (!session) return { events: [], authMode: 'none' };
 
-    const quota = await fetchPlanQuota(session).catch((e) => {
-      this.log(`Quota prefetch failed (non-fatal): ${e?.message || e}`);
-      return undefined;
-    });
+    const quota = await this.quota(session);
     const { start, end } = billingCycleWindow(quota ?? undefined);
     return this.getUsage(start, end);
   }
@@ -267,18 +331,9 @@ export class UsageService {
     if (session) {
       const [rawEvents, plan, quota, hardLimit] = await Promise.all([
         fetchDashboardUsage(session, startMs, endMs),
-        fetchStripeProfile(session).catch((e) => {
-          this.log(`Plan lookup failed (non-fatal): ${e?.message || e}`);
-          return undefined;
-        }),
-        fetchPlanQuota(session).catch((e) => {
-          this.log(`Quota lookup failed (non-fatal): ${e?.message || e}`);
-          return undefined;
-        }),
-        fetchHardLimit(session).catch((e) => {
-          this.log(`Hard-limit lookup failed (non-fatal): ${e?.message || e}`);
-          return undefined;
-        }),
+        this.plan(session),
+        this.quota(session),
+        this.hardLimit(session),
       ]);
       const events = this.scopeToWindow(rawEvents, startMs, endMs);
       if (plan) this.log(`Plan: ${plan.membershipType}`);

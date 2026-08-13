@@ -181,6 +181,73 @@ export function matchPricing(model, pricing) {
   return null;
 }
 
+/**
+ * Every model the simulator can offer, in picker order.
+ *
+ * Two sources, because neither is complete on its own. cursor.com's pricing
+ * table carries the rates, but it lists canonical names ("Grok 4.6") while
+ * requests are billed under variant strings that encode the reasoning level
+ * ("cursor-grok-4.6-high"), and Cursor-hosted variants sometimes never reach
+ * the published table at all. A picker built from the table alone therefore
+ * hides the models the user demonstrably ran — exactly the ones they came to
+ * compare. The usage data supplies the names; the table supplies the rates.
+ *
+ * A model seen in usage but absent from the table comes back with
+ * `rates: null` instead of being dropped: "no published rate for this" is
+ * information, and silently omitting a model the user just ran reads as a bug.
+ */
+export function simulatorModels(pricing, events = []) {
+  const out = [];
+  const seen = new Set();
+  const add = (key, label, source) => {
+    const n = normModel(key);
+    if (!n || seen.has(n)) return;
+    seen.add(n);
+    const rates = matchPricing(key, pricing);
+    out.push({ key, label, rates, source, priced: Boolean(rates) });
+  };
+
+  if (pricing?.auto?.input != null) add('default', 'Auto', 'catalog');
+  for (const m of pricing?.models || []) {
+    if (m.input != null) add(m.name, m.display, 'catalog');
+  }
+
+  // Auto is already covered by the catalog entry, and its raw forms ("default",
+  // "cursor-auto") would otherwise land as separate look-alike rows.
+  const fromUsage = [...new Set((events || []).map((e) => e.modelRaw).filter(Boolean))]
+    .filter((raw) => {
+      const n = normModel(raw);
+      return n && n !== 'unknown' && n !== 'default' && !n.includes('auto');
+    })
+    .sort((a, b) => a.localeCompare(b));
+  for (const raw of fromUsage) add(raw, raw, 'usage');
+
+  return out;
+}
+
+/**
+ * The models to pre-check in the compare picker: the ones this user actually
+ * spends on, most-used first. Previously a hardcoded list of model names that
+ * went stale every time Cursor shipped a new model.
+ */
+export function defaultCompareSelection(models, events = [], limit = 4) {
+  const counts = new Map();
+  for (const e of events || []) {
+    const n = normModel(e.modelRaw);
+    if (n) counts.set(n, (counts.get(n) || 0) + 1);
+  }
+  // A model with no published rate has nothing to show in the cost column, so
+  // it is never a default pick — the user can still tick it manually.
+  const priced = models.filter((m) => m.priced !== false);
+  const pool = priced.length ? priced : models;
+  const used = pool
+    .map((m) => ({ key: m.key, n: counts.get(normModel(m.key)) || 0 }))
+    .filter((m) => m.n > 0)
+    .sort((a, b) => b.n - a.n);
+  if (used.length >= 2) return new Set(used.slice(0, limit).map((m) => m.key));
+  return new Set(pool.slice(0, Math.min(limit, pool.length)).map((m) => m.key));
+}
+
 export function estimateTokenCost(rates, tokens) {
   if (!rates) return null;
   let cost = 0;

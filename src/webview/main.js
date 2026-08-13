@@ -10,6 +10,8 @@ import {
   parsePricing,
   matchPricing,
   estimateTokenCost,
+  simulatorModels,
+  defaultCompareSelection,
   displayModel,
   cacheSavingsFor,
   num,
@@ -121,6 +123,7 @@ const state = {
   simRequestId: null,
   simCompareSelected: null,
   simCompareFilterRequestId: null,
+  simCompareModelsKey: null,
   simCompareSortKey: 'estCost',
   simCompareSortDir: 'asc',
   simCompareContext: null,
@@ -2731,12 +2734,13 @@ async function copyCursorBrief() {
 // Simulator
 // ---------------------------------------------------------------------------
 
+/** Events the model list is derived from — the loaded range, or everything. */
+function modelSourceEvents() {
+  return state.filtered.length ? state.filtered : state.all;
+}
+
 function getCompareModels(pricing) {
-  const models = [{ key: 'default', label: 'Auto' }];
-  for (const m of pricing.models) {
-    if (m.input != null) models.push({ key: m.name, label: m.display });
-  }
-  return models;
+  return simulatorModels(pricing, modelSourceEvents());
 }
 
 function requestOptionLabel(e) {
@@ -2762,14 +2766,15 @@ function tokensFromEvent(e) {
 }
 
 function populateSimulatorModels() {
-  if (!state.pricing || !$('simModel')) return;
-  const options = [{ key: 'default', label: 'Auto' }];
-  for (const m of state.pricing.models) {
-    if (m.input != null) options.push({ key: m.name, label: m.display });
-  }
-  $('simModel').innerHTML = options
-    .map((o) => `<option value="${esc(o.key)}">${esc(o.label)}</option>`)
+  const el = $('simModel');
+  if (!state.pricing || !el) return;
+  const previous = el.value;
+  // Models with no published rate stay in the list but can't be priced, so they
+  // are disabled rather than dropped — see simulatorModels().
+  el.innerHTML = simulatorModels(state.pricing, modelSourceEvents())
+    .map((o) => `<option value="${esc(o.key)}"${o.priced ? '' : ' disabled'}>${esc(o.label)}${o.priced ? '' : ' (no published rate)'}</option>`)
     .join('');
+  if (previous && [...el.options].some((o) => o.value === previous)) el.value = previous;
 }
 
 function populateSimRequestPicker(selectedId) {
@@ -2795,20 +2800,6 @@ function formatDiff(diff) {
   if (Math.abs(diff) < 0.005) return 'same';
   if (diff < 0) return `−${fmt.money(-diff)}`;
   return `+${fmt.money(diff)}`;
-}
-
-const DEFAULT_COMPARE_HINTS = [
-  'claude-4-6-sonnet',
-  'claude-4-5-sonnet',
-  'gpt-5-2',
-  'composer-2-5',
-  'claude-4-5-haiku',
-];
-
-function defaultCompareSelection(models) {
-  const hinted = models.filter((m) => DEFAULT_COMPARE_HINTS.some((h) => m.key.includes(h) || h.includes(m.key)));
-  if (hinted.length >= 2) return new Set(hinted.slice(0, 4).map((m) => m.key));
-  return new Set(models.slice(0, Math.min(4, models.length)).map((m) => m.key));
 }
 
 function loadCompareModelPrefs() {
@@ -2846,7 +2837,7 @@ function resolveCompareSelection(models) {
     const restored = stored.filter((k) => available.has(k));
     if (restored.length) return new Set(restored);
   }
-  return defaultCompareSelection(models);
+  return defaultCompareSelection(models, modelSourceEvents());
 }
 
 function saveCompareModelSelection() {
@@ -2926,18 +2917,25 @@ function populateCompareModelFilters(event) {
   if (!container || !state.pricing) return;
 
   const models = getCompareModels(state.pricing).filter((m) => !isSameModel(m.key, event.modelRaw));
-  const requestChanged = state.simCompareFilterRequestId !== event.id;
-  if (!requestChanged && container.children.length) return;
+  // The list is partly derived from the events in the loaded range, so a range
+  // change can add or drop models while the selected request stays the same —
+  // keying the rebuild on the request alone would leave stale checkboxes.
+  const modelsKey = models.map((m) => m.key).join('|');
+  const unchanged = state.simCompareFilterRequestId === event.id
+    && state.simCompareModelsKey === modelsKey;
+  if (unchanged && container.children.length) return;
 
   state.simCompareFilterRequestId = event.id;
+  state.simCompareModelsKey = modelsKey;
   const selected = resolveCompareSelection(models);
   state.simCompareSelected = selected;
 
   container.innerHTML = models.map((m) => {
     const checked = selected.has(m.key);
+    const note = m.priced ? '' : ' <span class="sim-picker-note">no published rate</span>';
     return `<label class="sim-picker-item" data-label="${esc(m.label.toLowerCase())}">
       <input type="checkbox" value="${esc(m.key)}" ${checked ? 'checked' : ''}>
-      <span>${esc(m.label)}</span>
+      <span>${esc(m.label)}${note}</span>
     </label>`;
   }).join('');
   applyCompareModelSearch($('simCompareSearch')?.value || '');
@@ -2972,12 +2970,17 @@ function buildCompareRows(event) {
   const altRows = [];
   for (const m of getCompareModels(state.pricing)) {
     if (isSameModel(m.key, event.modelRaw)) continue;
-    const rates = matchPricing(m.key, state.pricing);
-    if (!rates) continue;
-    const estCost = estimateTokenCost(rates, tokens);
-    const savings = cacheSavingsFor({ cacheRead: tokens.cacheRead }, rates);
+    const rates = m.rates;
+    // Unpriced models stay in the table with an empty cost cell. Dropping them
+    // made a model the user had just run look like it didn't exist.
+    const estCost = rates ? estimateTokenCost(rates, tokens) : null;
+    const savings = rates ? cacheSavingsFor({ cacheRead: tokens.cacheRead }, rates) : null;
     const diff = actualCost != null && estCost != null ? estCost - actualCost : null;
-    altRows.push({ key: m.key, label: rates.label, estCost, savings, diff, isActual: false });
+    // The rates that priced this row, when they came from a differently-named
+    // catalog entry — "cursor-grok-4.6-high" priced off the "Grok 4.6" row is an
+    // approximation the user should be able to see.
+    const via = rates && normModel(rates.label) !== normModel(m.key) ? rates.label : null;
+    altRows.push({ key: m.key, label: m.label, via, estCost, savings, diff, isActual: false });
   }
   return { actualRow, altRows };
 }
@@ -3007,8 +3010,13 @@ function renderCompareRow(row) {
   }
   const rowClass = row.diff != null && row.diff < -0.005 ? 'row-cheaper' : row.diff > 0.005 ? 'row-pricier' : '';
   const diffClass = row.diff != null && row.diff < -0.005 ? 'diff-save' : row.diff > 0.005 ? 'diff-more' : '';
+  const note = row.estCost == null
+    ? ` <span class="sim-tag sim-tag-muted">no published rate</span> ${tip('This model appears in your usage but not on cursor.com\'s pricing table, so there is no published rate to estimate from.')}`
+    : row.via
+      ? ` <span class="sim-tag sim-tag-muted">via ${esc(row.via)} rates</span> ${tip('Cursor bills this variant under a model string that is not on the pricing table, so the estimate uses the closest published rates. Reasoning level and any long-context or Fast surcharge are not reflected.')}`
+      : '';
   return `<tr class="${rowClass}">
-    <td>${esc(row.label)}</td>
+    <td>${esc(row.label)}${note}</td>
     <td>${fmt.money(row.estCost)}</td>
     <td class="${diffClass}">${formatDiff(row.diff)}</td>
     <td>${row.savings != null ? fmt.money(row.savings) : '—'}</td>
@@ -3093,6 +3101,10 @@ function setSimModeUI(mode) {
 }
 
 function refreshSimulator() {
+  // Re-derived here as well as on load: the model list is partly built from the
+  // events in the current range, and load() populates it before refresh() has
+  // recomputed state.filtered.
+  populateSimulatorModels();
   populateSimRequestPicker(state.simRequestId);
   if (state.simMode === 'request') runCompareFromRequest();
   else runSimulator();

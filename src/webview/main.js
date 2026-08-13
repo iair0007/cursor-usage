@@ -118,6 +118,7 @@ const state = {
   simRequestId: null,
   simCompareSelected: null,
   simCompareFilterRequestId: null,
+  simCompareModelsKey: null,
   simCompareSortKey: 'estCost',
   simCompareSortDir: 'asc',
   simCompareContext: null,
@@ -2394,10 +2395,16 @@ function populateCompareModelFilters(event) {
   if (!container || !state.pricing) return;
 
   const models = getCompareModels(state.pricing).filter((m) => !isSameModel(m.key, event.modelRaw));
-  const requestChanged = state.simCompareFilterRequestId !== event.id;
-  if (!requestChanged && container.children.length) return;
+  // The list is partly derived from the events in the loaded range, so a range
+  // change can add or drop models while the selected request stays the same —
+  // keying the rebuild on the request alone would leave stale checkboxes.
+  const modelsKey = models.map((m) => m.key).join('|');
+  const unchanged = state.simCompareFilterRequestId === event.id
+    && state.simCompareModelsKey === modelsKey;
+  if (unchanged && container.children.length) return;
 
   state.simCompareFilterRequestId = event.id;
+  state.simCompareModelsKey = modelsKey;
   const selected = resolveCompareSelection(models);
   state.simCompareSelected = selected;
 

@@ -16,8 +16,11 @@ import {
   normModel,
   normalize,
   summarize,
+  comparisonWindow,
   detectBillingMode,
   detectPlanChange,
+  isPerRequestPriced,
+  modelCostDeltas,
   percentile,
   projectExhaustionDate,
   groupByDay,
@@ -111,6 +114,8 @@ const state = {
   page: 1,
   pageSize: 25,
   panel: 'requests',
+  /** Analyze tab sub-view: 'findings' | 'compare'. */
+  analyzePanel: 'findings',
   appView: 'overview',
   simMode: 'request',
   simRequestId: null,
@@ -130,7 +135,31 @@ const state = {
   planChangeDay: null,
   /** The auto-switch to the current-plan range happens once, not on every load. */
   planChangeAnnounced: false,
-  trend: { key: null, previous: null },
+  trend: {
+    key: null,
+    /** summarize() of the baseline period — drives the ▲/▼ badges. */
+    previous: null,
+    /** Baseline events, kept so the comparison can break the change down by model. */
+    previousEvents: null,
+    /** Which window to compare against: 'previous' | 'prevMonth' | 'custom'. */
+    mode: 'previous',
+    customStart: '',
+    customEnd: '',
+    /**
+     * Explicit dates for the left column. Null means it follows the filter bar,
+     * which is the default and keeps one period in force across every tab; set,
+     * it detaches so two arbitrary windows can be lined up.
+     */
+    primaryStart: '',
+    primaryEnd: '',
+    primaryEvents: null,
+    /** Which column the inline date editor is aimed at: 'current' | 'baseline'. */
+    editing: null,
+    /** The resolved baseline window, for labelling the columns. */
+    range: null,
+    loading: false,
+    error: null,
+  },
   analyzeThresholds: { ...ANALYZE_THRESHOLD_DEFAULTS },
   /** Severity of the banner currently shown, so view switches can keep the ones that still apply. */
   alertType: null,
@@ -144,6 +173,8 @@ const fmt = {
   money(v) { return v == null ? '—' : `$${v.toFixed(2)}`; },
   num(v) { return v.toLocaleString('en-US'); },
   pct(v) { return v == null ? '—' : `${v.toFixed(1)}%`; },
+  /** One decimal, for per-day rates where whole numbers hide the difference. */
+  rate(v) { return v == null ? '—' : v.toFixed(1); },
   date(ms) {
     if (!ms) return '—';
     return new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -317,8 +348,8 @@ function renderPlanCycle(quota, hardLimit) {
     const notes = [];
     if (quota) {
       notes.push(
-        'No fixed request quota found for this plan — usage like Auto is metered by token cost '
-        + '(see the cards below), not a request count. This is expected for most current plans, not a bug.',
+        'This plan meters usage by token cost rather than by a request count, '
+        + 'so there is no quota to fill — the cards below are the figures to watch.',
       );
     }
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
@@ -349,6 +380,14 @@ function applyPlanChangeDiscovery() {
       endDate: $('endDate').value,
       planChangeDay: change.dayKey,
     });
+  } else if (state.planChangeDay && state.datePreset !== 'plan') {
+    // A boundary stored by an earlier session that a wider, stricter look no
+    // longer finds. Forget it rather than keeping a "Current plan" range built
+    // on a date this account can no longer show any evidence for. Skipped while
+    // that range is the one selected, since it holds only post-boundary rows
+    // and so can never contain the proof.
+    state.planChangeDay = null;
+    savePrefs({ planChangeDay: null });
   }
   $('planPresetBtn')?.classList.toggle('hidden', !state.planChangeDay);
   if (!change || state.planChangeAnnounced || state.datePreset === 'plan') return false;
@@ -359,11 +398,42 @@ function applyPlanChangeDiscovery() {
   applyDateRange(range.start, range.end, 'plan');
   // Queued rather than shown: the reload below ends with its own banner, which
   // would replace this one immediately.
-  state.pendingNotice = `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}. `
-    + `Showing usage since then — the ${fmt.num(change.legacyRequestsBefore)} earlier request${change.legacyRequestsBefore === 1 ? '' : 's'} in the range you picked were priced per request, so their dollars aren't comparable. `
-    + 'Pick another period to include them.';
+  //
+  // Written from where the user now is, not from where they were. By the time
+  // this appears the range has already been switched to "Current plan", so
+  // "the range you picked" named something no longer on screen and "pick
+  // another period" read as an instruction rather than an option.
+  const earlier = `${fmt.num(change.legacyRequestsBefore)} request${change.legacyRequestsBefore === 1 ? '' : 's'}`;
+  state.pendingNotice = `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}, so this switched to the "Current plan" period. `
+    + `The ${earlier} before that date were priced per request, and mixing those dollars with today's would give a total that matches neither. `
+    + 'Pick any other period to see them.';
   void load();
   return true;
+}
+
+/**
+ * Warning for a loaded range that straddles the plan's billing change.
+ *
+ * Keyed on the events actually loaded rather than on the dates, so it fires for
+ * any range holding both kinds of request — a preset, a custom range, or a
+ * saved one restored on startup — and stays silent for a range that sits
+ * wholly on one side, where the totals are internally consistent.
+ */
+function planChangeSpanNote() {
+  // Only rows that carry an actual per-request charge count as the old system.
+  // A row that merely wasn't token-metered — an included request charged $0 —
+  // is not evidence of anything, and treating it as such warned about a plan
+  // change on accounts that never had one.
+  const legacy = state.all.filter(isPerRequestPriced).length;
+  const metered = state.all.length - legacy;
+  if (!legacy || !metered) return '';
+  // The same one-way test detectPlanChange applies: interleaved regimes mean
+  // this account meters some requests and not others, not that it migrated.
+  if (!state.planChangeDay) return '';
+  const changed = state.planChangeDay ? ` on ${fmt.shortDate(state.planChangeDay)}` : '';
+  return ` This range spans your plan's billing change${changed}: ${fmt.num(legacy)} of these requests`
+    + ` were priced per request and ${fmt.num(metered)} by token cost, so the totals below add up two`
+    + ' pricing systems. Use "Current plan" for figures comparable with cursor.com.';
 }
 
 /** The budget projection, or null when no budget is known (nothing to project against). */
@@ -581,11 +651,17 @@ function loadPrefs() {
   }
 }
 
+/**
+ * Merges into whatever is already stored, so a caller only has to name the keys
+ * it owns. Callers write disjoint slices — the date range, the comparison
+ * baseline, the Analyze template — and a replacing write would silently drop
+ * every slice but its own.
+ */
 function savePrefs(prefs) {
   try {
-    // planChangeDay is discovered, not chosen — every other caller writes only
-    // the range, so carry it through rather than making each remember it.
-    storage.setItem(STORAGE_KEY, JSON.stringify({ planChangeDay: state.planChangeDay, ...prefs }));
+    // planChangeDay is discovered, not chosen, so state is authoritative for it.
+    const merged = { ...loadPrefs(), planChangeDay: state.planChangeDay, ...prefs };
+    storage.setItem(STORAGE_KEY, JSON.stringify(merged));
   } catch {
     // ignore
   }
@@ -596,6 +672,13 @@ function savePrefs(prefs) {
 // or applying a date preset silently clears the What-if/Billed highlight (and
 // clicking What-if/Billed fires the period handler with an undefined preset).
 const PRESET_BTN_SELECTOR = '.preset-btn[data-preset]';
+
+// The Requests and Analyze tab strips share .view-tab for styling only. Each
+// carries its own data attribute, and both selectors must stay scoped to it:
+// an unscoped '.view-tab' matched the other strip's buttons, and
+// setPanel(undefined) lit every tab whose data-panel was also undefined.
+const VIEW_TAB_SELECTOR = '.view-tab[data-panel]';
+const ANALYZE_TAB_SELECTOR = '.view-tab[data-analyze-panel]';
 
 const PRESET_LABELS = {
   today: 'Today',
@@ -620,6 +703,24 @@ function applyDateRange(start, end, preset) {
   setActivePreset(resolved);
   savePrefs({ preset: resolved, startDate: start, endDate: end });
   updateFilterSummary();
+}
+
+const COMPARE_MODES = ['previous', 'prevMonth', 'custom'];
+
+/** Restores the comparison baseline chosen in a previous session. */
+function initPeriodComparePrefs() {
+  const prefs = loadPrefs();
+  if (COMPARE_MODES.includes(prefs?.compareMode)) state.trend.mode = prefs.compareMode;
+  if (prefs?.compareStart) state.trend.customStart = prefs.compareStart;
+  if (prefs?.compareEnd) state.trend.customEnd = prefs.compareEnd;
+  if (prefs?.comparePrimaryStart && prefs?.comparePrimaryEnd) {
+    state.trend.primaryStart = prefs.comparePrimaryStart;
+    state.trend.primaryEnd = prefs.comparePrimaryEnd;
+  }
+  // A stored "custom" with no dates would leave the panel prompting forever.
+  if (state.trend.mode === 'custom' && !(state.trend.customStart && state.trend.customEnd)) {
+    state.trend.mode = 'previous';
+  }
 }
 
 function initDateRange() {
@@ -863,6 +964,327 @@ function renderAnalyticsStats(events, summary, previousSummary) {
     <div class="analytics-stat"><span>Cache read share</span><strong>${fmt.pct(cachePct)}</strong><small>${fmt.money(summary.totalSavings)} saved</small></div>`;
 }
 
+// ---------------------------------------------------------------------------
+// Period comparison
+// ---------------------------------------------------------------------------
+
+/** "Jul 15 – Aug 13" for a window in epoch ms. */
+function windowLabel(window) {
+  if (!window) return '—';
+  const d = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const start = d(window.startMs);
+  const end = d(window.endMs);
+  return start === end ? start : `${start} – ${end}`;
+}
+
+/** Whole days a window spans, counting both ends. */
+function windowDays(window) {
+  if (!window) return 0;
+  return Math.max(1, Math.round((window.endMs - window.startMs) / (24 * 60 * 60 * 1000)));
+}
+
+/**
+ * A signed delta, coloured by what the movement means rather than by its sign:
+ * spending more is amber and spending less is green, but for cache savings
+ * that flips — `betterWhen: 'up'` says which direction is the good one.
+ *
+ * "No change" is judged at the precision actually on screen. Comparing the raw
+ * floats instead would print "$0.07 vs $0.06 · no change" (a real difference
+ * rounded away) or "+$0.07 (+0%)" (a real difference the percentage rounds
+ * away) — both read as the panel contradicting itself.
+ */
+function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
+  if (format(current) === format(baseline)) return '<span class="delta delta-flat">no change</span>';
+  const delta = current - baseline;
+  const up = delta > 0;
+  const sign = up ? '+' : '−';
+  // The values differ on screen but the gap is under one displayed unit — say
+  // "<$0.01" rather than "$0.00", which reads as no difference at all.
+  const smallestUnit = format === fmt.num ? 1 : format === fmt.rate || format === fmt.pct ? 0.1 : 0.01;
+  const exactMagnitude = format(Math.abs(delta));
+  const belowUnit = exactMagnitude === format(0);
+  // "<$0.01" carries its own qualifier; "+<$0.01" reads as two operators in a
+  // row. Direction still comes through in the colour and the percentage.
+  const magnitude = belowUnit ? `<${format(smallestUnit)}` : `${sign}${exactMagnitude}`;
+
+  let pct = ' (new)';
+  if (baseline > 0) {
+    const exact = Math.abs((delta / baseline) * 100);
+    // A visible dollar move whose percentage rounds to zero is "<1%", never "0%".
+    pct = exact < 0.5 ? ' (<1%)' : ` (${sign}${exact.toFixed(0)}%)`;
+  } else if (baseline === 0 && current === 0) {
+    pct = '';
+  }
+
+  const good = betterWhen === 'up' ? up : !up;
+  return `<span class="delta ${good ? 'delta-down' : 'delta-up'}">${magnitude}${esc(pct)}</span>`;
+}
+
+function compareMetricRow(label, current, baseline, format = fmt.money, betterWhen = 'down') {
+  return `<tr>
+      <th scope="row">${esc(label)}</th>
+      <td>${format(current)}</td>
+      <td>${format(baseline)}</td>
+      <td>${deltaCell(current, baseline, format, betterWhen)}</td>
+    </tr>`;
+}
+
+/**
+ * Side-by-side view of the selected period and its baseline, plus which models
+ * account for the difference.
+ *
+ * Both windows are always named in the column headers. The whole point of the
+ * panel is that two periods are on screen at once, so a figure that doesn't say
+ * which period it belongs to is worse than no figure at all.
+ */
+function renderComparison() {
+  const panel = $('comparePanel');
+  if (!panel) return;
+
+  document.querySelectorAll('.compare-mode-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.compareMode === state.trend.mode);
+  });
+  renderCompareEditor();
+
+  const statusEl = $('compareStatus');
+  const bodyEl = $('compareBody');
+  const noteEl = $('compareNote');
+  const setStatus = (text) => {
+    statusEl.textContent = text || '';
+    statusEl.classList.toggle('hidden', !text);
+  };
+  const clear = (text) => {
+    setStatus(text);
+    bodyEl.innerHTML = '';
+    noteEl.classList.add('hidden');
+  };
+
+  // Nothing loaded at all: the panel would be a grid of em-dashes.
+  if (!state.loaded) return clear('Load a date range to compare periods.');
+  if (state.trend.mode === 'custom' && !state.trend.range) {
+    return clear('Pick both ends of the period you want to compare against.');
+  }
+  if (state.trend.loading) {
+    setStatus(`Loading ${windowLabel(state.trend.range)}…`);
+    noteEl.classList.add('hidden');
+    return;
+  }
+  if (state.trend.error) return clear(state.trend.error);
+
+  const baseline = state.trend.previous;
+  const baselineEvents = state.trend.previousEvents;
+  if (!baseline || !baselineEvents) return clear('No comparison loaded yet.');
+
+  const currentWindow = currentPrimaryWindow();
+  const baseWindow = state.trend.range;
+  if (!currentWindow) return clear('Pick both ends of this period.');
+
+  // A pinned left column has its own fetched events; otherwise the comparison
+  // reads the same rows every other view is showing.
+  const currentEvents = hasPrimaryOverride() ? state.trend.primaryEvents : state.filtered;
+  if (hasPrimaryOverride() && !currentEvents) return clear('Loading this period…');
+
+  setStatus('');
+  const current = summarize(currentEvents);
+
+  // An empty baseline makes every delta "+100% (new)", which is noise dressed
+  // as insight — say plainly that there's nothing on the other side.
+  if (!baselineEvents.length) {
+    bodyEl.innerHTML = `<p class="compare-empty">No requests in ${esc(windowLabel(baseWindow))}, so there's nothing to compare against.
+      ${state.trend.mode === 'previous' ? 'Try a longer period, or pick a custom baseline.' : 'Pick a different baseline.'}</p>`;
+    noteEl.classList.add('hidden');
+    return;
+  }
+
+  const curDays = windowDays(currentWindow);
+  const baseDays = windowDays(baseWindow);
+  const costNoun = costModeNoun();
+
+  const head = (which, label, window, days) => `
+    <th scope="col">
+      <span class="compare-col-label">${esc(label)}</span>
+      <button type="button" class="compare-window-btn" data-edit-window="${which}"
+        title="Click to set this period's dates">${esc(windowLabel(window))}</button>
+      <span class="compare-col-days">${fmt.num(days)} day${days === 1 ? '' : 's'}${which === 'current' && hasPrimaryOverride() ? ' · pinned' : ''}</span>
+    </th>`;
+
+  bodyEl.innerHTML = `
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th scope="col"></th>
+          ${head('current', 'This period', currentWindow, curDays)}
+          ${head('baseline', 'Compared with', baseWindow, baseDays)}
+          <th scope="col">Change</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${compareMetricRow(`Total ${costNoun}`, current.totalCost, baseline.totalCost)}
+        ${compareMetricRow('Requests', current.count, baseline.count, fmt.num)}
+        ${compareMetricRow('Avg / request', current.avg ?? 0, baseline.avg ?? 0)}
+        ${compareMetricRow('Avg / day', current.totalCost / curDays, baseline.totalCost / baseDays)}
+        ${compareMetricRow('Requests / day', current.count / curDays, baseline.count / baseDays, fmt.rate)}
+        ${compareMetricRow('Cache savings', current.totalSavings, baseline.totalSavings, fmt.money, 'up')}
+        ${compareMetricRow('Cache hit rate', cacheHitRate(currentEvents), cacheHitRate(baselineEvents), fmt.pct, 'up')}
+      </tbody>
+    </table>
+
+    ${renderModelDeltaTable(currentEvents, baselineEvents, currentWindow, baseWindow)}`;
+
+  // Caveats that make an honest reading possible. Both are artefacts of the
+  // windows, not of the usage, and both have burned readers of the ▲/▼ badge
+  // that this panel exists to explain.
+  const notes = [];
+  if (currentWindow.endMs > Date.now()) {
+    notes.push('This period includes today, which isn\'t over yet — expect it to look lower than a comparison period of whole days.');
+  }
+  if (curDays !== baseDays) {
+    notes.push(`The two periods aren't the same length (${fmt.num(curDays)} vs ${fmt.num(baseDays)} days) — compare the per-day rows rather than the totals.`);
+  }
+  if (hasPrimaryOverride()) {
+    notes.push('This comparison uses its own periods, so the date range in the toolbar above does not apply to it.');
+  }
+  noteEl.textContent = notes.join(' ');
+  noteEl.classList.toggle('hidden', !notes.length);
+}
+
+/** Share of tokens served from cache — the lever behind most cost changes. */
+function cacheHitRate(events) {
+  const t = events.reduce((acc, e) => {
+    acc.cacheRead += e.cacheReadTokens || 0;
+    acc.total += (e.inputTokens || 0) + (e.outputTokens || 0) + (e.cacheReadTokens || 0) + (e.cacheWriteTokens || 0);
+    return acc;
+  }, { cacheRead: 0, total: 0 });
+  return t.total > 0 ? (t.cacheRead / t.total) * 100 : 0;
+}
+
+/**
+ * Which models account for the difference.
+ *
+ * Cost alone can't tell "I used it more" from "each call got dearer", so the
+ * requests and the per-request average sit beside it — the three together name
+ * the cause rather than just the symptom.
+ */
+function renderModelDeltaTable(currentEvents, baselineEvents, currentWindow, baseWindow) {
+  const curCost = Object.fromEntries(costByModel(currentEvents));
+  const baseCost = Object.fromEntries(costByModel(baselineEvents));
+  const countBy = (events) => events.reduce((m, e) => {
+    if (e.counted !== false) m[e.model] = (m[e.model] || 0) + 1;
+    return m;
+  }, {});
+  const curCount = countBy(currentEvents);
+  const baseCount = countBy(baselineEvents);
+  const deltas = modelCostDeltas(curCost, baseCost);
+  if (!deltas.length) return '';
+
+  const rows = deltas.map((d) => {
+    const cN = curCount[d.model] || 0;
+    const bN = baseCount[d.model] || 0;
+    const cAvg = cN ? d.current / cN : 0;
+    const bAvg = bN ? d.baseline / bN : 0;
+    const tag = d.baseline === 0
+      ? ' <span class="compare-tag">new</span>'
+      : d.current === 0 ? ' <span class="compare-tag compare-tag-gone">stopped</span>' : '';
+    // Rows that didn't move are kept for completeness but stop competing for
+    // attention with the ones that did.
+    const quiet = Math.abs(d.delta) < 0.005 ? ' class="compare-row-quiet"' : '';
+    return `<tr${quiet}>
+        <th scope="row">${esc(d.model)}${tag}</th>
+        <td>${fmt.money(d.current)}<span class="compare-sub">${fmt.num(cN)} req · ${fmt.money(cAvg)}/req</span></td>
+        <td>${fmt.money(d.baseline)}<span class="compare-sub">${fmt.num(bN)} req · ${fmt.money(bAvg)}/req</span></td>
+        <td>${deltaCell(d.current, d.baseline)}</td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <h4 class="compare-subhead">What moved, by model</h4>
+    <table class="compare-table compare-models">
+      <thead>
+        <tr>
+          <th scope="col">Model</th>
+          <th scope="col">${esc(windowLabel(currentWindow))}</th>
+          <th scope="col">${esc(windowLabel(baseWindow))}</th>
+          <th scope="col">Change</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+/** The inline from/to editor, aimed at whichever column was clicked. */
+function renderCompareEditor() {
+  const editor = $('compareEditor');
+  if (!editor) return;
+  const target = state.trend.editing;
+  editor.classList.toggle('hidden', !target);
+  if (!target) return;
+
+  const isCurrent = target === 'current';
+  $('compareEditorLabel').textContent = isCurrent ? 'This period' : 'Compared with';
+  const window = isCurrent ? currentPrimaryWindow() : state.trend.range;
+  if (window) {
+    $('compareEditStart').value = toDateInputValue(new Date(window.startMs));
+    $('compareEditEnd').value = toDateInputValue(new Date(window.endMs));
+  }
+  // Resetting the left column hands it back to the filter bar; resetting the
+  // right one hands it back to the "previous period" default.
+  $('compareEditReset').textContent = isCurrent ? 'Follow the filter bar' : 'Use previous period';
+  $('compareEditReset').classList.toggle(
+    'hidden',
+    isCurrent ? !hasPrimaryOverride() : state.trend.mode === 'previous',
+  );
+}
+
+function openCompareEditor(target) {
+  state.trend.editing = state.trend.editing === target ? null : target;
+  renderCompareEditor();
+}
+
+function applyCompareEditor() {
+  const start = $('compareEditStart').value;
+  const end = $('compareEditEnd').value;
+  if (!start || !end) return;
+  if (toMs(start) > toMs(end, true)) {
+    showAlert('error', 'The "From" date is after the "To" date — pick a valid range.');
+    return;
+  }
+  if (state.trend.editing === 'current') {
+    state.trend.primaryStart = start;
+    state.trend.primaryEnd = end;
+  } else {
+    state.trend.mode = 'custom';
+    state.trend.customStart = start;
+    state.trend.customEnd = end;
+  }
+  state.trend.editing = null;
+  saveComparePrefs();
+  renderComparison();
+  void loadTrendComparison();
+}
+
+function resetCompareEditor() {
+  if (state.trend.editing === 'current') {
+    state.trend.primaryStart = '';
+    state.trend.primaryEnd = '';
+  } else {
+    state.trend.mode = 'previous';
+  }
+  state.trend.editing = null;
+  saveComparePrefs();
+  renderComparison();
+  void loadTrendComparison();
+}
+
+function saveComparePrefs() {
+  savePrefs({
+    compareMode: state.trend.mode,
+    compareStart: state.trend.customStart,
+    compareEnd: state.trend.customEnd,
+    comparePrimaryStart: state.trend.primaryStart,
+    comparePrimaryEnd: state.trend.primaryEnd,
+  });
+}
+
 function chartDefaults() {
   return {
     responsive: true,
@@ -889,7 +1311,10 @@ function destroyCharts() {
 }
 
 function currentTrendKey() {
-  return `${$('startDate').value}|${$('endDate').value}|${$('modelFilter').value}|${state.costMode}`;
+  const { mode, customStart, customEnd, primaryStart, primaryEnd } = state.trend;
+  const primary = hasPrimaryOverride() ? `${primaryStart}..${primaryEnd}` : `${$('startDate').value}|${$('endDate').value}`;
+  return `${primary}|${$('modelFilter').value}|${state.costMode}`
+    + `|${mode}|${mode === 'custom' ? `${customStart}..${customEnd}` : ''}`;
 }
 
 function renderCharts(events) {
@@ -1249,7 +1674,7 @@ function renderTable(events, summary) {
 
 function setPanel(panel) {
   state.panel = panel;
-  document.querySelectorAll('.view-tab').forEach((tab) => {
+  document.querySelectorAll(VIEW_TAB_SELECTOR).forEach((tab) => {
     const active = tab.dataset.panel === panel;
     tab.classList.toggle('active', active);
     tab.setAttribute('aria-selected', active ? 'true' : 'false');
@@ -1260,17 +1685,60 @@ function setPanel(panel) {
   // Rendered even with nothing loaded — renderCharts() puts up its own empty
   // note, and skipping it here used to leave the previous range's charts (or a
   // blank grid) on screen after switching tabs.
-  if (panel === 'analytics') {
-    renderCharts(state.filtered);
-    if (state.filtered.length) void loadTrendComparison();
-  }
+  if (panel === 'analytics') renderCharts(state.filtered);
+}
+
+/** Findings vs. period comparison, the two views on the Analyze tab. */
+function setAnalyzePanel(panel) {
+  state.analyzePanel = panel;
+  document.querySelectorAll(ANALYZE_TAB_SELECTOR).forEach((tab) => {
+    const active = tab.dataset.analyzePanel === panel;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  // One place decides which of the three boxes (empty note, findings,
+  // comparison) is visible, so a sub-tab switch can't leave two of them up.
+  renderAnalyze();
+}
+
+/** True when the left column has been pinned to its own dates. */
+function hasPrimaryOverride() {
+  return Boolean(state.trend.primaryStart && state.trend.primaryEnd);
 }
 
 /**
- * Fetches the previous equal-length period (same model filter + cost mode)
- * so Analytics can show "▲12% vs prior period" badges. Cached per date
- * range/filter/cost-mode combo; re-renders just the stats row when it lands
- * (charts aren't touched, so this never causes a flicker/reflow of them).
+ * The left column's window: its own dates when pinned, otherwise whatever the
+ * filter bar is showing.
+ */
+function currentPrimaryWindow() {
+  if (hasPrimaryOverride()) {
+    return { startMs: toMs(state.trend.primaryStart), endMs: toMs(state.trend.primaryEnd, true) };
+  }
+  const startStr = $('startDate').value;
+  const endStr = $('endDate').value;
+  if (!startStr || !endStr) return null;
+  return { startMs: toMs(startStr), endMs: toMs(endStr, true) };
+}
+
+/** The baseline window for the current selection, or null if it can't be resolved. */
+function currentBaselineWindow() {
+  const primary = currentPrimaryWindow();
+  if (!primary) return null;
+  return comparisonWindow({
+    startMs: primary.startMs,
+    endMs: primary.endMs,
+    mode: state.trend.mode,
+    customStartMs: state.trend.customStart ? toMs(state.trend.customStart) : null,
+    customEndMs: state.trend.customEnd ? toMs(state.trend.customEnd, true) : null,
+  });
+}
+
+/**
+ * Fetches the baseline period (same model filter + cost mode) so Analytics can
+ * show "▲12% vs prior period" badges and the model-by-model breakdown of what
+ * changed. Cached per range/baseline/filter/cost-mode combo; re-renders only
+ * the stats row and the comparison panel when it lands, so the charts above
+ * never flicker or reflow.
  */
 async function loadTrendComparison() {
   const startStr = $('startDate').value;
@@ -1285,28 +1753,57 @@ async function loadTrendComparison() {
   // it while the new one is in flight would compare this period against a
   // different period's total and label it "vs prior period".
   state.trend.previous = null;
+  state.trend.previousEvents = null;
+  state.trend.primaryEvents = null;
+  state.trend.error = null;
 
-  const startMs = toMs(startStr);
-  const endMs = toMs(endStr, true);
-  const prevEndMs = startMs - 1;
-  const prevStartMs = prevEndMs - (endMs - startMs);
+  const window = currentBaselineWindow();
+  state.trend.range = window;
+  if (!window) {
+    // Custom baseline with a half-filled picker: prompt for the missing end
+    // rather than silently comparing against something the user didn't choose.
+    state.trend.loading = false;
+    renderComparison();
+    return;
+  }
+
+  state.trend.loading = true;
+  renderComparison();
+
+  // A pinned left column is no longer the range the rest of the dashboard
+  // loaded, so it needs fetching too. Both windows go out together.
+  const primary = hasPrimaryOverride() ? currentPrimaryWindow() : null;
 
   try {
-    const usage = await rpc('usage', { startDate: prevStartMs, endDate: prevEndMs });
+    const load = async (w) => {
+      const usage = await rpc('usage', { startDate: w.startMs, endDate: w.endMs });
+      const normOpts = { freePlan: isFreePlan() };
+      let events = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
+      if (modelVal) events = events.filter((e) => e.modelRaw === modelVal);
+      return applyCostMode(events);
+    };
+    const [baselineEvents, primaryEvents] = await Promise.all([
+      load(window),
+      primary ? load(primary) : Promise.resolve(null),
+    ]);
     if (state.trend.key !== key) return; // superseded by a newer request
-    const normOpts = { freePlan: isFreePlan() };
-    let events = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
-    if (modelVal) events = events.filter((e) => e.modelRaw === modelVal);
-    events = applyCostMode(events);
-    state.trend.previous = summarize(events);
-  } catch {
+    state.trend.previousEvents = baselineEvents;
+    state.trend.previous = summarize(baselineEvents);
+    state.trend.primaryEvents = primaryEvents;
+  } catch (e) {
+    if (state.trend.key !== key) return;
     state.trend.previous = null;
+    state.trend.previousEvents = null;
+    state.trend.primaryEvents = null;
+    state.trend.error = e?.message || 'Could not load the comparison period.';
   }
 
   if (state.trend.key !== key) return;
+  state.trend.loading = false;
   if (state.panel === 'analytics' && state.appView === 'usage') {
     renderAnalyticsStats(state.filtered, summarize(state.filtered), state.trend.previous);
   }
+  if (state.appView === 'analyze') renderComparison();
   if (state.appView === 'overview') {
     // Rebuilt through the same helper renderOverview() uses: writing the badge
     // on its own here dropped the plan-change reconciliation note that shares
@@ -1318,8 +1815,13 @@ async function loadTrendComparison() {
 
 /** The Overview cost card's sub-line: trend badge plus any plan-change note. */
 function overviewCostSubHtml(summary) {
-  const trend = state.trend.key === currentTrendKey() && state.trend.previous
+  const badge = state.trend.key === currentTrendKey() && state.trend.previous
     ? trendBadge(summary.totalCost, state.trend.previous.totalCost)
+    : '';
+  // The badge poses a question it can't answer on its own — against what, and
+  // because of what — so it links to the view that does.
+  const trend = badge
+    ? `${badge}<button type="button" class="btn-link-inline compare-link" data-goto-compare>Compare periods →</button>`
     : '';
   const planChange = planChangeNote(summary, { short: true });
   return planChange ? `${trend}<span class="ov-stat-note">${esc(planChange)}</span>` : trend;
@@ -1604,7 +2106,19 @@ async function load() {
     const loadedLabel = countedAll < state.all.length
       ? `Loaded ${plural(countedAll, 'request')} (${plural(state.all.length, 'event')} incl. errored/aborted)`
       : `Loaded ${plural(state.all.length, 'request')}`;
-    showAlert('info', `${takePendingNotice()}${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${fallbackNote}`);
+    const notice = takePendingNotice();
+    // The one-time auto-switch notice announces the change on its own; every
+    // other visit to a range that straddles it needs the same warning, or the
+    // totals silently mix two pricing systems (the "Month to date" case).
+    const spanNote = notice ? '' : planChangeSpanNote();
+    showAlert(
+      // Both notices say the same thing — some of these dollars come from a
+      // different pricing system — so they carry the same weight. The
+      // auto-switch one used to be a blue "info" beside an amber warning about
+      // the very same condition.
+      spanNote || notice ? 'warn' : 'info',
+      `${notice}${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${spanNote}${fallbackNote}`,
+    );
     // refresh() already re-renders the overview and analyze views.
     render();
     if (state.appView === 'simulator') refreshSimulator();
@@ -2153,14 +2667,22 @@ function renderAnalyze() {
   const content = $('analyzeContent');
   if (!empty || !content) return;
 
-  if (!state.filtered.length) {
-    empty.classList.remove('hidden');
-    content.classList.add('hidden');
+  // The comparison is worth showing with an empty period — "0 requests here
+  // against 120 last week" is a finding — so only the findings view collapses
+  // into the empty state, and the sub-tabs stay available either way.
+  const hasData = state.filtered.length > 0;
+  const onCompare = state.analyzePanel === 'compare';
+  $('analyzeTabs')?.classList.toggle('hidden', !state.loaded);
+  empty.classList.toggle('hidden', hasData || onCompare);
+  $('analyzeCompare')?.classList.toggle('hidden', !onCompare);
+  content.classList.toggle('hidden', !hasData || onCompare);
+
+  if (onCompare) {
+    renderComparison();
+    void loadTrendComparison();
     return;
   }
-
-  empty.classList.add('hidden');
-  content.classList.remove('hidden');
+  if (!hasData) return;
 
   initAnalyzeSidebar();
   const summary = summarize(state.filtered);
@@ -2653,6 +3175,7 @@ function setAppView(view) {
 
 async function init() {
   initDateRange();
+  initPeriodComparePrefs();
   initCompareModelPrefs();
 
   const storedMode = storage.getItem(COST_MODE_KEY);
@@ -2688,6 +3211,55 @@ async function init() {
     btn.addEventListener('click', () => onPresetClick(btn.dataset.preset));
   });
 
+  document.querySelectorAll(ANALYZE_TAB_SELECTOR).forEach((tab) => {
+    tab.addEventListener('click', () => setAnalyzePanel(tab.dataset.analyzePanel));
+  });
+
+  document.querySelectorAll('.compare-mode-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (state.trend.mode === btn.dataset.compareMode) return;
+      state.trend.mode = btn.dataset.compareMode;
+      // Seed the custom pickers with the window they'd otherwise replace, so
+      // switching to Custom starts from what was already on screen instead of
+      // two empty inputs.
+      if (state.trend.mode === 'custom') {
+        if (!state.trend.customStart && state.trend.range) {
+          state.trend.customStart = toDateInputValue(new Date(state.trend.range.startMs));
+          state.trend.customEnd = toDateInputValue(new Date(state.trend.range.endMs));
+        }
+        // "Custom" is a request to choose dates, so open the picker on it
+        // rather than leaving the user to find the header button.
+        state.trend.editing = 'baseline';
+      }
+      saveComparePrefs();
+      renderComparison();
+      void loadTrendComparison();
+    });
+  });
+
+  // Applied on demand rather than on every keystroke: each window is a fresh
+  // paginated fetch of cursor.com, and a half-typed year is a range nobody
+  // asked for.
+  $('compareEditApply')?.addEventListener('click', applyCompareEditor);
+  $('compareEditReset')?.addEventListener('click', resetCompareEditor);
+  $('compareEditCancel')?.addEventListener('click', () => {
+    state.trend.editing = null;
+    renderCompareEditor();
+  });
+  // The column headers are rebuilt on every render, so the click is delegated.
+  $('compareBody')?.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-edit-window]');
+    if (btn) openCompareEditor(btn.dataset.editWindow);
+  });
+
+  // "Compare →" beside the trend badge: the badge raises the question, this
+  // takes you to the view that answers it.
+  $('ovCostSub')?.addEventListener('click', (ev) => {
+    if (!ev.target.closest('[data-goto-compare]')) return;
+    setAppView('analyze');
+    setAnalyzePanel('compare');
+  });
+
   $('modelFilter').addEventListener('change', () => { state.page = 1; destroyCharts(); refresh(); });
   $('startDate').addEventListener('change', onDateInputChange);
   $('endDate').addEventListener('change', onDateInputChange);
@@ -2701,7 +3273,7 @@ async function init() {
   $('prevPage').addEventListener('click', () => { state.page -= 1; refresh(); });
   $('nextPage').addEventListener('click', () => { state.page += 1; refresh(); });
 
-  document.querySelectorAll('.view-tab').forEach((tab) => {
+  document.querySelectorAll(VIEW_TAB_SELECTOR).forEach((tab) => {
     tab.addEventListener('click', () => setPanel(tab.dataset.panel));
   });
 

@@ -1,8 +1,8 @@
 {
   "name": "cursor-usage-dashboard",
   "displayName": "Cursor Usage Dashboard",
-  "description": "Track your remaining Cursor requests and spend: status bar quota gauge, cost dashboard, cache savings, model breakdown, cost simulator.",
-  "version": "0.6.1",
+  "description": "Track your remaining Cursor requests and spend: status bar quota gauge, monthly budget burn-rate, cost dashboard, cache savings, model breakdown, cost simulator.",
+  "version": "0.6.2",
   "publisher": "iair0007",
   "license": "MIT",
   "icon": "resources/icon.png",

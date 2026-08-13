@@ -566,6 +566,137 @@ tfoot td {
 .trend-badge.trend-down { color: var(--green-strong); }
 .trend-badge.trend-flat { color: var(--muted); font-weight: 400; }
 
+/* --- Period comparison --------------------------------------------------- */
+
+.compare-panel { margin-bottom: 10px; }
+.compare-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.compare-head h3 { margin: 0; }
+.compare-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+/* Inline date editor, aimed at whichever column header was clicked. */
+.compare-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.compare-editor-label { font-size: 12px; font-weight: 600; }
+.compare-editor label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+
+/* The range in each column header doubles as the control that changes it. */
+.compare-window-btn {
+  /* inline-block so the dashed "editable" underline hugs the dates rather than
+     stretching the width of the column; the header's own alignment places it. */
+  display: inline-block;
+  padding: 0;
+  border: none;
+  border-bottom: 1px dashed var(--border);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.compare-window-btn:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.compare-window-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder, var(--accent)); outline-offset: 2px; }
+
+/* Secondary figures under a cost, e.g. "42 req · $0.07/req". */
+.compare-sub { display: block; color: var(--muted); font-size: 11px; font-weight: 400; margin-top: 2px; }
+/* Rows that didn't move stay readable but stop competing with the ones that did. */
+.compare-row-quiet { opacity: 0.55; }
+
+.compare-link { margin-left: 8px; font-size: 11px; }
+
+.compare-status { margin: 0; color: var(--muted); font-size: 13px; }
+.compare-empty { margin: 0; color: var(--muted); font-size: 13px; }
+.compare-note {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.compare-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.compare-table th, .compare-table td { padding: 8px 10px; text-align: right; }
+.compare-table th[scope="row"], .compare-table thead th:first-child { text-align: left; }
+.compare-table thead th {
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 600;
+  vertical-align: bottom;
+}
+/* Each column names the window it covers: two periods are on screen at once,
+   so a number that doesn't say which one it belongs to is worse than none. */
+.compare-col-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.compare-col-range { display: block; color: var(--fg); font-size: 13px; font-weight: 600; }
+.compare-col-days { display: block; font-size: 11px; font-weight: 400; }
+/* Row separators span the whole row. The global rules put a bottom border on
+   `td` but not on a row-header `th`, which draws a rule that starts at the
+   second column; matching them here, and dropping it on the last row, keeps
+   the table from looking like it was cut off mid-way. */
+.compare-table tbody th[scope="row"],
+.compare-table tbody td {
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.compare-table tbody tr:last-child th[scope="row"],
+.compare-table tbody tr:last-child td { border-bottom: none; }
+.compare-table tbody th[scope="row"] { font-weight: 500; }
+.compare-table td { font-variant-numeric: tabular-nums; }
+
+.compare-subhead { margin: 22px 0 6px; font-size: 13px; }
+/* Model names are identifiers, not labels — the global uppercase `th` styling
+   turns "claude-4.5-sonnet" into something that was never on screen in Cursor. */
+.compare-models tbody th[scope="row"] {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.compare-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-family: var(--vscode-font-family);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.compare-tag-gone { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted); }
+
+/* Spend, not arithmetic: more money is a warning, less is a win — matching
+   the ▲/▼ badge convention already used on the stat cards. */
+.delta { font-weight: 600; font-variant-numeric: tabular-nums; }
+.delta-up { color: var(--amber); }
+.delta-down { color: var(--green-strong); }
+.delta-flat { color: var(--muted); font-weight: 400; }
+
+@media (max-width: 720px) {
+  .compare-head { flex-direction: column; }
+  .compare-table { font-size: 12px; }
+  .compare-table th, .compare-table td { padding: 6px 6px; }
+}
+
 .analytics-chart-main { margin-bottom: 10px; }
 .analytics-chart-row {
   display: grid;

@@ -8,7 +8,7 @@
 
 **Website:** [iair0007.github.io/cursor-usage](https://iair0007.github.io/cursor-usage/)
 
-Costs, cache savings, model breakdowns, rule-based insights, and a cost simulator — with zero setup. No proxy server, no login: it reuses the session Cursor created when you signed in.
+Costs, cache savings, model breakdowns, budget burn-rate, rule-based insights, and a cost simulator — with zero setup. No proxy server, no login: it reuses the session Cursor created when you signed in.
 
 ![Overview tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-overview.png)
 
@@ -26,10 +26,25 @@ A live usage figure sits in your status bar and updates automatically. Click it 
 
 ![Status bar states](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-statusbar.png)
 
-- **On plans with included requests** (e.g. 500/month) it shows **requests used vs. your limit** — `110/500` — because that's the number you actually watch on those plans.
-- It turns **yellow at 80%** and **red at 95%** of your quota (both thresholds configurable), and the tooltip projects when you'll run out at your current pace.
-- **Once the quota is exhausted** it pins at `500/500` and appends your **on-demand spend** — so you see immediately that you're now paying per use, and how much.
-- **On token-metered plans** (no request quota) it shows your token cost for the last 30 days (configurable).
+- **On plans with included requests** (e.g. 500/month) it shows **requests used vs. your limit** — `110/500` — because that's the number you actually watch on those plans, plus a fill gauge and the cycle reset date.
+- **On plans metered in dollars** (no request quota) the same gauge tracks your **monthly budget** — `$25.35/$40.00` — once you've told the extension what that budget is (see [`cursorUsage.budget.monthlyDollars`](#budget-metered-plans) below).
+- Either way it turns **yellow at 80%** and **red at 95%** (both thresholds configurable), and the tooltip projects when you'll run out at your current pace.
+- **Once a request quota is exhausted** it pins at `500/500` and appends your **on-demand spend** — so you see immediately that you're now paying per use, and how much.
+- With neither a quota nor a budget, it falls back to your token cost for the current billing cycle (or a rolling window — configurable).
+
+## Budget-metered plans
+
+The extension asks cursor.com for your monthly spend budget, but there's no documented endpoint that reliably reports it — so if the plan card shows no projection, **set it yourself** in Settings: `cursorUsage.budget.monthlyDollars`, using the figure cursor.com shows as `$X / $Y` on its usage page. Your setting always wins over anything looked up. With a budget known, you get:
+
+![Budget burn-rate on the Overview tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-budget.png)
+
+- a **burn-rate projection**: spend so far, your average daily pace this cycle, when the budget runs out, and the daily spend that still fits before the reset;
+- the **status bar gauge, fill style and warning thresholds** driven by the budget instead of a request count;
+- figures that always re-derive from the current setting, so **raising or cutting the budget mid-cycle** is picked up on the next refresh.
+
+At the default `0` the extension uses whatever it can find — a budget reported by cursor.com, otherwise your usage-based spend cap — and hides the projection if neither turns up.
+
+Spend is measured the way cursor.com's usage page measures it — **token-metered requests only**. Requests priced under the older per-request system never counted against a dollar budget, so they're reported separately rather than folded into the same total.
 
 ## What's inside
 
@@ -37,21 +52,37 @@ The dashboard has four tabs, from simple to detailed:
 
 ### Overview
 
-Your plan and billing-cycle status with a progress bar and burn-rate projection, three key numbers (cost, requests, cache savings), a daily-spend sparkline, and the single most important insight right now. A **What-if / Billed** toggle switches every figure between the API-equivalent value of your tokens and what you were actually charged.
+Your plan and billing-cycle status with a progress bar and burn-rate projection, three key numbers (cost, requests, cache savings), a daily-spend sparkline, and the single most important insight right now. The **What-if / Billed** toggle in the filter bar switches every figure between the API-equivalent value of your tokens and what you were actually charged.
+
+The plan card always covers the **current billing cycle**, not the period picked in the filter bar — and says so, so a "Today" filter above a cycle-to-date gauge can't be misread.
 
 ### Requests
 
 ![Requests tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-requests.png)
 
-The full request log: custom date ranges, model filter, per-request token cost and cache savings, expensive-request highlighting, sortable columns, CSV export. The **Analytics** sub-tab adds daily token cost, cost by model, and token volume charts with a week-over-week trend badge.
+The full request log: custom date ranges, model filter, per-request token cost and cache savings, expensive-request highlighting, sortable columns, CSV export. On usage-based plans a separate **Usage fee** column shows the flat per-request charge, kept apart from token cost so neither number absorbs the other. The **Analytics** sub-tab adds daily token cost, cost by model, and token volume charts with a week-over-week trend badge.
+
+Date presets are **Today / 7 days / 30 days / Month to date / Custom**. If your account moved from per-request to token pricing, a **Current plan** preset appears and the dashboard switches to it once, so you aren't comparing dollars from two different billing systems in one total.
 
 ![Analytics charts](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analytics.png)
 
 ### Analyze
 
+Two sub-tabs, both answering "why does my bill look like this" — **Findings** from one period, **Compare periods** from two.
+
 ![Analyze tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analyze.png)
 
-Rule-based findings with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, spike requests — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick, copies it, and focuses Cursor's chat so you just paste and send.
+**Findings** are rule-based with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, spike requests — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick, copies it, and focuses Cursor's chat so you just paste and send.
+
+#### Compare periods
+
+Puts your selected period next to another one and shows **which models account for the difference** — sorted by biggest mover, not biggest spender, because a model that went from $2 to $14 is the answer to "why did my bill move".
+
+![Comparing two periods](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-compare.png)
+
+Compare against the **previous period** (the equal-length window immediately before), the **same dates last month**, or any **custom** window. **Either column's dates can be edited from its own header** — click the range under "This period" or "Compared with" — so "this sprint vs the last one" is two clicks rather than a filter change. Pinning the left column detaches the comparison from the filter bar, and the panel says so.
+
+Alongside cost it shows requests, avg per request, per-day rates and cache hit rate, and the model table carries request counts and per-request averages — enough to tell "I used it more" apart from "each call got dearer". The panel also warns when the two windows aren't the same length, or when your period includes today, which isn't over yet.
 
 ### Simulator
 
@@ -69,17 +100,24 @@ Replay any real request's token profile against other models' published rates �
 | `Cursor Usage: Set Team Admin API Key` | Team usage via the Admin API |
 | `Cursor Usage: Clear Stored Credentials` | Delete stored secrets |
 | `Cursor Usage: Show Logs` | Open the extension's output channel |
+| `Cursor Usage: Open Settings` | Jump to this extension's settings |
 
 ## Settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
+| `cursorUsage.budget.monthlyDollars` | `0` | Your monthly spend budget, for the burn-rate projection on budget-metered plans. `0` uses whatever the extension can detect instead |
 | `cursorUsage.statusBar.enabled` | `true` | Show usage in the status bar |
-| `cursorUsage.statusBar.costMode` | `value` | What-if token value vs. actually billed cost |
 | `cursorUsage.refreshIntervalMinutes` | `15` | Status bar refresh cadence |
-| `cursorUsage.statusBar.periodDays` | `30` | Days covered by the status bar figure |
-| `cursorUsage.statusBar.warnAtPercent` | `80` | Quota % at which the status bar turns yellow |
-| `cursorUsage.statusBar.criticalAtPercent` | `95` | Quota % at which the status bar turns red |
+| `cursorUsage.statusBar.periodMode` | `cycle` | Whether status bar totals cover the current billing cycle or a rolling window |
+| `cursorUsage.statusBar.periodDays` | `30` | Length of that rolling window — only used when `periodMode` is `days` |
+| `cursorUsage.statusBar.costMode` | `value` | What-if token value vs. actually billed cost |
+| `cursorUsage.statusBar.quotaFormat` | `usedLimit` | Show the allowance as used/limit or as remaining |
+| `cursorUsage.statusBar.fillStyle` | `dots` | Visual fill indicator next to the figure (dots, blocks, bar, or none) |
+| `cursorUsage.statusBar.warnAtPercent` | `80` | % of the allowance at which the status bar turns yellow |
+| `cursorUsage.statusBar.criticalAtPercent` | `95` | % of the allowance at which the status bar turns red |
+
+"Allowance" means included requests on plans that have them, and your monthly budget on plans metered in dollars — the quota settings cover both.
 
 ## Authentication & privacy
 

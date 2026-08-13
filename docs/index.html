@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cursor Usage Dashboard</title>
-<meta name="description" content="Track your remaining Cursor requests and spend, right inside Cursor. Status bar quota gauge, cost dashboard, cache savings, model breakdown, cost simulator.">
+<meta name="description" content="Track your remaining Cursor requests and spend, right inside Cursor. Status bar quota gauge, monthly budget burn-rate, cost dashboard, cache savings, model breakdown, cost simulator.">
 <link rel="icon" href="../resources/icon.png">
 <style>
   :root {
@@ -181,7 +181,7 @@
   <header class="hero">
     <img class="icon" src="../resources/icon.png" alt="Cursor Usage Dashboard icon">
     <h1>Cursor Usage Dashboard</h1>
-    <p class="tagline">See exactly where your Cursor requests and tokens go — right inside Cursor. Cost dashboard, cache savings, model breakdown, and a cost simulator. No proxy, no login.</p>
+    <p class="tagline">See exactly where your Cursor requests and tokens go — right inside Cursor. Request quota, monthly budget burn-rate, cache savings, model breakdown, and a cost simulator. No proxy, no login.</p>
 
     <div class="badges">
       <img src="https://img.shields.io/open-vsx/v/iair0007/cursor-usage-dashboard?label=Open%20VSX" alt="Open VSX version">
@@ -211,13 +211,20 @@
 
   <section id="features">
     <h2>What's inside</h2>
-    <p class="lead">Four tabs, from simple to detailed.</p>
+    <p class="lead">An always-on status bar gauge and four tabs, from simple to detailed.</p>
     <div class="feature-grid">
       <div class="feature-card">
         <img src="screenshot-statusbar.png" alt="Status bar quota gauge">
         <div class="body">
           <h3>Status bar</h3>
-          <p>A live usage figure that turns yellow at 80% and red at 95% of your quota, with a burn-rate projection.</p>
+          <p>A live usage figure that turns yellow at 80% and red at 95% of your allowance — included requests, or your monthly budget.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <img src="screenshot-budget.png" alt="Budget burn-rate on the Overview tab">
+        <div class="body">
+          <h3>Budget burn-rate</h3>
+          <p>On plans metered in dollars: spend so far, your daily pace, when the budget runs out, and what still fits before the reset.</p>
         </div>
       </div>
       <div class="feature-card">

@@ -41,6 +41,9 @@ const {
   groupByDay,
   filterByRange,
   detectPlanChange,
+  comparisonWindow,
+  modelCostDeltas,
+  shiftMonths,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
 let passed = 0;
@@ -256,40 +259,79 @@ test('summarize reports the metered total separately from the old plan', () => {
   assert.ok(Math.abs(s.totalCost - (56 * 3.64 + 2.78)) < 1e-9);
 });
 
+// A migration needs a substantial block on each side (PLAN_CHANGE_MIN_EVIDENCE).
+const legacyRun = (n, day) => Array.from({ length: n }, (_, i) =>
+  normalize({ ...legacyRequest, id: `l${day}-${i}`, timestamp: Date.UTC(2026, 7, day, 9 + i) }, pricing));
+const meteredRun = (n, day) => Array.from({ length: n }, (_, i) =>
+  normalize({ ...meteredRequest, id: `m${day}-${i}`, timestamp: Date.UTC(2026, 7, day, 9 + i) }, pricing));
+
 test('detectPlanChange finds the day billing switched systems', () => {
-  const events = [
-    normalize({ ...legacyRequest, id: 'l1', timestamp: Date.UTC(2026, 7, 4, 12) }, pricing),
-    normalize({ ...legacyRequest, id: 'l2', timestamp: Date.UTC(2026, 7, 5, 12) }, pricing),
-    normalize({ ...meteredRequest, id: 'm1', timestamp: Date.UTC(2026, 7, 12, 9) }, pricing),
-    normalize({ ...meteredRequest, id: 'm2', timestamp: Date.UTC(2026, 7, 12, 10) }, pricing),
-  ];
+  const events = [...legacyRun(5, 4), ...meteredRun(5, 12)];
   const change = detectPlanChange(events);
   assert.equal(change.changedAtMs, Date.UTC(2026, 7, 12, 9), 'the first metered request');
-  assert.equal(change.legacyRequestsBefore, 2);
+  assert.equal(change.legacyRequestsBefore, 5);
   assert.equal(change.dayKey, dayKey(Date.UTC(2026, 7, 12, 9)));
   // The range must start at midnight local, or the earlier part of the
   // changeover day silently drops out of the filter.
   assert.equal(new Date(change.startOfDayMs).getHours(), 0);
 });
 test('detectPlanChange is order-independent', () => {
-  const events = [
-    normalize({ ...meteredRequest, id: 'm', timestamp: Date.UTC(2026, 7, 12, 9) }, pricing),
-    normalize({ ...legacyRequest, id: 'l', timestamp: Date.UTC(2026, 7, 4, 12) }, pricing),
-  ];
+  const events = [...meteredRun(5, 12), ...legacyRun(5, 4)];
   assert.equal(detectPlanChange(events).changedAtMs, Date.UTC(2026, 7, 12, 9));
 });
 test('no change reported when only one billing system is present', () => {
-  assert.equal(detectPlanChange([normalize(meteredRequest, pricing)]), null);
-  assert.equal(detectPlanChange([normalize(legacyRequest, pricing)]), null);
+  assert.equal(detectPlanChange(meteredRun(5, 12)), null);
+  assert.equal(detectPlanChange(legacyRun(5, 4)), null);
   assert.equal(detectPlanChange([]), null);
 });
 test('metered rows before any legacy row are not a change', () => {
   // Old rows arriving after newer ones must not invent a boundary.
+  const events = [...meteredRun(5, 4), ...legacyRun(5, 12)];
+  assert.equal(detectPlanChange(events), null);
+});
+test('interleaved regimes are a mixed account, not a migration', () => {
+  // The false positive from a live Enterprise account: every row the same
+  // "included in business" kind, some token-metered and some not, all the way
+  // through. A migration never reverts, so a per-request row after the first
+  // metered one rules one out.
   const events = [
-    normalize({ ...meteredRequest, id: 'm', timestamp: Date.UTC(2026, 7, 4) }, pricing),
-    normalize({ ...legacyRequest, id: 'l', timestamp: Date.UTC(2026, 7, 12) }, pricing),
+    ...legacyRun(6, 4),
+    ...meteredRun(6, 12),
+    ...legacyRun(2, 13), // back to per-request pricing — impossible after a switch
   ];
   assert.equal(detectPlanChange(events), null);
+});
+test('a couple of odd rows either side is not enough evidence', () => {
+  // Narrow windows ("Today") hold few rows; without a floor they manufactured a
+  // boundary, and the reported change date then moved with the date filter.
+  assert.equal(detectPlanChange([...legacyRun(2, 4), ...meteredRun(9, 12)]), null);
+  assert.equal(detectPlanChange([...legacyRun(9, 4), ...meteredRun(2, 12)]), null);
+  assert.ok(detectPlanChange([...legacyRun(5, 4), ...meteredRun(5, 12)]));
+});
+test('the boundary is the first token-metered row, not the first unpriced one', () => {
+  // A $0 included request sitting just before the real switch must not pull the
+  // reported change date a day early.
+  const included = { ...legacyRequest, chargedCents: 0 };
+  const events = [
+    ...legacyRun(6, 4),
+    normalize({ ...included, id: 'free', timestamp: Date.UTC(2026, 7, 11, 9) }, pricing),
+    ...meteredRun(6, 12),
+  ];
+  assert.equal(detectPlanChange(events).changedAtMs, Date.UTC(2026, 7, 12, 9));
+});
+test('included requests charged $0 are not "priced per request"', () => {
+  // chargedCents: 0 means nothing was charged, not that a per-request fee of
+  // zero was applied. Counting these as the old pricing system reported a plan
+  // change on an account that never had one.
+  const included = { ...legacyRequest, chargedCents: 0 };
+  const events = [
+    ...Array.from({ length: 6 }, (_, i) =>
+      normalize({ ...included, id: `i${i}`, timestamp: Date.UTC(2026, 7, 4, 9 + i) }, pricing)),
+    ...meteredRun(6, 12),
+  ];
+  assert.equal(summarize(events).legacyRequestCount, 0);
+  assert.equal(summarize(events).spansPlanChange, false);
+  assert.equal(summarize(events).hasUsageFees, false);
 });
 
 test('the metered total is identical in What-if and Billed mode', () => {
@@ -1155,6 +1197,85 @@ test('normal limit computes a percentage', () => {
 test('usage over the limit is not clamped to 100 — callers need the true % to show "limit reached"', () => {
   assert.equal(service.quotaPercentUsed({ used: 512, limit: 500 }), 102.4);
 });
+
+console.log('comparisonWindow / shiftMonths / modelCostDeltas');
+{
+  const at = (y, m, d, hh = 0, mm = 0, ss = 0, ms = 0) => new Date(y, m - 1, d, hh, mm, ss, ms).getTime();
+  const iso = (ms) => new Date(ms).toLocaleDateString('en-CA'); // YYYY-MM-DD, local
+
+  test('"previous" is the equal-length window ending the instant before the range', () => {
+    const startMs = at(2026, 8, 13);
+    const endMs = at(2026, 8, 13, 23, 59, 59, 999);
+    const w = comparisonWindow({ startMs, endMs, mode: 'previous' });
+    assert.equal(iso(w.startMs), '2026-08-12');
+    assert.equal(iso(w.endMs), '2026-08-12');
+    assert.equal(w.endMs, startMs - 1);
+  });
+
+  test('"previous" over a week lands on the seven days before it', () => {
+    const w = comparisonWindow({
+      startMs: at(2026, 8, 7),
+      endMs: at(2026, 8, 13, 23, 59, 59, 999),
+      mode: 'previous',
+    });
+    assert.equal(iso(w.startMs), '2026-07-31');
+    assert.equal(iso(w.endMs), '2026-08-06');
+  });
+
+  test('"prevMonth" keeps the calendar dates, not the length', () => {
+    const w = comparisonWindow({
+      startMs: at(2026, 3, 1),
+      endMs: at(2026, 3, 31, 23, 59, 59, 999),
+      mode: 'prevMonth',
+    });
+    assert.equal(iso(w.startMs), '2026-02-01');
+    // Clamped to the last day of February rather than rolling into March.
+    assert.equal(iso(w.endMs), '2026-02-28');
+  });
+
+  test('shiftMonths clamps the day instead of overflowing into the next month', () => {
+    assert.equal(iso(shiftMonths(at(2026, 3, 31), -1)), '2026-02-28');
+    assert.equal(iso(shiftMonths(at(2026, 5, 31), -1)), '2026-04-30');
+    assert.equal(iso(shiftMonths(at(2026, 8, 15), -1)), '2026-07-15');
+  });
+
+  test('"custom" needs both ends, and rejects a backwards range', () => {
+    const base = { startMs: at(2026, 8, 1), endMs: at(2026, 8, 13), mode: 'custom' };
+    assert.equal(comparisonWindow(base), null);
+    assert.equal(comparisonWindow({ ...base, customStartMs: at(2026, 7, 1) }), null);
+    assert.equal(
+      comparisonWindow({ ...base, customStartMs: at(2026, 7, 10), customEndMs: at(2026, 7, 1) }),
+      null,
+    );
+    const w = comparisonWindow({ ...base, customStartMs: at(2026, 7, 1), customEndMs: at(2026, 7, 10) });
+    assert.equal(iso(w.startMs), '2026-07-01');
+    assert.equal(iso(w.endMs), '2026-07-10');
+  });
+
+  test('an invalid or backwards selected range yields no baseline', () => {
+    assert.equal(comparisonWindow({ startMs: NaN, endMs: at(2026, 8, 1), mode: 'previous' }), null);
+    assert.equal(comparisonWindow({ startMs: at(2026, 8, 5), endMs: at(2026, 8, 1), mode: 'previous' }), null);
+  });
+
+  test('modelCostDeltas sorts by biggest mover, not by biggest spender', () => {
+    const rows = modelCostDeltas(
+      { sonnet: 14, haiku: 20, gpt: 3 },
+      { sonnet: 2, haiku: 19, gpt: 3 },
+    );
+    assert.equal(rows[0].model, 'sonnet'); // +12 beats haiku's larger total
+    assert.equal(rows[0].delta, 12);
+    assert.equal(rows[1].model, 'haiku');
+    assert.equal(rows[2].delta, 0);
+  });
+
+  test('modelCostDeltas keeps models that appear in only one period', () => {
+    const rows = modelCostDeltas({ opus: 5 }, { sonnet: 4 });
+    const opus = rows.find((r) => r.model === 'opus');
+    const sonnet = rows.find((r) => r.model === 'sonnet');
+    assert.deepEqual(opus, { model: 'opus', current: 5, baseline: 0, delta: 5 });
+    assert.deepEqual(sonnet, { model: 'sonnet', current: 0, baseline: 4, delta: -4 });
+  });
+}
 
 console.log('projectExhaustionDate (shared usageLogic via logic.js)');
 const DAY = 24 * 60 * 60 * 1000;

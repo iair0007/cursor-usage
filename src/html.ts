@@ -240,6 +240,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <p class="analytics-intro">Trends for your filtered period. For actionable recommendations and Cursor Chat briefs, open the <button type="button" class="btn-link-inline" id="goAnalyzeTab">Analyze</button> tab.</p>
         <p id="analyticsEmpty" class="panel analytics-empty hidden">No requests in this period, so there is nothing to chart yet. Widen the date range or clear the model filter.</p>
         <div class="analytics-stats" id="analyticsStats"></div>
+
         <article class="panel analytics-chart-main" id="analyticsChartMain">
           <h3 id="chartCostTitle">Daily token cost</h3>
           <p class="panel-desc" id="chartCostDesc">How spend changed day to day · excludes flat usage fees</p>
@@ -265,6 +266,66 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <h2>No usage data yet</h2>
         <p>Load a date range from the filters above, then return here for insights and Cursor Chat briefs.</p>
       </div>
+
+      <!--
+        Same sub-tab pattern the request log uses for its charts. Both views
+        here answer "why does my bill look like this" — findings answer it from
+        one period, the comparison answers it from two — so they belong on the
+        same tab without stacking into one very long scroll.
+      -->
+      <div class="view-toggle hidden" role="tablist" aria-label="Analyze views" id="analyzeTabs">
+        <button type="button" class="view-tab active" data-analyze-panel="findings" role="tab" aria-selected="true">Findings</button>
+        <button type="button" class="view-tab" data-analyze-panel="compare" role="tab" aria-selected="false">Compare periods</button>
+      </div>
+
+      <div id="analyzeCompare" class="hidden" role="tabpanel">
+        <!--
+          The baseline picker lives here rather than in the filter bar above.
+          The filter bar is the one answer to "what period am I looking at" on
+          every tab; a second range next to it reads as a competing filter
+          rather than as this panel's comparison. Both windows are always
+          spelled out in the column headers, so neither can be guessed at.
+        -->
+        <article class="panel compare-panel" id="comparePanel">
+          <div class="compare-head">
+            <div>
+              <h3>Compare periods</h3>
+              <p class="panel-desc">Your selected period against another, and which models moved.</p>
+            </div>
+            <div class="compare-controls">
+              <div class="date-presets" role="group" aria-label="Compare against">
+                <span class="presets-label">Against</span>
+                <button type="button" class="preset-btn compare-mode-btn active" data-compare-mode="previous">Previous period</button>
+                <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="prevMonth">Same dates last month</button>
+                <button type="button" class="preset-btn compare-mode-btn" data-compare-mode="custom">Custom</button>
+              </div>
+            </div>
+          </div>
+
+          <!--
+            Either column's dates can be edited, from its own header. A
+            comparison where only one side moves is half a control: picking
+            "this sprint vs last sprint" needs both. Editing the left column
+            detaches the comparison from the filter bar, which the panel then
+            says outright rather than leaving two periods on screen with no
+            clue which one the toolbar above is driving.
+          -->
+          <div class="compare-editor hidden" id="compareEditor">
+            <span class="compare-editor-label" id="compareEditorLabel"></span>
+            <label><span>From</span><input type="date" id="compareEditStart" /></label>
+            <label><span>To</span><input type="date" id="compareEditEnd" /></label>
+            <button type="button" class="btn primary" id="compareEditApply">Apply</button>
+            <button type="button" class="btn" id="compareEditReset">Reset</button>
+            <button type="button" class="btn" id="compareEditCancel">Cancel</button>
+          </div>
+
+          <p class="compare-status hidden" id="compareStatus"></p>
+          <div id="compareBody"></div>
+          <p class="compare-note hidden" id="compareNote"></p>
+        </article>
+
+      </div>
+
       <div id="analyzeContent" class="analyze-layout hidden">
         <div class="analyze-main">
           <header class="analyze-hero panel" id="analyzeHero"></header>

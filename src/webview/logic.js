@@ -299,8 +299,11 @@ export function summarize(events) {
   const totalSavings = events.filter((e) => e.cacheSavings != null).reduce((s, e) => s + e.cacheSavings, 0);
   const noCache = totalCost + totalSavings;
   const totalRequestFees = events.filter((e) => e.requestCharge != null).reduce((s, e) => s + e.requestCharge, 0);
-  const hasUsageFees = events.some((e) => e.requestCharge != null && e.tokenCost != null
-    && Math.abs(e.requestCharge - e.tokenCost) > 0.001);
+  // A charge of exactly $0 is an included request, not a per-request fee.
+  // Without the `> 0` an account whose rows are all "included" grew a Usage fee
+  // column of zeroes, and read as being billed per request when it wasn't.
+  const hasUsageFees = events.some((e) => e.requestCharge != null && e.requestCharge > 0
+    && e.tokenCost != null && Math.abs(e.requestCharge - e.tokenCost) > 0.001);
   const billingMode = detectBillingMode(events);
 
   // Reconciliation against cursor.com's usage page. Its "Total usage" only
@@ -308,7 +311,11 @@ export function summarize(events) {
   // the two systems side by side instead of adding them into one dollar figure
   // that matches neither page.
   const metered = events.filter((e) => e.planMeteredCost != null);
-  const legacy = events.filter((e) => e.billingRegime === 'usage');
+  // "Priced per request" means a per-request charge was actually made. Rows
+  // that were merely not token-metered — included requests, charged $0 — are
+  // not evidence of an older pricing system, and counting them as such made
+  // the dashboard report a plan change that never happened.
+  const legacy = events.filter(isPerRequestPriced);
   const meteredTotal = metered.reduce((s, e) => s + e.planMeteredCost, 0);
 
   return {
@@ -379,6 +386,27 @@ export function filterByRange(events, startMs, endMs) {
 }
 
 /**
+ * Smallest number of requests on each side before a regime split is called a
+ * plan change. Two stray rows either side of a boundary are noise; a real
+ * migration leaves a substantial block of each.
+ */
+export const PLAN_CHANGE_MIN_EVIDENCE = 5;
+
+/**
+ * True when a request was actually priced per request — the old billing system
+ * left a real fee behind.
+ *
+ * The distinction that matters: `chargedCents: 0` means nothing was charged,
+ * not that a per-request fee of zero was applied. An account whose rows are all
+ * "included" carries plenty of non-token-metered requests charged $0, and
+ * reading those as the old pricing system is what made the dashboard announce a
+ * plan change on an account that never had one.
+ */
+export function isPerRequestPriced(e) {
+  return e.billingRegime === 'usage' && (e.requestCharge ?? 0) > 0;
+}
+
+/**
  * When billing switched from per-request pricing to dollar metering, if that
  * happened inside these events.
  *
@@ -387,15 +415,36 @@ export function filterByRange(events, startMs, endMs) {
  * filter can express — a range starting mid-day would silently drop the earlier
  * part of that day.
  *
- * Null unless both systems are present: with only one, nothing changed inside
- * this window and there is no boundary to offer.
+ * Three conditions, all of them learned from a false positive on a live
+ * Enterprise account where every row was the same "included in business" kind
+ * and nothing had migrated at all:
+ *
+ * 1. Both systems must be present — with only one, nothing changed here.
+ * 2. The split must be **one-way**. A migration never goes back, so a
+ *    per-request-priced row *after* the first metered one means the two are
+ *    interleaved: this account simply meters some requests and not others.
+ *    Without this the "change" was really "the first row that happened to be
+ *    token-metered", which moved whenever the date filter moved — the same
+ *    account reported a different change date for "Today" than for a 30-day
+ *    range, which is impossible for a real migration.
+ * 3. Each side needs `PLAN_CHANGE_MIN_EVIDENCE` requests, so a narrow window
+ *    holding a couple of odd rows can't manufacture a boundary.
  */
 export function detectPlanChange(events) {
   const timed = events.filter((e) => e.timestampMs > 0).sort((a, b) => a.timestampMs - b.timestampMs);
-  const firstMetered = timed.find((e) => e.billingRegime !== 'usage');
+  // The boundary is the first genuinely token-metered row. Anchoring it on
+  // "first row not priced per request" instead let a $0 included request sitting
+  // before the real switch pull the date a day early.
+  const firstMetered = timed.find((e) => e.billingRegime === 'token');
   if (!firstMetered) return null;
-  const legacyBefore = timed.filter((e) => e.billingRegime === 'usage' && e.timestampMs < firstMetered.timestampMs);
+  const legacyBefore = timed.filter((e) => isPerRequestPriced(e) && e.timestampMs < firstMetered.timestampMs);
   if (!legacyBefore.length) return null;
+
+  const legacyAfter = timed.filter((e) => isPerRequestPriced(e) && e.timestampMs >= firstMetered.timestampMs);
+  if (legacyAfter.length) return null;
+
+  const meteredAfter = timed.filter((e) => e.billingRegime === 'token').length;
+  if (legacyBefore.length < PLAN_CHANGE_MIN_EVIDENCE || meteredAfter < PLAN_CHANGE_MIN_EVIDENCE) return null;
 
   const day = new Date(firstMetered.timestampMs);
   day.setHours(0, 0, 0, 0);

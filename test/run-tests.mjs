@@ -259,40 +259,79 @@ test('summarize reports the metered total separately from the old plan', () => {
   assert.ok(Math.abs(s.totalCost - (56 * 3.64 + 2.78)) < 1e-9);
 });
 
+// A migration needs a substantial block on each side (PLAN_CHANGE_MIN_EVIDENCE).
+const legacyRun = (n, day) => Array.from({ length: n }, (_, i) =>
+  normalize({ ...legacyRequest, id: `l${day}-${i}`, timestamp: Date.UTC(2026, 7, day, 9 + i) }, pricing));
+const meteredRun = (n, day) => Array.from({ length: n }, (_, i) =>
+  normalize({ ...meteredRequest, id: `m${day}-${i}`, timestamp: Date.UTC(2026, 7, day, 9 + i) }, pricing));
+
 test('detectPlanChange finds the day billing switched systems', () => {
-  const events = [
-    normalize({ ...legacyRequest, id: 'l1', timestamp: Date.UTC(2026, 7, 4, 12) }, pricing),
-    normalize({ ...legacyRequest, id: 'l2', timestamp: Date.UTC(2026, 7, 5, 12) }, pricing),
-    normalize({ ...meteredRequest, id: 'm1', timestamp: Date.UTC(2026, 7, 12, 9) }, pricing),
-    normalize({ ...meteredRequest, id: 'm2', timestamp: Date.UTC(2026, 7, 12, 10) }, pricing),
-  ];
+  const events = [...legacyRun(5, 4), ...meteredRun(5, 12)];
   const change = detectPlanChange(events);
   assert.equal(change.changedAtMs, Date.UTC(2026, 7, 12, 9), 'the first metered request');
-  assert.equal(change.legacyRequestsBefore, 2);
+  assert.equal(change.legacyRequestsBefore, 5);
   assert.equal(change.dayKey, dayKey(Date.UTC(2026, 7, 12, 9)));
   // The range must start at midnight local, or the earlier part of the
   // changeover day silently drops out of the filter.
   assert.equal(new Date(change.startOfDayMs).getHours(), 0);
 });
 test('detectPlanChange is order-independent', () => {
-  const events = [
-    normalize({ ...meteredRequest, id: 'm', timestamp: Date.UTC(2026, 7, 12, 9) }, pricing),
-    normalize({ ...legacyRequest, id: 'l', timestamp: Date.UTC(2026, 7, 4, 12) }, pricing),
-  ];
+  const events = [...meteredRun(5, 12), ...legacyRun(5, 4)];
   assert.equal(detectPlanChange(events).changedAtMs, Date.UTC(2026, 7, 12, 9));
 });
 test('no change reported when only one billing system is present', () => {
-  assert.equal(detectPlanChange([normalize(meteredRequest, pricing)]), null);
-  assert.equal(detectPlanChange([normalize(legacyRequest, pricing)]), null);
+  assert.equal(detectPlanChange(meteredRun(5, 12)), null);
+  assert.equal(detectPlanChange(legacyRun(5, 4)), null);
   assert.equal(detectPlanChange([]), null);
 });
 test('metered rows before any legacy row are not a change', () => {
   // Old rows arriving after newer ones must not invent a boundary.
+  const events = [...meteredRun(5, 4), ...legacyRun(5, 12)];
+  assert.equal(detectPlanChange(events), null);
+});
+test('interleaved regimes are a mixed account, not a migration', () => {
+  // The false positive from a live Enterprise account: every row the same
+  // "included in business" kind, some token-metered and some not, all the way
+  // through. A migration never reverts, so a per-request row after the first
+  // metered one rules one out.
   const events = [
-    normalize({ ...meteredRequest, id: 'm', timestamp: Date.UTC(2026, 7, 4) }, pricing),
-    normalize({ ...legacyRequest, id: 'l', timestamp: Date.UTC(2026, 7, 12) }, pricing),
+    ...legacyRun(6, 4),
+    ...meteredRun(6, 12),
+    ...legacyRun(2, 13), // back to per-request pricing — impossible after a switch
   ];
   assert.equal(detectPlanChange(events), null);
+});
+test('a couple of odd rows either side is not enough evidence', () => {
+  // Narrow windows ("Today") hold few rows; without a floor they manufactured a
+  // boundary, and the reported change date then moved with the date filter.
+  assert.equal(detectPlanChange([...legacyRun(2, 4), ...meteredRun(9, 12)]), null);
+  assert.equal(detectPlanChange([...legacyRun(9, 4), ...meteredRun(2, 12)]), null);
+  assert.ok(detectPlanChange([...legacyRun(5, 4), ...meteredRun(5, 12)]));
+});
+test('the boundary is the first token-metered row, not the first unpriced one', () => {
+  // A $0 included request sitting just before the real switch must not pull the
+  // reported change date a day early.
+  const included = { ...legacyRequest, chargedCents: 0 };
+  const events = [
+    ...legacyRun(6, 4),
+    normalize({ ...included, id: 'free', timestamp: Date.UTC(2026, 7, 11, 9) }, pricing),
+    ...meteredRun(6, 12),
+  ];
+  assert.equal(detectPlanChange(events).changedAtMs, Date.UTC(2026, 7, 12, 9));
+});
+test('included requests charged $0 are not "priced per request"', () => {
+  // chargedCents: 0 means nothing was charged, not that a per-request fee of
+  // zero was applied. Counting these as the old pricing system reported a plan
+  // change on an account that never had one.
+  const included = { ...legacyRequest, chargedCents: 0 };
+  const events = [
+    ...Array.from({ length: 6 }, (_, i) =>
+      normalize({ ...included, id: `i${i}`, timestamp: Date.UTC(2026, 7, 4, 9 + i) }, pricing)),
+    ...meteredRun(6, 12),
+  ];
+  assert.equal(summarize(events).legacyRequestCount, 0);
+  assert.equal(summarize(events).spansPlanChange, false);
+  assert.equal(summarize(events).hasUsageFees, false);
 });
 
 test('the metered total is identical in What-if and Billed mode', () => {

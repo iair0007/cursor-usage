@@ -5,6 +5,24 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## Unreleased
 
+- **Fixed a plan change being reported on accounts that never had one.** A
+  request that simply wasn't token-metered — an included request charged $0 —
+  was read as "priced per request under your previous plan". On an account
+  where every row is the same "included in business" kind, that invented a
+  billing migration, added a Usage fee column of zeroes, and hijacked the date
+  range on first open.
+- The detected change date no longer moves with the date filter. It used to be
+  "the first token-metered row in whatever range is loaded", so the same
+  account reported a different change date for "Today" than for 30 days — the
+  date filter was reporting on itself. A change now needs a one-way split (no
+  per-request charges after it, since a migration never reverts) and a
+  substantial block of requests either side.
+- A boundary stored by an earlier session is dropped when a fresh look no
+  longer finds it, instead of leaving a "Current plan" range built on a date
+  the account shows no evidence for.
+- Both plan-change notices are now warnings. The automatic one was a blue
+  "info" sitting beside an amber warning about the same condition.
+
 - **Compare periods**, a new sub-tab on Analyze. Your selected range next to
   another one — cost, requests, avg per request, avg per day and cache savings
   — plus a model-by-model breakdown of what actually moved, sorted by biggest

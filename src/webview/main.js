@@ -19,6 +19,7 @@ import {
   comparisonWindow,
   detectBillingMode,
   detectPlanChange,
+  isPerRequestPriced,
   modelCostDeltas,
   percentile,
   projectExhaustionDate,
@@ -367,6 +368,14 @@ function applyPlanChangeDiscovery() {
       endDate: $('endDate').value,
       planChangeDay: change.dayKey,
     });
+  } else if (state.planChangeDay && state.datePreset !== 'plan') {
+    // A boundary stored by an earlier session that a wider, stricter look no
+    // longer finds. Forget it rather than keeping a "Current plan" range built
+    // on a date this account can no longer show any evidence for. Skipped while
+    // that range is the one selected, since it holds only post-boundary rows
+    // and so can never contain the proof.
+    state.planChangeDay = null;
+    savePrefs({ planChangeDay: null });
   }
   $('planPresetBtn')?.classList.toggle('hidden', !state.planChangeDay);
   if (!change || state.planChangeAnnounced || state.datePreset === 'plan') return false;
@@ -399,9 +408,16 @@ function applyPlanChangeDiscovery() {
  * wholly on one side, where the totals are internally consistent.
  */
 function planChangeSpanNote() {
-  const legacy = state.all.filter((e) => e.billingRegime === 'usage').length;
+  // Only rows that carry an actual per-request charge count as the old system.
+  // A row that merely wasn't token-metered — an included request charged $0 —
+  // is not evidence of anything, and treating it as such warned about a plan
+  // change on accounts that never had one.
+  const legacy = state.all.filter(isPerRequestPriced).length;
   const metered = state.all.length - legacy;
   if (!legacy || !metered) return '';
+  // The same one-way test detectPlanChange applies: interleaved regimes mean
+  // this account meters some requests and not others, not that it migrated.
+  if (!state.planChangeDay) return '';
   const changed = state.planChangeDay ? ` on ${fmt.shortDate(state.planChangeDay)}` : '';
   return ` This range spans your plan's billing change${changed}: ${fmt.num(legacy)} of these requests`
     + ` were priced per request and ${fmt.num(metered)} by token cost, so the totals below add up two`
@@ -1934,7 +1950,11 @@ async function load() {
     // totals silently mix two pricing systems (the "Month to date" case).
     const spanNote = notice ? '' : planChangeSpanNote();
     showAlert(
-      spanNote ? 'warn' : 'info',
+      // Both notices say the same thing — some of these dollars come from a
+      // different pricing system — so they carry the same weight. The
+      // auto-switch one used to be a blue "info" beside an amber warning about
+      // the very same condition.
+      spanNote || notice ? 'warn' : 'info',
       `${notice}${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${spanNote}${fallbackNote}`,
     );
     // refresh() already re-renders the overview and analyze views.

@@ -28,6 +28,9 @@ async function loadTs(entry, outName) {
 const {
   parsePricing,
   matchPricing,
+  normModel,
+  simulatorModels,
+  defaultCompareSelection,
   estimateTokenCost,
   cacheSavingsFor,
   displayModel,
@@ -115,6 +118,63 @@ test('alias and partial matching', () => {
 });
 test('unknown model returns null', () => {
   assert.equal(matchPricing('mystery-model-9000', pricing), null);
+});
+
+console.log('simulatorModels');
+test('lists Auto plus every priced catalog model', () => {
+  const keys = simulatorModels(pricing, []).map((m) => m.key);
+  assert.equal(keys[0], 'default');
+  assert.ok(keys.includes('claude-4-5-sonnet'));
+  assert.ok(keys.includes('composer-2-5'));
+});
+test('adds models seen in usage that the pricing table does not name', () => {
+  const events = [{ modelRaw: 'cursor-grok-4.6-high' }, { modelRaw: 'cursor-grok-4.6-high' }];
+  const models = simulatorModels(pricing, events);
+  const grok = models.find((m) => m.key === 'cursor-grok-4.6-high');
+  assert.ok(grok, 'model from usage data must be offered');
+  assert.equal(grok.source, 'usage');
+  // Fixture pricing has no grok row, so there is nothing to price it with —
+  // it is still listed, just flagged.
+  assert.equal(grok.priced, false);
+  assert.equal(grok.rates, null);
+});
+test('a usage model the table does name is priced off the closest row', () => {
+  const models = simulatorModels(pricing, [{ modelRaw: 'claude-4-5-sonnet-thinking' }]);
+  const variant = models.find((m) => m.key === 'claude-4-5-sonnet-thinking');
+  assert.equal(variant.priced, true);
+  assert.equal(variant.rates.label, 'Claude 4.5 Sonnet');
+});
+test('usage models already in the catalog are not duplicated', () => {
+  const models = simulatorModels(pricing, [{ modelRaw: 'GPT-5.2' }, { modelRaw: 'gpt-5-2' }]);
+  assert.equal(models.filter((m) => normModel(m.key) === 'gpt-5-2').length, 1);
+});
+test('Auto is never added twice from its raw forms', () => {
+  const models = simulatorModels(pricing, [{ modelRaw: 'default' }, { modelRaw: 'cursor-auto' }]);
+  assert.equal(models.filter((m) => m.label === 'Auto').length, 1);
+  assert.ok(!models.some((m) => m.key === 'cursor-auto'));
+});
+
+console.log('defaultCompareSelection');
+test('pre-checks the models this user actually runs, most-used first', () => {
+  const models = simulatorModels(pricing, []);
+  const events = [
+    ...Array(5).fill({ modelRaw: 'composer-2.5' }),
+    ...Array(3).fill({ modelRaw: 'claude-4.5-haiku' }),
+    { modelRaw: 'gpt-5.2' },
+  ];
+  const picked = defaultCompareSelection(models, events, 2);
+  assert.deepEqual([...picked], ['composer-2-5', 'claude-4-5-haiku']);
+});
+test('falls back to the head of the list when usage is too thin to rank', () => {
+  const models = simulatorModels(pricing, []);
+  const picked = defaultCompareSelection(models, [{ modelRaw: 'gpt-5.2' }], 3);
+  assert.deepEqual([...picked], models.slice(0, 3).map((m) => m.key));
+});
+test('never defaults to a model it cannot price', () => {
+  const events = [...Array(9).fill({ modelRaw: 'cursor-grok-4.6-high' }), { modelRaw: 'gpt-5.2' }];
+  const models = simulatorModels(pricing, events);
+  const picked = defaultCompareSelection(models, events, 4);
+  assert.ok(!picked.has('cursor-grok-4.6-high'));
 });
 
 console.log('cost math');

@@ -820,6 +820,7 @@ tfoot td {
 }
 .sim-picker-item:hover { background: var(--hover); }
 .sim-picker-empty { color: var(--muted); font-size: 12px; margin: 6px 4px; }
+.sim-picker-note { color: var(--muted); font-size: 10px; }
 .sim-picker-footer {
   display: flex;
   align-items: center;
@@ -843,6 +844,11 @@ tfoot td {
   padding: 1px 8px;
   margin-left: 6px;
   vertical-align: middle;
+}
+.sim-tag-muted {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
 }
 .row-cheaper td { background: color-mix(in srgb, var(--green-strong) 7%, transparent); }
 .row-pricier td { background: color-mix(in srgb, var(--amber) 7%, transparent); }

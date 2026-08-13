@@ -323,6 +323,8 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             Uses this request's <strong>actual token counts</strong> with each model's published rates.
             A different model would likely change output length and cache behavior — treat this as a directional estimate, not an exact quote.
             <span class="tip" tabindex="0" data-tip="Token replay: industry-standard what-if pricing. Same input/output/cache tokens, different model rates. Does not re-run the prompt.">ⓘ</span>
+            Reasoning effort, context size, and Fast mode are not modelled: each model is priced from the single rate row Cursor publishes for it.
+            <span class="tip" tabindex="0" data-tip="Reasoning effort changes how many output tokens a request generates rather than the per-token rate, so it cannot be predicted from a replay. Long-context and Fast tiers are billed separately by Cursor and are not broken out on the public pricing table this panel reads.">ⓘ</span>
           </div>
           <label class="sim-full-width">
             <span>Select request <span class="tip" tabindex="0" data-tip="Pick a past request from your filtered usage data. Click Compare on any row in the request log to jump here with that request selected.">ⓘ</span></span>

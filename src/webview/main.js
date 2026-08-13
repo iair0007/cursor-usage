@@ -113,6 +113,8 @@ const state = {
   page: 1,
   pageSize: 25,
   panel: 'requests',
+  /** Analyze tab sub-view: 'findings' | 'compare'. */
+  analyzePanel: 'findings',
   appView: 'overview',
   simMode: 'request',
   simRequestId: null,
@@ -333,8 +335,8 @@ function renderPlanCycle(quota, hardLimit) {
     const notes = [];
     if (quota) {
       notes.push(
-        'No fixed request quota found for this plan — usage like Auto is metered by token cost '
-        + '(see the cards below), not a request count. This is expected for most current plans, not a bug.',
+        'This plan meters usage by token cost rather than by a request count, '
+        + 'so there is no quota to fill — the cards below are the figures to watch.',
       );
     }
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
@@ -375,11 +377,35 @@ function applyPlanChangeDiscovery() {
   applyDateRange(range.start, range.end, 'plan');
   // Queued rather than shown: the reload below ends with its own banner, which
   // would replace this one immediately.
-  state.pendingNotice = `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}. `
-    + `Showing usage since then — the ${fmt.num(change.legacyRequestsBefore)} earlier request${change.legacyRequestsBefore === 1 ? '' : 's'} in the range you picked were priced per request, so their dollars aren't comparable. `
-    + 'Pick another period to include them.';
+  //
+  // Written from where the user now is, not from where they were. By the time
+  // this appears the range has already been switched to "Current plan", so
+  // "the range you picked" named something no longer on screen and "pick
+  // another period" read as an instruction rather than an option.
+  const earlier = `${fmt.num(change.legacyRequestsBefore)} request${change.legacyRequestsBefore === 1 ? '' : 's'}`;
+  state.pendingNotice = `Your plan's billing changed on ${fmt.shortDate(change.dayKey)}, so this switched to the "Current plan" period. `
+    + `The ${earlier} before that date were priced per request, and mixing those dollars with today's would give a total that matches neither. `
+    + 'Pick any other period to see them.';
   void load();
   return true;
+}
+
+/**
+ * Warning for a loaded range that straddles the plan's billing change.
+ *
+ * Keyed on the events actually loaded rather than on the dates, so it fires for
+ * any range holding both kinds of request — a preset, a custom range, or a
+ * saved one restored on startup — and stays silent for a range that sits
+ * wholly on one side, where the totals are internally consistent.
+ */
+function planChangeSpanNote() {
+  const legacy = state.all.filter((e) => e.billingRegime === 'usage').length;
+  const metered = state.all.length - legacy;
+  if (!legacy || !metered) return '';
+  const changed = state.planChangeDay ? ` on ${fmt.shortDate(state.planChangeDay)}` : '';
+  return ` This range spans your plan's billing change${changed}: ${fmt.num(legacy)} of these requests`
+    + ` were priced per request and ${fmt.num(metered)} by token cost, so the totals below add up two`
+    + ' pricing systems. Use "Current plan" for figures comparable with cursor.com.';
 }
 
 /** The budget projection, or null when no budget is known (nothing to project against). */
@@ -618,6 +644,13 @@ function savePrefs(prefs) {
 // or applying a date preset silently clears the What-if/Billed highlight (and
 // clicking What-if/Billed fires the period handler with an undefined preset).
 const PRESET_BTN_SELECTOR = '.preset-btn[data-preset]';
+
+// The Requests and Analyze tab strips share .view-tab for styling only. Each
+// carries its own data attribute, and both selectors must stay scoped to it:
+// an unscoped '.view-tab' matched the other strip's buttons, and
+// setPanel(undefined) lit every tab whose data-panel was also undefined.
+const VIEW_TAB_SELECTOR = '.view-tab[data-panel]';
+const ANALYZE_TAB_SELECTOR = '.view-tab[data-analyze-panel]';
 
 const PRESET_LABELS = {
   today: 'Today',
@@ -1153,9 +1186,6 @@ function renderCharts(events) {
   ['analyticsStats', 'analyticsChartMain', 'analyticsChartRow'].forEach((id) => {
     $(id)?.classList.toggle('hidden', !hasData);
   });
-  // The comparison stays up even with nothing in this period: "0 requests here
-  // against 120 last week" is a finding, not an empty state.
-  renderComparison();
   if (!hasData) return;
 
   const summary = summarize(events);
@@ -1502,7 +1532,7 @@ function renderTable(events, summary) {
 
 function setPanel(panel) {
   state.panel = panel;
-  document.querySelectorAll('.view-tab').forEach((tab) => {
+  document.querySelectorAll(VIEW_TAB_SELECTOR).forEach((tab) => {
     const active = tab.dataset.panel === panel;
     tab.classList.toggle('active', active);
     tab.setAttribute('aria-selected', active ? 'true' : 'false');
@@ -1513,10 +1543,20 @@ function setPanel(panel) {
   // Rendered even with nothing loaded — renderCharts() puts up its own empty
   // note, and skipping it here used to leave the previous range's charts (or a
   // blank grid) on screen after switching tabs.
-  if (panel === 'analytics') {
-    renderCharts(state.filtered);
-    if (state.filtered.length) void loadTrendComparison();
-  }
+  if (panel === 'analytics') renderCharts(state.filtered);
+}
+
+/** Findings vs. period comparison, the two views on the Analyze tab. */
+function setAnalyzePanel(panel) {
+  state.analyzePanel = panel;
+  document.querySelectorAll(ANALYZE_TAB_SELECTOR).forEach((tab) => {
+    const active = tab.dataset.analyzePanel === panel;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  // One place decides which of the three boxes (empty note, findings,
+  // comparison) is visible, so a sub-tab switch can't leave two of them up.
+  renderAnalyze();
 }
 
 /** The baseline window for the current selection, or null if it can't be resolved. */
@@ -1590,7 +1630,7 @@ async function loadTrendComparison() {
   if (state.panel === 'analytics' && state.appView === 'usage') {
     renderAnalyticsStats(state.filtered, summarize(state.filtered), state.trend.previous);
   }
-  renderComparison();
+  if (state.appView === 'analyze') renderComparison();
   if (state.appView === 'overview') {
     // Rebuilt through the same helper renderOverview() uses: writing the badge
     // on its own here dropped the plan-change reconciliation note that shares
@@ -1888,7 +1928,15 @@ async function load() {
     const loadedLabel = countedAll < state.all.length
       ? `Loaded ${plural(countedAll, 'request')} (${plural(state.all.length, 'event')} incl. errored/aborted)`
       : `Loaded ${plural(state.all.length, 'request')}`;
-    showAlert('info', `${takePendingNotice()}${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${fallbackNote}`);
+    const notice = takePendingNotice();
+    // The one-time auto-switch notice announces the change on its own; every
+    // other visit to a range that straddles it needs the same warning, or the
+    // totals silently mix two pricing systems (the "Month to date" case).
+    const spanNote = notice ? '' : planChangeSpanNote();
+    showAlert(
+      spanNote ? 'warn' : 'info',
+      `${notice}${loadedLabel}${usage.email ? ` for ${usage.email}` : ''}${planLabel() ? ` (${planLabel()})` : ''}.${spanNote}${fallbackNote}`,
+    );
     // refresh() already re-renders the overview and analyze views.
     render();
     if (state.appView === 'simulator') refreshSimulator();
@@ -2437,14 +2485,22 @@ function renderAnalyze() {
   const content = $('analyzeContent');
   if (!empty || !content) return;
 
-  if (!state.filtered.length) {
-    empty.classList.remove('hidden');
-    content.classList.add('hidden');
+  // The comparison is worth showing with an empty period — "0 requests here
+  // against 120 last week" is a finding — so only the findings view collapses
+  // into the empty state, and the sub-tabs stay available either way.
+  const hasData = state.filtered.length > 0;
+  const onCompare = state.analyzePanel === 'compare';
+  $('analyzeTabs')?.classList.toggle('hidden', !state.loaded);
+  empty.classList.toggle('hidden', hasData || onCompare);
+  $('analyzeCompare')?.classList.toggle('hidden', !onCompare);
+  content.classList.toggle('hidden', !hasData || onCompare);
+
+  if (onCompare) {
+    renderComparison();
+    void loadTrendComparison();
     return;
   }
-
-  empty.classList.add('hidden');
-  content.classList.remove('hidden');
+  if (!hasData) return;
 
   initAnalyzeSidebar();
   const summary = summarize(state.filtered);
@@ -2973,6 +3029,10 @@ async function init() {
     btn.addEventListener('click', () => onPresetClick(btn.dataset.preset));
   });
 
+  document.querySelectorAll(ANALYZE_TAB_SELECTOR).forEach((tab) => {
+    tab.addEventListener('click', () => setAnalyzePanel(tab.dataset.analyzePanel));
+  });
+
   document.querySelectorAll('.compare-mode-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (state.trend.mode === btn.dataset.compareMode) return;
@@ -3021,7 +3081,7 @@ async function init() {
   $('prevPage').addEventListener('click', () => { state.page -= 1; refresh(); });
   $('nextPage').addEventListener('click', () => { state.page += 1; refresh(); });
 
-  document.querySelectorAll('.view-tab').forEach((tab) => {
+  document.querySelectorAll(VIEW_TAB_SELECTOR).forEach((tab) => {
     tab.addEventListener('click', () => setPanel(tab.dataset.panel));
   });
 

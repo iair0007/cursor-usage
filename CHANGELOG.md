@@ -5,10 +5,19 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## Unreleased
 
-- **Compare periods** on the Analytics tab. Your selected range next to another
-  one — cost, requests, avg per request, avg per day and cache savings — plus a
-  model-by-model breakdown of what actually moved, sorted by biggest change
-  rather than biggest total.
+- **Compare periods**, a new sub-tab on Analyze. Your selected range next to
+  another one — cost, requests, avg per request, avg per day and cache savings
+  — plus a model-by-model breakdown of what actually moved, sorted by biggest
+  change rather than biggest total.
+- Analyze is now split into **Findings** and **Compare periods** sub-tabs, the
+  same pattern the request log uses for its charts.
+- A range that straddles a plan's billing change now says so every time it is
+  loaded, not only on the one automatic switch. Previously "Month to date"
+  quietly totalled two pricing systems together.
+- The automatic switch to the "Current plan" range now describes the switch it
+  made, instead of referring to a range it had already replaced.
+- Dropped the defensive "this is expected, not a bug" from the no-request-quota
+  note.
 - Choose the baseline: the previous equal-length period, the same dates last
   month, or a custom window. The choice is remembered between sessions.
 - The panel names both windows in its column headers, and says so when the two

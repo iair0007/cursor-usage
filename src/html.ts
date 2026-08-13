@@ -241,6 +241,44 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <p id="analyticsEmpty" class="panel analytics-empty hidden">No requests in this period, so there is nothing to chart yet. Widen the date range or clear the model filter.</p>
         <div class="analytics-stats" id="analyticsStats"></div>
 
+        <article class="panel analytics-chart-main" id="analyticsChartMain">
+          <h3 id="chartCostTitle">Daily token cost</h3>
+          <p class="panel-desc" id="chartCostDesc">How spend changed day to day · excludes flat usage fees</p>
+          <div class="chart-box chart-box-lg"><canvas id="chartCost"></canvas></div>
+        </article>
+        <div class="analytics-chart-row" id="analyticsChartRow">
+          <article class="panel">
+            <h3>Cost by model</h3>
+            <p class="panel-desc" id="chartModelsDesc">Top models by token/API spend</p>
+            <div class="chart-box"><canvas id="chartModels"></canvas></div>
+          </article>
+          <article class="panel">
+            <h3>Token volume</h3>
+            <p class="panel-desc">Input, output, and cache tokens · log scale when cache dominates</p>
+            <div class="chart-box"><canvas id="chartTokens"></canvas></div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <section id="analyzeView" class="hidden">
+      <div id="analyzeEmpty" class="analyze-empty panel hidden">
+        <h2>No usage data yet</h2>
+        <p>Load a date range from the filters above, then return here for insights and Cursor Chat briefs.</p>
+      </div>
+
+      <!--
+        Same sub-tab pattern the request log uses for its charts. Both views
+        here answer "why does my bill look like this" — findings answer it from
+        one period, the comparison answers it from two — so they belong on the
+        same tab without stacking into one very long scroll.
+      -->
+      <div class="view-toggle hidden" role="tablist" aria-label="Analyze views" id="analyzeTabs">
+        <button type="button" class="view-tab active" data-analyze-panel="findings" role="tab" aria-selected="true">Findings</button>
+        <button type="button" class="view-tab" data-analyze-panel="compare" role="tab" aria-selected="false">Compare periods</button>
+      </div>
+
+      <div id="analyzeCompare" class="hidden" role="tabpanel">
         <!--
           The baseline picker lives here rather than in the filter bar above.
           The filter bar is the one answer to "what period am I looking at" on
@@ -272,31 +310,8 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
           <p class="compare-note hidden" id="compareNote"></p>
         </article>
 
-        <article class="panel analytics-chart-main" id="analyticsChartMain">
-          <h3 id="chartCostTitle">Daily token cost</h3>
-          <p class="panel-desc" id="chartCostDesc">How spend changed day to day · excludes flat usage fees</p>
-          <div class="chart-box chart-box-lg"><canvas id="chartCost"></canvas></div>
-        </article>
-        <div class="analytics-chart-row" id="analyticsChartRow">
-          <article class="panel">
-            <h3>Cost by model</h3>
-            <p class="panel-desc" id="chartModelsDesc">Top models by token/API spend</p>
-            <div class="chart-box"><canvas id="chartModels"></canvas></div>
-          </article>
-          <article class="panel">
-            <h3>Token volume</h3>
-            <p class="panel-desc">Input, output, and cache tokens · log scale when cache dominates</p>
-            <div class="chart-box"><canvas id="chartTokens"></canvas></div>
-          </article>
-        </div>
-      </section>
-    </main>
-
-    <section id="analyzeView" class="hidden">
-      <div id="analyzeEmpty" class="analyze-empty panel hidden">
-        <h2>No usage data yet</h2>
-        <p>Load a date range from the filters above, then return here for insights and Cursor Chat briefs.</p>
       </div>
+
       <div id="analyzeContent" class="analyze-layout hidden">
         <div class="analyze-main">
           <header class="analyze-hero panel" id="analyzeHero"></header>

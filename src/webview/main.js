@@ -864,8 +864,14 @@ function discountBadge(discount, extraClass = '') {
 function rangeDiscountBadge(modelRaw) {
   const days = detectedDiscountDays(state.detectedDiscounts, modelRaw);
   if (days.length) {
-    const byDay = state.detectedDiscounts.discounts[normModel(modelRaw)];
-    const top = Math.max(...days.map((d) => byDay[d].pct));
+    // Resolved per day rather than read straight out of the map: a day can be
+    // on this list because a billed variant of the same published row carried
+    // the promotion, and that entry is filed under the variant's name.
+    const pcts = days
+      .map((d) => resolveDiscount(modelRaw, d, { detected: state.detectedDiscounts, manual: [] })?.pct)
+      .filter((p) => p != null);
+    if (!pcts.length) return '';
+    const top = Math.max(...pcts);
     const span = days.length === 1 ? fmt.shortDate(days[0]) : `${days.length} days`;
     return ` <span class="discount-tag" title="${esc(DISCOUNT_TIPS.detected)}">−${fmt.discountPct(top)} vs list on ${esc(span)}</span>`;
   }

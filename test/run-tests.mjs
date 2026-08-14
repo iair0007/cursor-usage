@@ -449,6 +449,26 @@ test('the measured figure wins over anything the rate table would have said', ()
   const e = { ...exactEvent(0, 0.86, 0.39), inputTokens: 999_999, outputTokens: 999_999 };
   assert.equal(detectDiscounts([e], pricing).discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 55);
 });
+test('a promotion found on a billed variant reaches the catalog row', () => {
+  // Detection keys on what Cursor billed ("cursor-grok-4.6-high"); the
+  // Simulator asks by catalog row ("Grok 4.6"). Same model, one published
+  // rate — so the discount showed in the chips and on the request's own row,
+  // and was missing from the estimate for the very model it was found on.
+  const detected = detectDiscounts([exactEvent(0, 0.86, 0.39)], pricing);
+  assert.equal(detected.discounts['cursor-grok-4-6-high']['2026-08-13'].row, 'grok-4-6');
+  const ctx = { detected, manual: [] };
+  assert.equal(resolveDiscount('grok-4-6', '2026-08-13', ctx).pct, 55);
+  assert.equal(resolveDiscount('Grok 4.6', '2026-08-13', ctx).pct, 55);
+  assert.deepEqual(detectedDiscountDays(detected, 'grok-4-6'), ['2026-08-13']);
+});
+test('a variant on a different published row does not borrow the discount', () => {
+  // Fast is its own row at its own rate; a promotion on the standard model is
+  // not evidence of one on Fast.
+  const detected = detectDiscounts([exactEvent(0, 0.86, 0.39)], pricing);
+  const ctx = { detected, manual: [] };
+  assert.equal(resolveDiscount('grok-4-6-fast', '2026-08-13', ctx), null);
+  assert.deepEqual(detectedDiscountDays(detected, 'grok-4-6-fast'), []);
+});
 test('diagnostics name the reason a request could not be measured', () => {
   const noValue = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelTokenCost: null }));
   const { diagnostics } = detectDiscounts(noValue, pricing);

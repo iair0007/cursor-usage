@@ -87,6 +87,15 @@ All notable user-facing changes. Earlier releases predate this file; see the
   at Auto's rate purely because the word "auto" appeared in it, with the real
   model listed a few rows down. Rows are matched word-wise now, most specific
   first, and Auto is the last resort rather than the first.
+- **Fixed a discount being missing from the estimates for the model it was
+  found on.** Detection keys on the name Cursor bills under
+  ("cursor-grok-4.6-high"), while the Simulator asks by catalog row ("Grok
+  4.6") — the same model at a different reasoning effort, on one published
+  rate. The promotion showed in the chips and on its own request's row, and
+  every "what would this have cost on Grok 4.6" estimate below it was still
+  priced at full price, with the asterisk saying so. Detected discounts now
+  carry the published row they belong to and resolve through it. A variant on a
+  genuinely different row — Fast, at its own rate — still doesn't borrow it.
 - **A measured discount no longer needs three requests to confirm it.** The
   three-request rule guarded against a noisy *estimate*; where both figures come
   from Cursor there is no estimate, only the half-cent each was rounded to. One

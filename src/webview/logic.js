@@ -668,6 +668,13 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       measured: wasMeasured,
       samples: ratios.length,
       label,
+      // The published row these requests price against. Detection keys on the
+      // billed variant ("cursor-grok-4-6-high"), but the Simulator asks by
+      // catalog row ("grok-4-6") — the same model at a different reasoning
+      // effort, on one published rate. Without this the promotion showed in the
+      // chips and on the request's own row, and was missing from every
+      // estimate for the very model it was found on.
+      row: label ? normModel(label) : null,
     };
   }
 
@@ -775,9 +782,29 @@ export function manualDiscountFor(entries, modelRaw, day) {
  * of an announcement. Manual entries therefore fill the gap for models with no
  * usage to measure, rather than overriding the evidence.
  */
+/**
+ * Detected entries for a model on a day: the one stored under its own name,
+ * plus any stored under a billed variant that prices against the same row.
+ */
+function detectedEntriesFor(detected, modelRaw, day) {
+  const n = normModel(modelRaw);
+  const out = [];
+  const own = detected?.discounts?.[n]?.[day];
+  if (own) out.push(own);
+  for (const [key, byDay] of Object.entries(detected?.discounts || {})) {
+    if (key === n) continue;
+    const hit = byDay?.[day];
+    if (hit?.row && hit.row === n) out.push(hit);
+  }
+  return out;
+}
+
 export function resolveDiscount(modelRaw, day, { detected, manual } = {}) {
   const n = normModel(modelRaw);
-  const det = detected?.discounts?.[n]?.[day];
+  // Most evidence wins, then the larger figure, so the answer does not depend
+  // on object key order when two variants of a model both saw the promotion.
+  const [det] = detectedEntriesFor(detected, modelRaw, day)
+    .sort((a, b) => (b.samples - a.samples) || (b.pct - a.pct));
   if (det) return { pct: det.pct, source: 'detected', samples: det.samples, measured: det.measured };
   const entry = manualDiscountFor(manual, modelRaw, day);
   if (entry) return { pct: entry.pct, source: 'manual', entryId: entry.id };
@@ -786,8 +813,16 @@ export function resolveDiscount(modelRaw, day, { detected, manual } = {}) {
 
 /** Any day in the loaded range on which this model was detected as discounted. */
 export function detectedDiscountDays(detected, modelRaw) {
-  const byDay = detected?.discounts?.[normModel(modelRaw)];
-  return byDay ? Object.keys(byDay).sort() : [];
+  const n = normModel(modelRaw);
+  const days = new Set(Object.keys(detected?.discounts?.[n] || {}));
+  // Variants of the same published row count too — see detectedEntriesFor.
+  for (const [key, byDay] of Object.entries(detected?.discounts || {})) {
+    if (key === n) continue;
+    for (const [day, hit] of Object.entries(byDay || {})) {
+      if (hit?.row === n) days.add(day);
+    }
+  }
+  return [...days].sort();
 }
 
 export function applyDiscountToRates(rates, pct) {

@@ -425,6 +425,13 @@ export const DISCOUNT_DETECTION = {
   /** Promotions are round numbers, so snap to the nearest step when close. */
   snapStep: 5,
   snapWithin: 2.5,
+  /**
+   * How far cent-rounding may move an exactly-measured ratio before that one
+   * request stops being evidence on its own. minSamples is a defence against a
+   * noisy *estimate*; where both figures come from Cursor there is no estimate,
+   * only the half-cent each was rounded to.
+   */
+  exactSlackPct: 1,
 };
 
 function median(sorted) {
@@ -475,10 +482,48 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       continue;
     }
     const n = normModel(e.modelRaw);
+    const day = dayKey(e.timestampMs);
+    if (!day) {
+      skip('no timestamp');
+      continue;
+    }
+
+    // The exact path. Cursor reports both what the tokens are worth at list
+    // (tokenUsage.totalCents) and what it actually took (chargedCents); on a
+    // promotion those diverge, and the gap between two of its own figures for
+    // the same request is the discount. No rate table, so nothing here can be
+    // thrown by a stale scrape, a model the table has never heard of, or an
+    // unpublished cache-write rate — and Auto works, which the rate table can
+    // never price because Cursor does not say what it routed to.
+    const list = e.listTokenCost;
+    const billed = e.billedTokenCost;
+    if (list != null && billed != null && list >= cfg.minExpectedCost) {
+      diagnostics.considered++;
+      const bucketKey = `${n}|${day}`;
+      if (!buckets.has(bucketKey)) {
+        // A label only if the table happens to name this model — for display,
+        // never for the arithmetic, so an unknown model still measures fine.
+        buckets.set(bucketKey, {
+          n, day, ratios: [], floorRatios: [], measured: 0, standalone: 0,
+          label: matchPricing(e.modelRaw, pricing)?.label || null,
+        });
+      }
+      const bucket = buckets.get(bucketKey);
+      bucket.ratios.push(billed / list);
+      bucket.floorRatios.push(billed / list);
+      // Cent rounding can move a ratio by half a cent either way. On a request
+      // worth enough that this is under a point, one is all the evidence there
+      // is to have — the three-sample rule exists to average out an estimate,
+      // and there is no estimate here.
+      bucket.measured++;
+      if (100 * 0.5 / (list * 100) <= cfg.exactSlackPct) bucket.standalone++;
+      continue;
+    }
+
     // Auto routes to a model Cursor does not name, so its billed value cannot
-    // be checked against any single rate row.
+    // be checked against any single rate row. Only the fallback below needs one.
     if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) {
-      skip('Auto or unnamed model');
+      skip('Auto or unnamed model, and no list value to compare against');
       continue;
     }
 
@@ -535,17 +580,13 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       }
     }
 
-    const day = dayKey(e.timestampMs);
-    if (!day) {
-      skip('no timestamp');
-      continue;
-    }
     diagnostics.considered++;
     const bucketKey = `${n}|${day}`;
     if (!buckets.has(bucketKey)) {
-      buckets.set(bucketKey, { n, day, ratios: [], floorRatios: [], label: rates.label });
+      buckets.set(bucketKey, { n, day, ratios: [], floorRatios: [], measured: 0, standalone: 0, label: rates.label });
     }
     const bucket = buckets.get(bucketKey);
+    bucket.label = bucket.label || rates.label;
     bucket.ratios.push(actual / expected);
     bucket.floorRatios.push(actual / floorExpected);
   }
@@ -554,11 +595,12 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     diagnostics.days.push({ model: n, day, samples, pct: Math.round(pct * 10) / 10, verdict });
   };
 
-  for (const { n, day, ratios, floorRatios, label } of buckets.values()) {
+  for (const { n, day, ratios, floorRatios, measured, standalone, label } of buckets.values()) {
     const sorted = [...ratios].sort((a, b) => a - b);
     const rawPct = (1 - median(sorted)) * 100;
-    if (ratios.length < cfg.minSamples) {
-      outcome(n, day, ratios.length, rawPct, `too few samples (needs ${cfg.minSamples})`);
+    // A measured request needs no corroboration; an inferred one does.
+    if (ratios.length < cfg.minSamples && !standalone) {
+      outcome(n, day, ratios.length, rawPct, `too few samples (needs ${cfg.minSamples} when inferred from the rate table)`);
       continue;
     }
     // The same day priced with cache writes free. Equal to rawPct unless a
@@ -589,7 +631,10 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       outcome(n, day, ratios.length, rawPct, `scattered — only ${agreeing}/${ratios.length} requests agree`);
       continue;
     }
-    outcome(n, day, ratios.length, rawPct, `discount ${snapDiscountPct(rawPct, cfg)}%`);
+    outcome(n, day, ratios.length, rawPct,
+      `discount ${snapDiscountPct(rawPct, cfg)}% (${measured === ratios.length
+        ? "measured from Cursor's own list vs charged figures"
+        : 'inferred from the rate table'})`);
 
     if (!discounts[n]) discounts[n] = {};
     discounts[n][day] = {
@@ -818,10 +863,19 @@ export function normalize(raw, pricing, opts = {}) {
   // discount found" for every model, which is indistinguishable from having
   // checked. Per-request billing is a flat fee unrelated to the tokens, so it
   // is deliberately left out rather than compared against a rate table.
-  const modelCentsResolved = modelCents != null
-    ? modelCents
-    : (isTokenBased && chargedCents != null ? Math.max(0, chargedCents - feeCents) : null);
-  const modelTokenCost = modelCentsResolved != null ? modelCentsResolved / 100 : null;
+  //
+  // These are two different figures and the difference is the whole point.
+  // `tokenUsage.totalCents` is what Cursor says the tokens are worth at list;
+  // `chargedCents` is what it actually took. On a promotion they diverge, and
+  // since both come from Cursor for the same request, the gap between them is
+  // the discount — measured, not inferred from a scraped rate table.
+  const listTokenCost = modelCents != null ? modelCents / 100 : null;
+  const billedTokenCost = isTokenBased && chargedCents != null
+    ? Math.max(0, chargedCents - feeCents) / 100
+    : null;
+  // Best available figure for what these tokens cost you, preferring the one
+  // actually charged. Only the rate-table fallback in detectDiscounts reads it.
+  const modelTokenCost = billedTokenCost ?? listTokenCost;
   // requestCharge = flat usage-based fee ($0.04/request on some plans) — NOT token cost
   const requestCharge = !isTokenBased && chargedCents != null ? chargedCents / 100 : null;
   // Primary cost: token-based plans use chargedCents; others use tokenCost
@@ -864,6 +918,8 @@ export function normalize(raw, pricing, opts = {}) {
     billedCost,
     tokenCost,
     modelTokenCost,
+    listTokenCost,
+    billedTokenCost,
     requestCharge,
     isTokenBased,
     billingRegime,

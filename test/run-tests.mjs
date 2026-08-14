@@ -391,6 +391,49 @@ test('a published cache-write rate is used as-is — the floor only guards subst
   const { discounts } = detectDiscounts(events, pricing);
   assert.equal(discounts['claude-4-5-sonnet']['2026-08-13'].pct, 50, 'writes dominate yet the rate is known');
 });
+// Cursor reports both figures for a request, so the discount is arithmetic
+// rather than inference. `list` is the value at list price, `billed` what was
+// actually taken.
+function exactEvent(i, list, billed, day = '2026-08-13', model = 'cursor-grok-4.6-high') {
+  return {
+    id: `x${i}`,
+    timestampMs: new Date(`${day}T1${i % 9}:00:00`).getTime(),
+    modelRaw: model,
+    listTokenCost: list,
+    billedTokenCost: billed,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  };
+}
+test('one measured request is enough — there is no estimate to average out', () => {
+  const { discounts, diagnostics } = detectDiscounts([exactEvent(0, 0.86, 0.39)], pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 55);
+  assert.equal(diagnostics.days[0].samples, 1);
+});
+test('a request small enough for cent-rounding to matter still needs corroboration', () => {
+  // At 3c, half a cent is 17% — far more than the gap being claimed.
+  const { discounts } = detectDiscounts([exactEvent(0, 0.03, 0.014)], pricing);
+  assert.deepEqual(discounts, {}, 'one tiny request proves nothing');
+  const many = [0, 1, 2].map((i) => exactEvent(i, 0.03, 0.014));
+  assert.equal(many.length, 3);
+  assert.ok(detectDiscounts(many, pricing).discounts['cursor-grok-4-6-high'], 'three of them do');
+});
+test('paying exactly the list value is no discount', () => {
+  const { discounts, observed } = detectDiscounts([exactEvent(0, 0.86, 0.86)], pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high|2026-08-13'), 'measured, and the answer was no');
+});
+test('Auto is measurable this way — no rate row is needed', () => {
+  // The rate table can never price Auto, since Cursor does not say what it
+  // routed to. Its own two figures do not care.
+  const { discounts } = detectDiscounts([exactEvent(0, 0.5, 0.25, '2026-08-13', 'auto')], pricing);
+  assert.equal(discounts.auto['2026-08-13'].pct, 50);
+});
+test('the measured figure wins over anything the rate table would have said', () => {
+  // Rates here would price these tokens at nothing like $0.86, and it does not
+  // matter: the comparison never consults them.
+  const e = { ...exactEvent(0, 0.86, 0.39), inputTokens: 999_999, outputTokens: 999_999 };
+  assert.equal(detectDiscounts([e], pricing).discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 55);
+});
 test('diagnostics name the reason a request could not be measured', () => {
   const noValue = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelTokenCost: null }));
   const { diagnostics } = detectDiscounts(noValue, pricing);
@@ -404,7 +447,8 @@ test('diagnostics record the verdict for a day that was measured', () => {
   const { diagnostics } = detectDiscounts(halfPriceDay, pricing);
   assert.equal(diagnostics.considered, 4);
   assert.deepEqual(diagnostics.days, [{
-    model: 'cursor-grok-4-6-high', day: '2026-08-13', samples: 4, pct: 50, verdict: 'discount 50%',
+    model: 'cursor-grok-4-6-high', day: '2026-08-13', samples: 4, pct: 50,
+    verdict: 'discount 50% (inferred from the rate table)',
   }]);
 });
 test('diagnostics separate "no discount" from "too few to tell"', () => {
@@ -573,22 +617,25 @@ test('token-based event uses chargedCents as primary cost', () => {
   assert.equal(e.totalTokens, 51200);
   assert.equal(e.timestampMs, 1750000000000);
 });
-test('modelTokenCost strips the Cursor token fee from the billed figure', () => {
-  assert.equal(normalize(tokenBasedRaw, pricing).modelTokenCost, 1.0);
+test('list and billed token value are kept apart — their gap is the discount', () => {
+  // totalCents is what Cursor says the tokens are worth at list; chargedCents
+  // is what it took. Conflating them is what made a live promotion invisible:
+  // comparing the list figure against the list rate table always reads ~0%.
+  const e = normalize(tokenBasedRaw, pricing);
+  assert.equal(e.listTokenCost, 1.0, 'totalCents 100');
+  assert.equal(e.billedTokenCost, 1.2, 'chargedCents 123 less the 3c token fee');
+  assert.equal(e.modelTokenCost, 1.2, 'prefers what was actually charged');
 });
-test('modelTokenCost is recovered when Cursor omits tokenUsage.totalCents', () => {
-  // Without this the field is null, and discount detection — its only consumer
-  // — skips every request and reports "no discount" on an account it never
-  // managed to measure at all.
+test('billed token value is null where the charge is not about tokens', () => {
+  // A flat per-request fee has nothing to do with the tokens, so comparing it
+  // against a rate table would read as a near-total discount on every request.
+  assert.equal(normalize(usageBasedRaw, pricing).billedTokenCost, null);
+});
+test('list token value is null when Cursor omits it', () => {
   const { totalCents, ...noTotal } = tokenBasedRaw.tokenUsage;
   const e = normalize({ ...tokenBasedRaw, tokenUsage: noTotal }, pricing);
-  assert.equal(e.modelTokenCost, 1.2, 'chargedCents 123 less the 3c token fee');
-});
-test('a per-request charge is never mistaken for a token value', () => {
-  // A flat fee has nothing to do with the tokens, so comparing it against a
-  // rate table would read as a ~100% discount on every such request.
-  const { totalCents, ...noTotal } = usageBasedRaw.tokenUsage;
-  assert.equal(normalize({ ...usageBasedRaw, tokenUsage: noTotal }, pricing).modelTokenCost, null);
+  assert.equal(e.listTokenCost, null);
+  assert.equal(e.modelTokenCost, 1.2, 'still measurable against the rate table');
 });
 test('usage-based event separates flat fee from token cost', () => {
   const e = normalize(usageBasedRaw, pricing);

@@ -58,13 +58,27 @@ All notable user-facing changes. Earlier releases predate this file; see the
   long as the dashboard is open, announces itself wherever it applies, carries
   its own "Follow the filter bar" button in every state, and the Overview says
   the trend is unavailable because of it rather than showing nothing.
-- **Fixed discounts going undetected on accounts where Cursor doesn't itemise
-  the model's token value.** Detection compares that value against the
-  published rates, and where the field was missing every request was skipped —
-  so a promotion that was running read exactly like a range that had been
-  checked and found clean. The value is recovered from the charge and the token
-  fee for token-billed requests, and the panel now distinguishes "checked these
-  models and found nothing" from "not enough comparable requests to tell".
+- **Discounts are now measured from Cursor's own figures instead of inferred
+  from the rate table.** Cursor reports two numbers for a request: what the
+  tokens are worth at list, and what it actually charged. On a promotion those
+  diverge, and the gap between them is the discount — exactly, with no
+  published rates involved. Detection had been comparing the *list* figure
+  against the *list* rate table, which by construction reads as no discount, so
+  a live promotion was invisible no matter how much you used the model.
+  Measuring the two against each other also removes every weakness of the old
+  route at once: a stale or restructured pricing page, a model too new to be in
+  it, an unpublished cache-write rate, and Auto — which the rate table can never
+  price, because Cursor doesn't say which model it routed to.
+- **A measured discount no longer needs three requests to confirm it.** The
+  three-request rule guarded against a noisy *estimate*; where both figures come
+  from Cursor there is no estimate, only the half-cent each was rounded to. One
+  request is now enough whenever it is large enough that rounding can't move the
+  result by more than a point — which is most of them. Requests small enough for
+  cent-rounding to swamp the gap still need the corroboration, and anything
+  falling back to the rate table keeps the old rule.
+- **The Simulator now distinguishes "checked and found nothing" from "couldn't
+  measure".** Both used to read "None found in this date range", and only one of
+  them means the estimates below can be trusted.
 - **Fixed the fifth session appearing to be selected.** Ticking past the
   four-session limit left the box ticked for a row that was never added: it got
   no slot letter and was missing from the comparison, and the alert explaining

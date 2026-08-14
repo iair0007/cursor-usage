@@ -409,6 +409,21 @@ test('one measured request is enough — there is no estimate to average out', (
   assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 55);
   assert.equal(diagnostics.days[0].samples, 1);
 });
+test('a measured figure is reported as measured, not snapped to a round sale', () => {
+  // 53.5% is what this account paid against list. Snapping it to "55% off"
+  // asserts a promotion nobody announced, and 50% was the headline that week —
+  // so the nudge moved it away from the truth in both directions at once.
+  const { discounts } = detectDiscounts([exactEvent(0, 0.86, 0.4)], pricing);
+  const d = discounts['cursor-grok-4-6-high']['2026-08-13'];
+  assert.equal(d.pct, 53, 'the measurement, rounded to a whole point');
+  assert.equal(d.measured, true);
+});
+test('an inferred figure is still snapped — there the round number is the point', () => {
+  const inferred = [0, 1, 2, 3].map((i) => grokEvent(i, 0.512));
+  const d = detectDiscounts(inferred, pricing).discounts['cursor-grok-4-6-high']['2026-08-13'];
+  assert.equal(d.pct, 50, '48.8% off a noisy estimate is a 50% sale');
+  assert.equal(d.measured, false);
+});
 test('a request small enough for cent-rounding to matter still needs corroboration', () => {
   // At 3c, half a cent is 17% — far more than the gap being claimed.
   const { discounts } = detectDiscounts([exactEvent(0, 0.03, 0.014)], pricing);
@@ -448,7 +463,7 @@ test('diagnostics record the verdict for a day that was measured', () => {
   assert.equal(diagnostics.considered, 4);
   assert.deepEqual(diagnostics.days, [{
     model: 'cursor-grok-4-6-high', day: '2026-08-13', samples: 4, pct: 50,
-    verdict: 'discount 50% (inferred from the rate table)',
+    verdict: 'discount 50% (inferred from the rate table, snapped to the nearest round sale)',
   }]);
 });
 test('diagnostics separate "no discount" from "too few to tell"', () => {

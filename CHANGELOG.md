@@ -69,6 +69,24 @@ All notable user-facing changes. Earlier releases predate this file; see the
   route at once: a stale or restructured pricing page, a model too new to be in
   it, an unpublished cache-write rate, and Auto — which the rate table can never
   price, because Cursor doesn't say which model it routed to.
+- **A measured discount is reported as measured, not rounded to a sale.** The
+  figure used to snap to the nearest 5%, which is right when recovering the
+  round number a promotion probably was from a noisy estimate, and wrong once
+  the number is measured: 53.5% became "55% off", asserting a rate nobody
+  announced, and further from the 50% headline than the measurement it
+  replaced. Badges now read "−53% vs list" rather than "−53% off", because what
+  is known is the saving against Cursor's published price — an announced sale
+  can land a few points either side of that once its own terms and cent
+  rounding are through with it. A figure still inferred from the rate table is
+  still snapped, since there the round number is the whole point.
+- **Fixed two models being priced against the wrong row.** A request billed at
+  a Fast rate matched the standard row — "cursor-grok-4.6-high-fast" doesn't
+  contain "grok-4-6-fast" as a substring, since "high" sits in the middle — so
+  its estimates were about half what it really cost. And a row Cursor names for
+  the model Auto settled on, like "Cursor Grok 4.5 (Auto Balanced)", was priced
+  at Auto's rate purely because the word "auto" appeared in it, with the real
+  model listed a few rows down. Rows are matched word-wise now, most specific
+  first, and Auto is the last resort rather than the first.
 - **A measured discount no longer needs three requests to confirm it.** The
   three-request rule guarded against a noisy *estimate*; where both figures come
   from Cursor there is no estimate, only the half-cent each was rounded to. One

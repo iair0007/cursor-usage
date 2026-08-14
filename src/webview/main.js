@@ -840,13 +840,18 @@ function discountForEvent(modelRaw, timestampMs) {
 }
 
 const DISCOUNT_TIPS = {
-  detected: 'Cursor charged you noticeably less for this model than its normal price on this day, so it was probably on sale. Worked out from your own bill — Cursor does not publish its sales anywhere this extension can read.',
+  // Deliberately does not call this "the promotion". It is what you were
+  // charged against what Cursor says these tokens list for — an announced
+  // "50% off" can land a few points either side of that once the promotion's
+  // own terms and cent-rounding are through with it, and printing the
+  // headline rate we never saw would be inventing one.
+  detected: 'Cursor charged you this much less than its published price for this model on this day. Measured from your own bill — the saving you actually got, which may not match the headline rate of whatever sale was running.',
   manual: 'A discount you added yourself. Estimates for this model use the lower price on the dates you gave.',
 };
 
 function discountBadge(discount, extraClass = '') {
   if (!discount) return '';
-  const label = discount.source === 'manual' ? 'you added' : 'off';
+  const label = discount.source === 'manual' ? 'you added' : 'vs list';
   return ` <span class="discount-tag ${extraClass}" title="${esc(DISCOUNT_TIPS[discount.source])}">−${fmt.discountPct(discount.pct)} ${label}</span>`;
 }
 
@@ -862,7 +867,7 @@ function rangeDiscountBadge(modelRaw) {
     const byDay = state.detectedDiscounts.discounts[normModel(modelRaw)];
     const top = Math.max(...days.map((d) => byDay[d].pct));
     const span = days.length === 1 ? fmt.shortDate(days[0]) : `${days.length} days`;
-    return ` <span class="discount-tag" title="${esc(DISCOUNT_TIPS.detected)}">−${fmt.discountPct(top)} on ${esc(span)}</span>`;
+    return ` <span class="discount-tag" title="${esc(DISCOUNT_TIPS.detected)}">−${fmt.discountPct(top)} vs list on ${esc(span)}</span>`;
   }
   const manual = state.manualDiscounts.find((entry) => manualEntryCoversModel(entry, modelRaw));
   if (!manual) return '';
@@ -4271,7 +4276,7 @@ function renderDiscountSummary() {
   const chips = [];
   for (const p of periods) {
     const range = p.start === p.end ? fmt.shortDate(p.start) : `${fmt.shortDate(p.start)}–${fmt.shortDate(p.end)}`;
-    chips.push(`<span class="discount-chip" title="${esc(DISCOUNT_TIPS.detected)}"><strong>−${fmt.discountPct(p.pct)}</strong> ${esc(p.label || p.model)} · ${esc(range)} <span class="discount-chip-src">from your bill</span></span>`);
+    chips.push(`<span class="discount-chip" title="${esc(DISCOUNT_TIPS.detected)}"><strong>−${fmt.discountPct(p.pct)}</strong> ${esc(p.label || p.model)} · ${esc(range)} <span class="discount-chip-src">measured from your bill</span></span>`);
   }
   for (const entry of state.manualDiscounts) {
     const models = entry.models.includes('*') ? 'all models' : entry.models.join(', ');

@@ -222,17 +222,21 @@ export function parsePricing(md) {
  */
 export function matchPricing(model, pricing) {
   const n = normModel(model);
-  if (n.includes('auto') || n === 'default') {
-    if (pricing.auto.input != null) {
-      return {
-        input: pricing.auto.input,
-        cacheWrite: pricing.auto.cacheWrite ?? pricing.auto.input,
-        cacheWritePublished: pricing.auto.cacheWrite != null,
-        cacheRead: pricing.auto.cacheRead,
-        output: pricing.auto.output,
-        label: 'Auto',
-      };
-    }
+  const autoRates = () => (pricing.auto.input != null ? {
+    input: pricing.auto.input,
+    cacheWrite: pricing.auto.cacheWrite ?? pricing.auto.input,
+    cacheWritePublished: pricing.auto.cacheWrite != null,
+    cacheRead: pricing.auto.cacheRead,
+    output: pricing.auto.output,
+    label: 'Auto',
+  } : null);
+  // Auto is the last resort, not the first. Cursor names some rows for the
+  // model Auto settled on — "Cursor Grok 4.5 (Auto Balanced)" — and matching on
+  // the word "auto" anywhere in the string priced those at Auto's rate while
+  // the table listed the real model a few rows down.
+  if (n === 'auto' || n === 'default' || n === 'cursor-auto') {
+    const rates = autoRates();
+    if (rates) return rates;
   }
   const key = pricing.aliasIndex[n];
   if (key) {
@@ -248,15 +252,29 @@ export function matchPricing(model, pricing) {
       };
     }
   }
-  // Longest-name match wins, not first-found: a billed variant string can
-  // contain more than one candidate substring (e.g. "cursor-grok-4.6-fast-high"
-  // contains both "grok-4-6" and the more specific "grok-4-6-fast"), and the
-  // more specific catalog row is the one whose rate actually applies.
-  let partial = null;
+  // Most specific catalog row wins, scored on how much of its name the billed
+  // string accounts for. Matching on substrings alone missed the row that
+  // actually applies whenever the variant interleaves its words:
+  // "cursor-grok-4.6-high-fast" does not contain "grok-4-6-fast" as a
+  // substring — "high" sits in the middle — so a request billed at the Fast
+  // rate was priced against the standard one, roughly half what it cost.
+  const parts = new Set(n.split('-').filter(Boolean));
+  let best = null;
   for (const m of pricing.models) {
-    if (!m.name) continue;
-    if (n.includes(m.name) || m.name.includes(n)) {
-      if (!partial || m.name.length > partial.name.length) partial = m;
+    if (!m.name || m.input == null) continue;
+    const want = m.name.split('-').filter(Boolean);
+    if (!want.length || !want.every((w) => parts.has(w))) continue;
+    if (!best || want.length > best.score) best = { m, score: want.length };
+  }
+  // Anything the word-wise pass can't place falls back to the old substring
+  // rule, so a name it doesn't understand is no worse off than before.
+  let partial = best?.m || null;
+  if (!partial) {
+    for (const m of pricing.models) {
+      if (!m.name) continue;
+      if (n.includes(m.name) || m.name.includes(n)) {
+        if (!partial || m.name.length > partial.name.length) partial = m;
+      }
     }
   }
   if (partial?.input != null) {
@@ -269,6 +287,8 @@ export function matchPricing(model, pricing) {
       label: partial.display,
     };
   }
+  // Auto-routed traffic the table cannot name any better.
+  if (n.includes('auto')) return autoRates();
   return null;
 }
 
@@ -631,14 +651,21 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       outcome(n, day, ratios.length, rawPct, `scattered — only ${agreeing}/${ratios.length} requests agree`);
       continue;
     }
+    const wasMeasured = measured === ratios.length;
     outcome(n, day, ratios.length, rawPct,
-      `discount ${snapDiscountPct(rawPct, cfg)}% (${measured === ratios.length
+      `discount ${wasMeasured ? Math.round(rawPct) : snapDiscountPct(rawPct, cfg)}% (${wasMeasured
         ? "measured from Cursor's own list vs charged figures"
-        : 'inferred from the rate table'})`);
+        : 'inferred from the rate table, snapped to the nearest round sale'})`);
 
     if (!discounts[n]) discounts[n] = {};
     discounts[n][day] = {
-      pct: snapDiscountPct(rawPct, cfg),
+      // Snapping exists to recover the round number a promotion probably was
+      // from a noisy estimate. A measured figure is neither noisy nor the
+      // promotion's headline rate: it is what this account actually paid
+      // against list, and nudging 53.5% up to "55% off" asserts a promotion
+      // that was never announced. Report the measurement; snap only the guess.
+      pct: wasMeasured ? Math.round(rawPct) : snapDiscountPct(rawPct, cfg),
+      measured: wasMeasured,
       samples: ratios.length,
       label,
     };
@@ -751,7 +778,7 @@ export function manualDiscountFor(entries, modelRaw, day) {
 export function resolveDiscount(modelRaw, day, { detected, manual } = {}) {
   const n = normModel(modelRaw);
   const det = detected?.discounts?.[n]?.[day];
-  if (det) return { pct: det.pct, source: 'detected', samples: det.samples };
+  if (det) return { pct: det.pct, source: 'detected', samples: det.samples, measured: det.measured };
   const entry = manualDiscountFor(manual, modelRaw, day);
   if (entry) return { pct: entry.pct, source: 'manual', entryId: entry.id };
   return null;

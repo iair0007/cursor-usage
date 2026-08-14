@@ -43,6 +43,7 @@ const {
   modelsMissingDiscountInfo,
   normalizeDiscountEntry,
   detectedDiscountDays,
+  autoRouting,
   displayModel,
   normalize,
   summarize,
@@ -254,6 +255,29 @@ test('estimateTokenCost combines all rates', () => {
   const cost = estimateTokenCost(rates, { input: 1_000_000, output: 100_000, cacheRead: 2_000_000, cacheWrite: 0 });
   assert.ok(Math.abs(cost - (3.0 + 1.5 + 0.6)) < 1e-9);
 });
+console.log('displayModel and Cursor Router routing');
+test('a routed row names the model and the mode it was billed under', () => {
+  // Balance and Intelligence bill at the routed model's rate, so which model
+  // it was is the difference between two very different prices.
+  assert.equal(displayModel('Cursor Grok 4.5 (Auto Balanced)'), 'Auto Balance → Grok 4.5');
+  assert.equal(displayModel('Cursor Claude Opus 5 (Auto Intelligence)'), 'Auto Intelligence → Claude Opus 5');
+  assert.equal(displayModel('Cursor Grok 4.5 (Auto Cost)'), 'Auto Cost → Grok 4.5');
+});
+test('bare Auto still reads as Auto — Cursor named nothing to show', () => {
+  assert.equal(displayModel('auto'), 'Auto');
+  assert.equal(displayModel('default'), 'Auto');
+  assert.equal(displayModel(''), 'Auto');
+});
+test('a plain model name is left exactly as Cursor billed it', () => {
+  assert.equal(displayModel('cursor-grok-4.6-high'), 'cursor-grok-4.6-high');
+  assert.equal(displayModel('claude-sonnet-5-thinking-medium'), 'claude-sonnet-5-thinking-medium');
+});
+test('autoRouting reports the parts, and nothing for a non-routed name', () => {
+  assert.deepEqual(autoRouting('Cursor Grok 4.5 (Auto Balanced)'), { model: 'Grok 4.5', mode: 'Balance' });
+  assert.equal(autoRouting('cursor-grok-4.6-high'), null);
+  assert.equal(autoRouting('auto'), null);
+});
+
 console.log('parsePricing: Auto published as a table row');
 // cursor.com moved Auto's bundled rate out of a "### Auto pricing" label list
 // and into an ordinary pricing table under "Auto modes".

@@ -905,9 +905,39 @@ export function normalizeDiscountEntry(raw) {
   };
 }
 
+const AUTO_MODE_NAMES = {
+  cost: 'Cost',
+  balance: 'Balance',
+  balanced: 'Balance',
+  intelligence: 'Intelligence',
+};
+
+/**
+ * The model Cursor Router picked, when it says so.
+ *
+ * Balance and Intelligence bill at the routed model's own rate, so Cursor names
+ * it — "Cursor Grok 4.5 (Auto Balanced)" — provided the team has left the
+ * underlying model on display. That name is the difference between a request
+ * that cost Auto's bundled rate and one that cost Grok's, so it is worth
+ * keeping rather than flattening every such row to "Auto".
+ *
+ * Returns null for bare Auto, where Cursor names nothing and there is nothing
+ * to show beyond "Auto".
+ */
+export function autoRouting(raw) {
+  const m = String(raw || '').match(/^\s*(?:cursor\s+)?(.+?)\s*\(\s*auto\s+([a-z]+)\s*\)\s*$/i);
+  if (!m) return null;
+  const model = m[1].trim();
+  if (!model) return null;
+  return { model, mode: AUTO_MODE_NAMES[m[2].toLowerCase()] || null };
+}
+
 export function displayModel(raw) {
   const n = normModel(raw);
-  if (!raw || n === 'default' || n.includes('auto')) return 'Auto';
+  if (!raw || n === 'default' || n === 'auto' || n === 'cursor-auto') return 'Auto';
+  const routed = autoRouting(raw);
+  if (routed) return `Auto ${routed.mode || ''} → ${routed.model}`.replace(/\s+/g, ' ').trim();
+  if (n.includes('auto')) return 'Auto';
   return raw;
 }
 

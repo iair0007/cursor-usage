@@ -849,10 +849,26 @@ const DISCOUNT_TIPS = {
   manual: 'A discount you added yourself. Estimates for this model use the lower price on the dates you gave.',
 };
 
+/**
+ * The figure belongs in the tooltip, not on the badge.
+ *
+ * What is measured is the gap between Cursor's list value and what it charged,
+ * and that lands a few points off whatever sale was announced — 53% against a
+ * 50% promotion. Printed on the badge that reads as a precise claim about the
+ * promotion's terms, and it is only ever precise about your bill. The number
+ * stays one hover away, and exact where it is acted on: the discount editor
+ * still lists every entry with its percentage.
+ */
+function discountTitle(discount) {
+  const base = DISCOUNT_TIPS[discount.source];
+  if (discount.source === 'manual') return `${base} You entered ${fmt.discountPct(discount.pct)}.`;
+  return `${base} Measured at about ${fmt.discountPct(discount.pct)} below list here.`;
+}
+
 function discountBadge(discount, extraClass = '') {
   if (!discount) return '';
-  const label = discount.source === 'manual' ? 'you added' : 'vs list';
-  return ` <span class="discount-tag ${extraClass}" title="${esc(DISCOUNT_TIPS[discount.source])}">−${fmt.discountPct(discount.pct)} ${label}</span>`;
+  const label = discount.source === 'manual' ? 'Discount added' : 'Discounted';
+  return ` <span class="discount-tag ${extraClass}" title="${esc(discountTitle(discount))}">${label}</span>`;
 }
 
 /**
@@ -873,11 +889,13 @@ function rangeDiscountBadge(modelRaw) {
     if (!pcts.length) return '';
     const top = Math.max(...pcts);
     const span = days.length === 1 ? fmt.shortDate(days[0]) : `${days.length} days`;
-    return ` <span class="discount-tag" title="${esc(DISCOUNT_TIPS.detected)}">−${fmt.discountPct(top)} vs list on ${esc(span)}</span>`;
+    const tip = `${DISCOUNT_TIPS.detected} Measured at up to ${fmt.discountPct(top)} below list across ${span}.`;
+    return ` <span class="discount-tag" title="${esc(tip)}">Discounted on ${esc(span)}</span>`;
   }
   const manual = state.manualDiscounts.find((entry) => manualEntryCoversModel(entry, modelRaw));
   if (!manual) return '';
-  return ` <span class="discount-tag discount-tag-manual" title="${esc(DISCOUNT_TIPS.manual)}">−${fmt.discountPct(manual.pct)} entered</span>`;
+  const manualTip = `${DISCOUNT_TIPS.manual} You entered ${fmt.discountPct(manual.pct)}.`;
+  return ` <span class="discount-tag discount-tag-manual" title="${esc(manualTip)}">Discount added</span>`;
 }
 
 function manualEntryCoversModel(entry, modelRaw) {
@@ -4282,12 +4300,14 @@ function renderDiscountSummary() {
   const chips = [];
   for (const p of periods) {
     const range = p.start === p.end ? fmt.shortDate(p.start) : `${fmt.shortDate(p.start)}–${fmt.shortDate(p.end)}`;
-    chips.push(`<span class="discount-chip" title="${esc(DISCOUNT_TIPS.detected)}"><strong>−${fmt.discountPct(p.pct)}</strong> ${esc(p.label || p.model)} · ${esc(range)} <span class="discount-chip-src">measured from your bill</span></span>`);
+    const tip = `${DISCOUNT_TIPS.detected} Measured at about ${fmt.discountPct(p.pct)} below list.`;
+    chips.push(`<span class="discount-chip" title="${esc(tip)}"><strong>Discounted</strong> ${esc(p.label || displayModel(p.model))} · ${esc(range)} <span class="discount-chip-src">measured from your bill</span></span>`);
   }
   for (const entry of state.manualDiscounts) {
     const models = entry.models.includes('*') ? 'all models' : entry.models.join(', ');
     const range = entry.start === entry.end ? fmt.shortDate(entry.start) : `${fmt.shortDate(entry.start)}–${fmt.shortDate(entry.end)}`;
-    chips.push(`<span class="discount-chip discount-chip-manual" title="${esc(DISCOUNT_TIPS.manual)}"><strong>−${fmt.discountPct(entry.pct)}</strong> ${esc(models)} · ${esc(range)} <span class="discount-chip-src">you added</span></span>`);
+    const tip = `${DISCOUNT_TIPS.manual} You entered ${fmt.discountPct(entry.pct)}.`;
+    chips.push(`<span class="discount-chip discount-chip-manual" title="${esc(tip)}"><strong>−${fmt.discountPct(entry.pct)}</strong> ${esc(models)} · ${esc(range)} <span class="discount-chip-src">you added</span></span>`);
   }
   if (chips.length) {
     el.innerHTML = chips.join('');

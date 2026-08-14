@@ -79,6 +79,20 @@ All notable user-facing changes. Earlier releases predate this file; see the
   can land a few points either side of that once its own terms and cent
   rounding are through with it. A figure still inferred from the rate table is
   still snapped, since there the round number is the whole point.
+- **Auto now shows which model the router picked.** Balance and Intelligence
+  bill at the routed model's own rate, and Cursor names that model in the row
+  when the team leaves the underlying model on display — so a request that cost
+  Grok 4.5's rate and one that cost Auto's bundled rate no longer both read as a
+  flat "Auto". Rows read "Auto Balance → Grok 4.5" throughout: the request log,
+  the session lists, the comparison tables, the model filter and the export.
+  Bare Auto, where Cursor names nothing, is unchanged.
+- **Discount badges no longer print a percentage.** What is measured is the gap
+  between Cursor's list value and what it charged, and that lands a few points
+  off whatever sale was announced — 53% against a 50% promotion. On a badge that
+  read as a precise claim about the promotion's terms when it is only ever
+  precise about your bill. Badges say "Discounted"; the measured figure is one
+  hover away, and the discount editor still lists every entry you added with
+  its exact percentage, since that is where the number is acted on.
 - **Fixed Auto losing its rates entirely.** cursor.com now publishes Auto's
   bundled price as an ordinary row in a pricing table ("Auto Cost", under Auto
   modes) rather than as the label-and-value list the old "Auto pricing" heading

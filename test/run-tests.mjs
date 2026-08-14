@@ -820,6 +820,36 @@ test('cost-mode buttons declare no data-preset', () => {
     assert.ok(!/data-preset/.test(tag), `cost-mode button also declares data-preset: ${tag}`);
   }
 });
+test('every id the discount UI wires up exists in the markup', () => {
+  // These are joined only by string ids, so a rename on one side fails silently
+  // at runtime — the listener never binds and the button does nothing.
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  for (const id of [
+    'simIntro', 'simIntroTitle', 'simIntroBody', 'simIntroDismiss', 'simIntroAdd',
+    'simDiscountExplain', 'simDiscountToggle', 'simDiscountSummary', 'simDiscountEditor',
+    'simDiscountPrompt', 'simCompareFootnote',
+  ]) {
+    assert.ok(html.includes(`id="${id}"`), `markup is missing id="${id}"`);
+  }
+});
+test('the intro dialog is a labelled modal that starts hidden', () => {
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  const tag = html.match(/<div[^>]*id="simIntro"[^>]*>/)?.[0] || '';
+  assert.ok(/role="dialog"/.test(tag), 'needs role="dialog"');
+  assert.ok(/aria-modal="true"/.test(tag), 'needs aria-modal so the rest of the page reads as inert');
+  assert.ok(/aria-labelledby="simIntroTitle"/.test(tag), 'needs an accessible name');
+  assert.ok(/\bhidden\b/.test(tag), 'must not be visible before the first Simulator visit');
+});
+test('the intro is shown once, not on every visit to the Simulator', () => {
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const fn = main.match(/function maybeShowSimIntro\(\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
+  assert.ok(fn.includes('SIM_INTRO_KEY'), 'must consult the persisted seen-flag before opening');
+  assert.ok(/return;/.test(fn), 'must bail out when already seen');
+  assert.ok(
+    /storage\.setItem\(SIM_INTRO_KEY/.test(main),
+    'the flag has to be written somewhere or the dialog reopens forever',
+  );
+});
 
 // --- TS modules -----------------------------------------------------------
 

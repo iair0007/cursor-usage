@@ -26,6 +26,14 @@ All notable user-facing changes. Earlier releases predate this file; see the
   you **record** the promotion by hand, and remembers it. Discounted models are
   badged wherever they appear, with detected and hand-entered discounts kept
   visibly distinct.
+- The Simulator explains that caveat **once, on first visit**, in a dismissable
+  dialog rather than in fine print nobody reads — the tab shows an estimate that
+  can be quietly too high, and a user has no way to guess that from the numbers.
+  It is reachable afterwards from "What's this?", for the day someone notices a
+  figure looks wrong. Estimates priced at full price because nothing could be
+  checked carry an asterisk and a footnote saying so, which stays put even after
+  the offer to add a discount is dismissed: dismissing an offer is not the same
+  as asking to stop being told which numbers are uncertain.
 - **Far fewer calls to cursor.com.** The quota, plan and spend-cap lookups now
   sit behind a short cache with in-flight de-duplication. Opening the dashboard
   used to fire dozens of identical requests: the panel asks for usage and for

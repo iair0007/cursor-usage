@@ -1074,7 +1074,63 @@ tfoot td {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .sim-note-text { font-size: 12px; color: var(--text); }
+.sim-note-muted { font-size: 12px; color: var(--muted); display: block; }
 .sim-note-actions { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.sim-discounts-actions { display: flex; align-items: center; gap: 8px; }
+
+/* Asterisk convention: mark the caveated figures, explain once underneath. */
+.list-price-mark {
+  color: var(--amber);
+  font-weight: 600;
+  cursor: help;
+  margin-left: 1px;
+}
+.sim-footnote {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 8px 0 0;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.sim-footnote .list-price-mark { cursor: default; }
+
+/* First-run explainer */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  padding: 22px 24px 18px;
+  max-width: 520px;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal h2 { margin: 0 0 12px; font-size: 16px; }
+.modal p { margin: 0 0 10px; font-size: 13px; line-height: 1.55; }
+.modal ul { margin: 0; padding-left: 18px; }
+.modal li { font-size: 13px; line-height: 1.55; margin-bottom: 8px; }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
 
 .sim-compare-table-wrap { overflow-x: auto; }
 .sim-compare-table td, .sim-compare-table th { font-variant-numeric: tabular-nums; }

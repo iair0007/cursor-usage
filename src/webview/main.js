@@ -159,6 +159,8 @@ const state = {
   simCompareSortKey: 'estCost',
   simCompareSortDir: 'asc',
   simCompareContext: null,
+  /** What to hand focus back to when the Simulator intro dialog closes. */
+  simIntroReturnFocus: null,
   analyzeTemplateId: 'overview',
   charts: {},
   chartsReady: false,
@@ -779,13 +781,13 @@ function discountForEvent(modelRaw, timestampMs) {
 }
 
 const DISCOUNT_TIPS = {
-  detected: 'Cursor billed these tokens for noticeably less than its published rates. Inferred by comparing what you were charged against the rate table — Cursor does not publish promotions in machine-readable form.',
-  manual: 'A promotion you recorded by hand. Estimates for this model use the reduced rate for the dates you gave.',
+  detected: 'Cursor charged you noticeably less for this model than its normal price on this day, so it was probably on sale. Worked out from your own bill — Cursor does not publish its sales anywhere this extension can read.',
+  manual: 'A discount you added yourself. Estimates for this model use the lower price on the dates you gave.',
 };
 
 function discountBadge(discount, extraClass = '') {
   if (!discount) return '';
-  const label = discount.source === 'manual' ? 'entered' : 'detected';
+  const label = discount.source === 'manual' ? 'you added' : 'off';
   return ` <span class="discount-tag ${extraClass}" title="${esc(DISCOUNT_TIPS[discount.source])}">−${fmt.discountPct(discount.pct)} ${label}</span>`;
 }
 
@@ -3159,9 +3161,16 @@ function renderCompareRow(row) {
     : row.via
       ? ` <span class="sim-tag sim-tag-muted">via ${esc(row.via)} rates</span> ${tip('Cursor bills this variant under a model string that is not on the pricing table, so the estimate uses the closest published rates. Reasoning level and any long-context or Fast surcharge are not reflected.')}`
       : '';
+  // Marks a figure we know might be too high, and says so in one hover for
+  // anyone who does not read footnotes.
+  const listPriced = row.estCost != null && !row.discount
+    && (state.discountPromptKeys || []).includes(row.key);
+  const mark = listPriced
+    ? `<span class="list-price-mark" title="Full price — this extension can't tell whether Cursor was discounting this model that day.">*</span>`
+    : '';
   return `<tr class="${rowClass}">
     <td>${esc(row.label)}${note}${discountBadge(row.discount)}</td>
-    <td>${fmt.money(row.estCost)}</td>
+    <td>${fmt.money(row.estCost)}${mark}</td>
     <td class="${diffClass}">${formatDiff(row.diff)}</td>
     <td>${row.savings != null ? fmt.money(row.savings) : '—'}</td>
   </tr>`;
@@ -3191,6 +3200,8 @@ function renderCompareTableFromState() {
   if (!filtered.length) {
     $('simCompareBody').innerHTML = `<tr><td colspan="4">Select at least one model above.</td></tr>`;
     updateCompareSortHeaders();
+    renderDiscountPrompt([]);
+    renderCompareFootnote();
     return;
   }
 
@@ -3205,6 +3216,8 @@ function renderCompareTableFromState() {
   $('simCompareBody').innerHTML = rows.map(renderCompareRow).join('');
   updateCompareSortHeaders();
   renderDiscountPrompt(filtered);
+  // After the rows exist — it counts the marks it is explaining.
+  renderCompareFootnote();
 }
 
 /**
@@ -3225,26 +3238,127 @@ function renderDiscountPrompt(visibleRows) {
     el.innerHTML = '';
     return;
   }
-  const catalog = getCompareModels(state.pricing);
-  const names = keys.slice(0, 3).map((k) => catalog.find((x) => x.key === k)?.label || k);
-  const more = keys.length > names.length ? ` and ${keys.length - names.length} more` : '';
+  const names = discountPromptNames(keys);
+  const day = state.simCompareContext?.event
+    ? fmt.shortDate(dayKey(state.simCompareContext.event.timestampMs))
+    : 'that day';
+  const wereWas = keys.length > 1 ? 'were' : 'was';
+  // Leads with the consequence to the reader — "this number may be too high" —
+  // rather than with the mechanism. The mechanism is one click away for anyone
+  // who wants it, and in the intro dialog for anyone who has not met it yet.
   el.innerHTML = `
     <span class="sim-note-text">
-      Priced at list for ${esc(names.join(', '))}${esc(more)} — you didn't run ${keys.length > 1 ? 'them' : 'it'} that day, so a promotion wouldn't show up here.
-      ${tip('Cursor runs limited-time promotions that never reach its published rate table. When you have used a model, this dashboard measures the discount from your own billing; when you have not, there is nothing to measure.')}
+      <strong>${esc(names)}</strong> ${wereWas} priced at full price here. Cursor discounts a model for a few days at a time,
+      and you didn't use ${keys.length > 1 ? 'these models' : 'this model'} on ${esc(day)} — so if there was a discount, this estimate is too high.
     </span>
     <span class="sim-note-actions">
       <button type="button" class="btn-text" id="simDiscountPromptAdd">Add a discount</button>
-      <button type="button" class="btn-text btn-quiet" id="simDiscountPromptDismiss">Not now</button>
+      <button type="button" class="btn-text btn-quiet" id="simDiscountPromptExplain">Why?</button>
+      <button type="button" class="btn-text btn-quiet" id="simDiscountPromptDismiss">Dismiss</button>
     </span>`;
   el.classList.remove('hidden');
   $('simDiscountPromptAdd')?.addEventListener('click', () => {
     setDiscountEditorOpen(true, keys);
   });
+  $('simDiscountPromptExplain')?.addEventListener('click', openSimIntro);
   $('simDiscountPromptDismiss')?.addEventListener('click', () => {
     state.discountPromptDismissed.add(state.simRequestId);
     el.classList.add('hidden');
+    renderCompareFootnote();
   });
+}
+
+/** "GPT-5.2, Claude 4.5 Haiku and 2 more" — model labels, not raw keys. */
+function discountPromptNames(keys) {
+  const catalog = getCompareModels(state.pricing);
+  const names = keys.slice(0, 2).map((k) => catalog.find((x) => x.key === k)?.label || k);
+  const rest = keys.length - names.length;
+  if (rest > 0) names.push(`${rest} more`);
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+/**
+ * The asterisk convention from any priced table: mark the figures that carry a
+ * caveat, explain it once underneath. This survives dismissing the prompt —
+ * the user has said "stop offering", not "stop telling me which numbers are
+ * uncertain", and an unmarked estimate claims a confidence it doesn't have.
+ */
+function renderCompareFootnote() {
+  const el = $('simCompareFootnote');
+  if (!el) return;
+  const marked = document.querySelectorAll('#simCompareBody .list-price-mark').length;
+  if (!marked) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = `<span class="list-price-mark" aria-hidden="true">*</span>
+    Full price — this extension can't tell whether Cursor was discounting ${marked > 1 ? 'these models' : 'this model'} that day.
+    <button type="button" class="btn-link-inline" id="simFootnoteAdd">Add a discount</button>`;
+  el.classList.remove('hidden');
+  $('simFootnoteAdd')?.addEventListener('click', () => {
+    setDiscountEditorOpen(true, state.discountPromptKeys || []);
+  });
+}
+
+const SIM_INTRO_KEY = 'cursorUsage.simIntroSeen';
+
+/**
+ * The one-time explanation of why an estimate might be too high.
+ *
+ * Shown on the first visit to the Simulator rather than the first time a
+ * request happens to lack discount data: the caveat applies to the whole tab,
+ * and a dialog that appears only once some later condition is met reads as an
+ * error report about that request. Seen once, never again — but reachable
+ * afterwards from "What's this?", because a user who clicked through it on day
+ * one will want it back the day they notice a number looks wrong.
+ */
+function openSimIntro() {
+  const el = $('simIntro');
+  if (!el) return;
+  state.simIntroReturnFocus = document.activeElement;
+  el.classList.remove('hidden');
+  $('simIntroDismiss')?.focus();
+}
+
+function closeSimIntro() {
+  const el = $('simIntro');
+  if (!el || el.classList.contains('hidden')) return;
+  el.classList.add('hidden');
+  storage.setItem(SIM_INTRO_KEY, '1');
+  // Returning focus to whatever opened the dialog is what keeps keyboard and
+  // screen-reader users from being dumped at the top of the document.
+  const back = state.simIntroReturnFocus;
+  state.simIntroReturnFocus = null;
+  if (back && typeof back.focus === 'function' && document.contains(back)) back.focus();
+}
+
+function maybeShowSimIntro() {
+  if (storage.getItem(SIM_INTRO_KEY) === '1') return;
+  openSimIntro();
+}
+
+/**
+ * Keeps Tab inside the dialog while it is open. aria-modal tells a screen
+ * reader the rest of the page is inert, but it does not stop the browser
+ * tabbing a sighted keyboard user out into content they cannot see.
+ */
+function trapSimIntroFocus(ev) {
+  const el = $('simIntro');
+  if (ev.key !== 'Tab' || !el || el.classList.contains('hidden')) return;
+  const focusable = [...el.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+    .filter((node) => !node.disabled && node.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (ev.shiftKey && document.activeElement === first) {
+    ev.preventDefault();
+    last.focus();
+  } else if (!ev.shiftKey && document.activeElement === last) {
+    ev.preventDefault();
+    first.focus();
+  }
 }
 
 function addDays(day, n) {
@@ -3272,16 +3386,16 @@ function renderDiscountSummary() {
   const chips = [];
   for (const p of periods) {
     const range = p.start === p.end ? fmt.shortDate(p.start) : `${fmt.shortDate(p.start)}–${fmt.shortDate(p.end)}`;
-    chips.push(`<span class="discount-chip" title="${esc(DISCOUNT_TIPS.detected)}"><strong>−${fmt.discountPct(p.pct)}</strong> ${esc(p.label || p.model)} · ${esc(range)} <span class="discount-chip-src">detected</span></span>`);
+    chips.push(`<span class="discount-chip" title="${esc(DISCOUNT_TIPS.detected)}"><strong>−${fmt.discountPct(p.pct)}</strong> ${esc(p.label || p.model)} · ${esc(range)} <span class="discount-chip-src">from your bill</span></span>`);
   }
   for (const entry of state.manualDiscounts) {
     const models = entry.models.includes('*') ? 'all models' : entry.models.join(', ');
     const range = entry.start === entry.end ? fmt.shortDate(entry.start) : `${fmt.shortDate(entry.start)}–${fmt.shortDate(entry.end)}`;
-    chips.push(`<span class="discount-chip discount-chip-manual" title="${esc(DISCOUNT_TIPS.manual)}"><strong>−${fmt.discountPct(entry.pct)}</strong> ${esc(models)} · ${esc(range)} <span class="discount-chip-src">entered</span></span>`);
+    chips.push(`<span class="discount-chip discount-chip-manual" title="${esc(DISCOUNT_TIPS.manual)}"><strong>−${fmt.discountPct(entry.pct)}</strong> ${esc(models)} · ${esc(range)} <span class="discount-chip-src">you added</span></span>`);
   }
   el.innerHTML = chips.length
     ? chips.join('')
-    : '<span class="sim-note-text">No promotions detected in this range, and none entered.</span>';
+    : `<span class="sim-note-muted">None found in this date range, and none added. Estimates below use Cursor's normal prices.</span>`;
 }
 
 function renderDiscountEditor(preselectKeys = []) {
@@ -3314,9 +3428,9 @@ function renderDiscountEditor(preselectKeys = []) {
   }).join('');
 
   el.innerHTML = `
-    <p class="sim-note-text">
-      Record a promotion Cursor announced but never published as a rate. Every estimate for these models within these dates uses the reduced price.
-      ${tip('Your own requests are always billed at whatever you were actually charged — this only affects the "what would this have cost on another model" estimates.')}
+    <p class="sim-note-muted">
+      Saw a discount announced that isn't showing up here? Add it, and estimates for these models on these dates will use the lower price.
+      ${tip('This only changes the "what would this have cost on another model" estimates. What you were actually charged for your own requests never changes.')}
     </p>
     <div class="discount-form">
       <div class="discount-field discount-field-models">
@@ -3514,7 +3628,10 @@ function setAppView(view) {
     else btn.removeAttribute('aria-current');
   });
   if (view === 'overview') renderOverview();
-  if (view === 'simulator') refreshSimulator();
+  if (view === 'simulator') {
+    refreshSimulator();
+    maybeShowSimIntro();
+  }
   if (view === 'analyze') renderAnalyze();
 }
 
@@ -3687,6 +3804,24 @@ async function init() {
 
   $('simDiscountToggle')?.addEventListener('click', () => {
     setDiscountEditorOpen(!state.discountEditorOpen);
+  });
+
+  $('simDiscountExplain')?.addEventListener('click', openSimIntro);
+  $('simIntroDismiss')?.addEventListener('click', closeSimIntro);
+  $('simIntroAdd')?.addEventListener('click', () => {
+    closeSimIntro();
+    setDiscountEditorOpen(true);
+    $('simDiscountModels')?.querySelector('input')?.focus();
+  });
+  // Clicking the dimmed area outside the dialog dismisses it, the way every
+  // other modal on the web does. Guarded to the backdrop itself so a click that
+  // starts inside the dialog and drifts out does not close it.
+  $('simIntro')?.addEventListener('click', (ev) => {
+    if (ev.target === $('simIntro')) closeSimIntro();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeSimIntro();
+    else trapSimIntroFocus(ev);
   });
 
   $('simCompareTable')?.addEventListener('click', (ev) => {

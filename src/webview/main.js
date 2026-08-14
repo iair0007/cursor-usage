@@ -11,6 +11,7 @@ import {
   matchPricing,
   estimateTokenCost,
   detectDiscounts,
+  describeDiscountRun,
   discountPeriods,
   resolveDiscount,
   detectedDiscountDays,
@@ -3014,6 +3015,9 @@ async function load() {
     // Promotions are inferred from the events themselves, so this has to be
     // rebuilt whenever the loaded range changes — every renderer below reads it.
     state.detectedDiscounts = detectDiscounts(state.all, state.pricing);
+    // Written every load, because "no discount found" has several very
+    // different causes and none of them are visible from the panel.
+    void rpc('log', { text: describeDiscountRun(state.detectedDiscounts, state.all.length) }).catch(() => {});
     // Not signed in is not "zero usage" — keep the placeholders in that case.
     state.loaded = usage.authMode !== 'none';
     state.page = 1;

@@ -142,6 +142,61 @@ export function eventsWithinRange<T extends { timestamp?: number | string }>(
   });
 }
 
+/**
+ * How well the API's rows carry the billing fields this extension derives from,
+ * per model.
+ *
+ * `tokenUsage.totalCents` is the model's own token value, and the only thing
+ * discount detection can measure against the published rates. Cursor does not
+ * always send it, and when it is missing the dashboard still shows costs (they
+ * come from `chargedCents`) while detection silently has nothing to work with —
+ * so an account can look completely healthy and still never report a promotion.
+ * Counting it per model is what tells those two apart from a log.
+ *
+ * Counts and model names only. These lines are written to a channel people
+ * paste into bug reports, so nothing identifying goes in: no conversation ids,
+ * no email, nothing derived from a prompt.
+ */
+export function describeBillingFieldCoverage(
+  events: { model?: string; chargedCents?: unknown; isTokenBasedCall?: unknown;
+    cursorTokenFee?: unknown; tokenUsage?: { totalCents?: unknown } | null }[],
+): string {
+  if (!events.length) return 'Billing fields: no events to describe.';
+  const has = (v: unknown) => v != null;
+  const per = new Map<string, { n: number; totalCents: number; charged: number; tokenBased: number }>();
+  for (const e of events) {
+    const key = e.model || 'unknown';
+    const row = per.get(key) || { n: 0, totalCents: 0, charged: 0, tokenBased: 0 };
+    row.n++;
+    if (has(e.tokenUsage?.totalCents)) row.totalCents++;
+    if (has(e.chargedCents)) row.charged++;
+    if (e.isTokenBasedCall) row.tokenBased++;
+    per.set(key, row);
+  }
+  const totals = [...per.values()].reduce(
+    (a, r) => ({
+      n: a.n + r.n,
+      totalCents: a.totalCents + r.totalCents,
+      charged: a.charged + r.charged,
+      tokenBased: a.tokenBased + r.tokenBased,
+    }),
+    { n: 0, totalCents: 0, charged: 0, tokenBased: 0 },
+  );
+  const lines = [
+    `Billing fields on ${totals.n} event(s): tokenUsage.totalCents on ${totals.totalCents}`
+    + `, chargedCents on ${totals.charged}, isTokenBasedCall on ${totals.tokenBased}.`,
+  ];
+  if (!totals.totalCents) {
+    lines.push('  No row carries tokenUsage.totalCents — the model token value is'
+      + ' reconstructed from chargedCents less the token fee, and discount detection'
+      + ' depends on that reconstruction being right.');
+  }
+  for (const [model, r] of [...per].sort((a, b) => b[1].n - a[1].n).slice(0, 15)) {
+    lines.push(`  ${model}: ${r.n} request(s), totalCents on ${r.totalCents}, chargedCents on ${r.charged}`);
+  }
+  return lines.join('\n');
+}
+
 /** Earliest/latest usable event timestamp in ms, or null when none have one. */
 export function eventTimestampSpan<T extends { timestamp?: number | string }>(
   events: T[],

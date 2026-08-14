@@ -21,6 +21,7 @@ import {
 } from './api';
 import {
   billingCycleWindow,
+  describeBillingFieldCoverage,
   eventKindTotals,
   eventTimestampSpan,
   eventsWithinRange,
@@ -36,6 +37,7 @@ export {
   billingCycleWindow,
   clampPeriodDays,
   countRequests,
+  describeBillingFieldCoverage,
   eventBillingRegime,
   eventCostDollars,
   eventKindTotals,
@@ -297,6 +299,8 @@ export class UsageService {
       `Usage window ${iso(startMs)} → ${iso(endMs)}: API returned ${events.length} event(s)`
       + (span ? ` spanning ${iso(span.min)} → ${iso(span.max)}` : ' (none carry a usable timestamp)'),
     );
+
+    if (events.length) for (const line of describeBillingFieldCoverage(events).split('\n')) this.log(line);
 
     const kept = eventsWithinRange(events, startMs, endMs);
     if (kept.length !== events.length) {

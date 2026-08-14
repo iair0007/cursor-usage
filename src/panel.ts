@@ -122,6 +122,14 @@ export class DashboardPanel {
         await this.context.globalState.update(PREFS_KEY, prefs);
         return { ok: true };
       }
+      // The webview holds the pricing table and every derived figure, so the
+      // reasoning worth reading in a bug report only exists there. Capped
+      // rather than trusted: this writes into the channel people paste from.
+      case 'log': {
+        const text = String(params.text ?? '').slice(0, 4000);
+        if (text) for (const line of text.split('\n')) this.log(line);
+        return { ok: true };
+      }
       case 'copyText':
         await vscode.env.clipboard.writeText(String(params.text ?? ''));
         return { ok: true };

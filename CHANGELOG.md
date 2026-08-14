@@ -74,6 +74,14 @@ All notable user-facing changes. Earlier releases predate this file; see the
   requests — Auto, on a plan that bundles them — showed a dash meaning it had
   never touched it, or dropped out of the table entirely. Rows are built from
   the requests themselves now, and each figure carries its request count.
+- **The log now explains why a discount was or wasn't found.** Every load writes
+  which billing fields the API actually returned, per model, and what discount
+  detection concluded for each model-day — measured, too few requests to tell,
+  scattered, or a real gap. "No discount found" had several very different
+  causes and none of them were visible from outside, which is what let a live
+  promotion pass for a range that had been checked. Counts and model names only:
+  no conversation ids, no email, nothing derived from a prompt, since this is
+  the channel people paste into bug reports.
 - **Refresh now picks up renamed chats.** Cursor names a conversation once it
   has a subject, and the index those names come from is cached for five minutes
   to keep a multi-gigabyte file off the scroll path. Refresh drops it, rather

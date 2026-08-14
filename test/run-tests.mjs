@@ -34,6 +34,7 @@ const {
   mergeCompareSelection,
   estimateTokenCost,
   cacheSavingsFor,
+  describeDiscountRun,
   detectDiscounts,
   discountPeriods,
   resolveDiscount,
@@ -389,6 +390,36 @@ test('a published cache-write rate is used as-is — the floor only guards subst
   }));
   const { discounts } = detectDiscounts(events, pricing);
   assert.equal(discounts['claude-4-5-sonnet']['2026-08-13'].pct, 50, 'writes dominate yet the rate is known');
+});
+test('diagnostics name the reason a request could not be measured', () => {
+  const noValue = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelTokenCost: null }));
+  const { diagnostics } = detectDiscounts(noValue, pricing);
+  assert.equal(diagnostics.considered, 0);
+  assert.deepEqual(diagnostics.skipped, { 'no per-request token value (cursor-grok-4-6-high)': 4 });
+  const text = describeDiscountRun(detectDiscounts(noValue, pricing), noValue.length);
+  assert.match(text, /0 measurable/);
+  assert.match(text, /no per-request token value/);
+});
+test('diagnostics record the verdict for a day that was measured', () => {
+  const { diagnostics } = detectDiscounts(halfPriceDay, pricing);
+  assert.equal(diagnostics.considered, 4);
+  assert.deepEqual(diagnostics.days, [{
+    model: 'cursor-grok-4-6-high', day: '2026-08-13', samples: 4, pct: 50, verdict: 'discount 50%',
+  }]);
+});
+test('diagnostics separate "no discount" from "too few to tell"', () => {
+  const listPrice = detectDiscounts([0, 1, 2, 3].map((i) => grokEvent(i, 1)), pricing);
+  assert.match(listPrice.diagnostics.days[0].verdict, /no discount/);
+  const tooFew = detectDiscounts([grokEvent(0, 0.5)], pricing);
+  assert.match(tooFew.diagnostics.days[0].verdict, /too few samples/);
+});
+test('the log line carries no ids, emails or prompt text — only models and counts', () => {
+  const withIds = halfPriceDay.map((e, i) => ({
+    ...e, conversationId: `conv_secret_${i}`, email: 'someone@example.com',
+  }));
+  const text = describeDiscountRun(detectDiscounts(withIds, pricing), withIds.length);
+  assert.ok(!text.includes('conv_secret'), 'no conversation ids');
+  assert.ok(!text.includes('@'), 'no email addresses');
 });
 test('discounts are tracked per day, so a promotion that ends is not backdated', () => {
   const events = [
@@ -1183,6 +1214,26 @@ test('an in-window response is passed through untouched', () => {
   const end = Date.UTC(2026, 7, 12, 23, 59, 59, 999);
   const events = [{ id: 'a', timestamp: Date.UTC(2026, 7, 5) }];
   assert.deepEqual(service.eventsWithinRange(events, start, end), events);
+});
+
+console.log('service.describeBillingFieldCoverage (the log that explains a silent detector)');
+const coverageEvents = [
+  { model: 'cursor-grok-4.6-high', chargedCents: 30, isTokenBasedCall: true, tokenUsage: {} },
+  { model: 'cursor-grok-4.6-high', chargedCents: 39, isTokenBasedCall: true, tokenUsage: {} },
+  { model: 'Auto', chargedCents: 8, isTokenBasedCall: true, tokenUsage: { totalCents: 8 } },
+];
+test('it counts the field detection depends on, per model', () => {
+  const text = service.describeBillingFieldCoverage(coverageEvents);
+  assert.match(text, /tokenUsage\.totalCents on 1/);
+  assert.match(text, /cursor-grok-4\.6-high: 2 request\(s\), totalCents on 0/);
+});
+test('it calls out an account where the field is missing everywhere', () => {
+  const none = coverageEvents.map((e) => ({ ...e, tokenUsage: {} }));
+  assert.match(service.describeBillingFieldCoverage(none), /No row carries tokenUsage\.totalCents/);
+  assert.doesNotMatch(service.describeBillingFieldCoverage(coverageEvents), /No row carries/);
+});
+test('it says nothing rather than throwing on an empty range', () => {
+  assert.match(service.describeBillingFieldCoverage([]), /no events/);
 });
 
 test('panel and status bar report the same totals for the same events', () => {

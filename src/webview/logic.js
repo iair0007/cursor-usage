@@ -453,24 +453,49 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
   const cfg = { ...DISCOUNT_DETECTION, ...opts };
   const discounts = {};
   const observed = new Set();
-  if (!pricing) return { discounts, observed };
+  // Why requests were left out, and how each model-day came out. Every skip
+  // here is silent by design — one unusable request is not worth a word — but
+  // when nothing is found at all, "we measured and there was no promotion" and
+  // "we could not measure anything" look identical from outside, and only one
+  // of them means the estimates on screen are trustworthy.
+  const diagnostics = { considered: 0, skipped: {}, days: [] };
+  const skip = (reason, model) => {
+    const key = model ? `${reason} (${model})` : reason;
+    diagnostics.skipped[key] = (diagnostics.skipped[key] || 0) + 1;
+  };
+  if (!pricing) {
+    skip('no pricing table');
+    return { discounts, observed, diagnostics };
+  }
 
   const buckets = new Map();
   for (const e of events || []) {
-    if (!e || !e.timestampMs) continue;
+    if (!e || !e.timestampMs) {
+      skip('no timestamp');
+      continue;
+    }
     const n = normModel(e.modelRaw);
     // Auto routes to a model Cursor does not name, so its billed value cannot
     // be checked against any single rate row.
-    if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) continue;
+    if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) {
+      skip('Auto or unnamed model');
+      continue;
+    }
 
     // The billed value of the tokens alone. `tokenCost` folds in the Cursor
     // token fee, which is charged on top of the model rate and would read as a
     // surcharge — comparing it against the rate table understates every promo.
     const actual = e.modelTokenCost;
-    if (actual == null || !(actual > 0)) continue;
+    if (actual == null || !(actual > 0)) {
+      skip('no per-request token value', n);
+      continue;
+    }
 
     const rates = matchPricing(e.modelRaw, pricing);
-    if (!rates) continue;
+    if (!rates) {
+      skip('no published rate row', n);
+      continue;
+    }
 
     const tokens = {
       input: e.inputTokens,
@@ -479,7 +504,10 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       cacheWrite: e.cacheWriteTokens,
     };
     const expected = estimateTokenCost(rates, tokens);
-    if (expected == null || expected < cfg.minExpectedCost) continue;
+    if (expected == null || expected < cfg.minExpectedCost) {
+      skip('below the sub-cent floor', n);
+      continue;
+    }
 
     // Where the table publishes no cache-write rate, estimateTokenCost bills
     // those tokens at the input rate. That is not a wild guess — Anthropic is
@@ -501,11 +529,18 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     let floorExpected = expected;
     if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) {
       floorExpected = estimateTokenCost({ ...rates, cacheWrite: 0 }, tokens);
-      if (floorExpected == null || !(floorExpected > 0)) continue;
+      if (floorExpected == null || !(floorExpected > 0)) {
+        skip('cache-write rate unbounded', n);
+        continue;
+      }
     }
 
     const day = dayKey(e.timestampMs);
-    if (!day) continue;
+    if (!day) {
+      skip('no timestamp');
+      continue;
+    }
+    diagnostics.considered++;
     const bucketKey = `${n}|${day}`;
     if (!buckets.has(bucketKey)) {
       buckets.set(bucketKey, { n, day, ratios: [], floorRatios: [], label: rates.label });
@@ -515,11 +550,17 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     bucket.floorRatios.push(actual / floorExpected);
   }
 
-  for (const { n, day, ratios, floorRatios, label } of buckets.values()) {
-    if (ratios.length < cfg.minSamples) continue;
+  const outcome = (n, day, samples, pct, verdict) => {
+    diagnostics.days.push({ model: n, day, samples, pct: Math.round(pct * 10) / 10, verdict });
+  };
 
+  for (const { n, day, ratios, floorRatios, label } of buckets.values()) {
     const sorted = [...ratios].sort((a, b) => a - b);
     const rawPct = (1 - median(sorted)) * 100;
+    if (ratios.length < cfg.minSamples) {
+      outcome(n, day, ratios.length, rawPct, `too few samples (needs ${cfg.minSamples})`);
+      continue;
+    }
     // The same day priced with cache writes free. Equal to rawPct unless a
     // substitution was involved, so this only ever bites where one was.
     const floorPct = (1 - median([...floorRatios].sort((a, b) => a - b))) * 100;
@@ -528,15 +569,27 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     // answered, so it is deliberately left out of `observed`: the Simulator
     // keeps offering to record the promotion by hand, which is the right
     // fallback for a day we cannot measure.
-    if (rawPct >= cfg.minPct && floorPct < cfg.minPct) continue;
+    if (rawPct >= cfg.minPct && floorPct < cfg.minPct) {
+      outcome(n, day, ratios.length, rawPct, `unprovable — free cache writes would explain it (floor ${floorPct.toFixed(1)}%)`);
+      continue;
+    }
 
     observed.add(`${n}|${day}`);
-    if (rawPct < cfg.minPct || rawPct > cfg.maxPct) continue;
+    if (rawPct < cfg.minPct || rawPct > cfg.maxPct) {
+      outcome(n, day, ratios.length, rawPct, rawPct < cfg.minPct
+        ? `no discount (gap under the ${cfg.minPct}% floor)`
+        : `rejected (gap over ${cfg.maxPct}% — something is wrong with the comparison)`);
+      continue;
+    }
 
     // A real promotion prices every request the same way. Wide scatter means
     // the gap is coming from surcharges or model routing, not a rate change.
     const agreeing = ratios.filter((r) => Math.abs((1 - r) * 100 - rawPct) <= cfg.tolerancePct).length;
-    if (agreeing / ratios.length < cfg.minAgreement) continue;
+    if (agreeing / ratios.length < cfg.minAgreement) {
+      outcome(n, day, ratios.length, rawPct, `scattered — only ${agreeing}/${ratios.length} requests agree`);
+      continue;
+    }
+    outcome(n, day, ratios.length, rawPct, `discount ${snapDiscountPct(rawPct, cfg)}%`);
 
     if (!discounts[n]) discounts[n] = {};
     discounts[n][day] = {
@@ -546,7 +599,34 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     };
   }
 
-  return { discounts, observed };
+  return { discounts, observed, diagnostics };
+}
+
+/**
+ * One-paragraph account of what discount detection just did, for the log.
+ *
+ * Deliberately shape-and-count only: model names and tallies, never a
+ * conversation id, an email or anything from a prompt — this is written to a
+ * channel people paste into bug reports.
+ */
+export function describeDiscountRun(detected, eventCount) {
+  const d = detected?.diagnostics;
+  if (!d) return 'Discount detection: no diagnostics available.';
+  const lines = [
+    `Discount detection over ${eventCount} event(s): ${d.considered} measurable, `
+    + `${d.days.length} model-day bucket(s).`,
+  ];
+  const skips = Object.entries(d.skipped).sort((a, b) => b[1] - a[1]);
+  if (skips.length) {
+    lines.push(`  Not measurable: ${skips.map(([reason, n]) => `${n} × ${reason}`).join('; ')}`);
+  }
+  for (const day of d.days.sort((a, b) => (a.day < b.day ? 1 : -1)).slice(0, 20)) {
+    lines.push(`  ${day.day} ${day.model}: ${day.samples} request(s), ${day.pct}% below list → ${day.verdict}`);
+  }
+  if (!d.days.length) {
+    lines.push('  No model reached a full day of comparable requests, so nothing could be concluded.');
+  }
+  return lines.join('\n');
 }
 
 /** Contiguous day ranges per model, for describing a promotion as a period. */

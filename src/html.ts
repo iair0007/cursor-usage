@@ -420,6 +420,19 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             </div>
             <p id="simCompareFilterHint" class="sim-filter-hint hidden">Select at least one model.</p>
           </label>
+          <div class="sim-discounts">
+            <div class="sim-discounts-bar">
+              <span class="sim-discounts-title">Model discounts</span>
+              <span class="sim-discounts-actions">
+                <button type="button" class="btn-text" id="simDiscountExplain">What's this?</button>
+                <span class="sim-picker-sep">·</span>
+                <button type="button" class="btn-text" id="simDiscountToggle">Add or edit</button>
+              </span>
+            </div>
+            <div id="simDiscountSummary" class="sim-discount-summary"></div>
+            <div id="simDiscountEditor" class="sim-discount-editor hidden"></div>
+          </div>
+          <div id="simDiscountPrompt" class="sim-note hidden"></div>
           <div class="sim-compare-table-wrap">
             <table class="sim-compare-table" id="simCompareTable">
               <thead>
@@ -433,6 +446,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
               <tbody id="simCompareBody"></tbody>
             </table>
           </div>
+          <p id="simCompareFootnote" class="sim-footnote hidden"></p>
         </div>
 
         <div id="simCustomPanel" class="hidden">
@@ -478,6 +492,25 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         </div>
       </div>
     </section>
+  </div>
+
+  <div class="modal-backdrop hidden" id="simIntro" role="dialog" aria-modal="true" aria-labelledby="simIntroTitle" aria-describedby="simIntroBody">
+    <div class="modal">
+      <h2 id="simIntroTitle">One thing about these estimates</h2>
+      <div id="simIntroBody">
+        <p>This tab replays a request you already made against other models' prices, to show what it might have cost elsewhere.</p>
+        <p><strong>Cursor sometimes puts a model on sale</strong> — half price for a week, that sort of thing. Those sales are announced in blog posts, never in the price list this extension reads, so a discounted model still looks full-price here.</p>
+        <p>Two things follow from that:</p>
+        <ul>
+          <li><strong>Your own costs are always right.</strong> Every figure for a request you actually made is what Cursor really charged you, sale or no sale.</li>
+          <li><strong>Estimates for other models might be too high.</strong> If you used the model recently, this extension works the discount out from your own bill. If you didn't, there's nothing to work it out from — so you can tell it, and every estimate will use the lower price.</li>
+        </ul>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-text" id="simIntroDismiss">Got it</button>
+        <button type="button" class="btn-primary" id="simIntroAdd">Add a discount</button>
+      </div>
+    </div>
   </div>
   <script nonce="${n}" src="${script}"></script>
 </body>

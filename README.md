@@ -90,6 +90,8 @@ Alongside cost it shows requests, avg per request, per-day rates and cache hit r
 
 Replay any real request's token profile against other models' published rates — *"what would this request have cost on Haiku?"* — or price a custom token profile from scratch.
 
+**Promotions.** Cursor runs limited-time discounts ("Grok is half price this week") that it announces in prose and never publishes as a machine-readable rate. Your own requests are unaffected — they always show what Cursor actually charged — but an estimate for a model you *didn't* use has only the list price to go on. So the Simulator does both: where you have run a model, it infers the discount by comparing what you were billed against the published rates (several requests in a day have to agree before it will claim one), and where you haven't, it offers to let you record the promotion yourself and remembers it for future sessions. Discounted models are badged wherever they appear, and a measured discount is always shown as distinct from one you entered.
+
 ## Commands
 
 | Command | Description |
@@ -140,6 +142,7 @@ Secrets are stored in VS Code SecretStorage (your OS keychain), never in setting
 - The personal-usage endpoints (`cursor.com/api/dashboard/*`) are **unofficial** — Cursor can change them at any time. Each data source degrades gracefully; the Admin API path uses the documented official API.
 - Cache savings are **estimates**: cache-read tokens × (input rate − cache-read rate) at published per-model pricing. Simulator numbers are directional (same tokens, different rates), not quotes.
 - If cursor.com's pricing page can't be reached, the dashboard falls back to a small bundled rate table (clearly flagged) instead of breaking cost estimates.
+- Detected promotions are **inferred**, not published. Billing is rounded to the cent and can carry surcharges the rate table doesn't break out, so the detector is deliberately cautious — it wants several requests in a day priced consistently below list before it will call it a discount, and it will miss small or short ones. It never adjusts what you were actually charged; it only affects the estimates for other models.
 
 ## Contributing
 

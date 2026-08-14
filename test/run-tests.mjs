@@ -34,6 +34,14 @@ const {
   mergeCompareSelection,
   estimateTokenCost,
   cacheSavingsFor,
+  detectDiscounts,
+  discountPeriods,
+  resolveDiscount,
+  manualDiscountFor,
+  applyDiscountToRates,
+  modelsMissingDiscountInfo,
+  normalizeDiscountEntry,
+  detectedDiscountDays,
   displayModel,
   normalize,
   summarize,
@@ -86,7 +94,6 @@ test('parses Auto rates', () => {
   assert.equal(pricing.auto.output, 6.0);
 });
 test('parses model table incl. links and missing cells', () => {
-  assert.equal(pricing.models.length, 4);
   const sonnet = pricing.models.find((m) => m.display === 'Claude 4.5 Sonnet');
   assert.deepEqual(
     [sonnet.input, sonnet.cacheWrite, sonnet.cacheRead, sonnet.output],
@@ -94,6 +101,15 @@ test('parses model table incl. links and missing cells', () => {
   );
   const gpt = pricing.models.find((m) => m.display === 'GPT-5.2');
   assert.equal(gpt.cacheWrite, null);
+});
+test('parses the Cursor Models pool table, a differently-shaped table under its own heading', () => {
+  assert.equal(pricing.models.length, 9);
+  const grok = pricing.models.find((m) => m.display === 'Grok 4.6');
+  assert.deepEqual([grok.input, grok.cacheWrite, grok.cacheRead, grok.output], [2, null, 0.5, 6]);
+  const grokFast = pricing.models.find((m) => m.display === 'Grok 4.6 (Fast)');
+  assert.deepEqual([grokFast.input, grokFast.cacheWrite, grokFast.cacheRead, grokFast.output], [4, null, 1, 12]);
+  const composer = pricing.models.find((m) => m.display === 'Composer 2.5');
+  assert.deepEqual([composer.input, composer.cacheWrite, composer.cacheRead, composer.output], [0.5, null, 0.2, 2.5]);
 });
 test('real scrape is not flagged as fallback', () => {
   assert.equal(pricing.fallback, false);
@@ -120,6 +136,14 @@ test('alias and partial matching', () => {
   assert.equal(matchPricing('claude-4.5-sonnet', pricing).label, 'Claude 4.5 Sonnet');
   assert.equal(matchPricing('claude-4-5-sonnet-thinking', pricing).label, 'Claude 4.5 Sonnet');
 });
+test('a billed variant string prices off the base model, not a model of its own', () => {
+  // Cursor bills reasoning effort as part of the model string; there is no
+  // separate published rate per effort level, only per model.
+  assert.equal(matchPricing('cursor-grok-4.6-high', pricing).label, 'Grok 4.6');
+});
+test('the longest matching catalog name wins, so a Fast variant prices off its own row', () => {
+  assert.equal(matchPricing('cursor-grok-4.6-fast-high', pricing).label, 'Grok 4.6 (Fast)');
+});
 test('unknown model returns null', () => {
   assert.equal(matchPricing('mystery-model-9000', pricing), null);
 });
@@ -131,22 +155,31 @@ test('lists Auto plus every priced catalog model', () => {
   assert.ok(keys.includes('claude-4-5-sonnet'));
   assert.ok(keys.includes('composer-2-5'));
 });
-test('adds models seen in usage that the pricing table does not name', () => {
-  const events = [{ modelRaw: 'cursor-grok-4.6-high' }, { modelRaw: 'cursor-grok-4.6-high' }];
+test('adds models seen in usage that the pricing table truly does not name', () => {
+  const events = [{ modelRaw: 'cursor-mystery-model-9000-high' }, { modelRaw: 'cursor-mystery-model-9000-high' }];
   const models = simulatorModels(pricing, events);
-  const grok = models.find((m) => m.key === 'cursor-grok-4.6-high');
-  assert.ok(grok, 'model from usage data must be offered');
-  assert.equal(grok.source, 'usage');
-  // Fixture pricing has no grok row, so there is nothing to price it with —
-  // it is still listed, just flagged.
-  assert.equal(grok.priced, false);
-  assert.equal(grok.rates, null);
+  const unknown = models.find((m) => m.key === 'cursor-mystery-model-9000-high');
+  assert.ok(unknown, 'model from usage data must be offered');
+  assert.equal(unknown.source, 'usage');
+  // Nothing in the fixture prices this — it is still listed, just flagged.
+  assert.equal(unknown.priced, false);
+  assert.equal(unknown.rates, null);
 });
-test('a usage model the table does name is priced off the closest row', () => {
+test('a billed variant string that prices off a catalog row is not offered as a duplicate entry', () => {
+  // "cursor-grok-4.6-high" is Grok 4.6 billed at a reasoning effort, not a
+  // separate model — the catalog's own "Grok 4.6" row already covers it.
+  const models = simulatorModels(pricing, [{ modelRaw: 'cursor-grok-4.6-high' }]);
+  assert.ok(!models.some((m) => m.key === 'cursor-grok-4.6-high'));
+  const grok = models.find((m) => m.key === 'grok-4-6');
+  assert.ok(grok, 'Grok 4.6 catalog entry must still be offered');
+  assert.equal(grok.priced, true);
+});
+test('same for a variant of a model already carrying a "-thinking" suffix', () => {
   const models = simulatorModels(pricing, [{ modelRaw: 'claude-4-5-sonnet-thinking' }]);
-  const variant = models.find((m) => m.key === 'claude-4-5-sonnet-thinking');
-  assert.equal(variant.priced, true);
-  assert.equal(variant.rates.label, 'Claude 4.5 Sonnet');
+  assert.ok(!models.some((m) => m.key === 'claude-4-5-sonnet-thinking'));
+  const sonnet = models.find((m) => m.key === 'claude-4-5-sonnet');
+  assert.equal(sonnet.priced, true);
+  assert.equal(sonnet.rates.label, 'Claude 4.5 Sonnet');
 });
 test('usage models already in the catalog are not duplicated', () => {
   const models = simulatorModels(pricing, [{ modelRaw: 'GPT-5.2' }, { modelRaw: 'gpt-5-2' }]);
@@ -175,10 +208,10 @@ test('falls back to the head of the list when usage is too thin to rank', () => 
   assert.deepEqual([...picked], models.slice(0, 3).map((m) => m.key));
 });
 test('never defaults to a model it cannot price', () => {
-  const events = [...Array(9).fill({ modelRaw: 'cursor-grok-4.6-high' }), { modelRaw: 'gpt-5.2' }];
+  const events = [...Array(9).fill({ modelRaw: 'cursor-mystery-model-9000-high' }), { modelRaw: 'gpt-5.2' }];
   const models = simulatorModels(pricing, events);
   const picked = defaultCompareSelection(models, events, 4);
-  assert.ok(!picked.has('cursor-grok-4.6-high'));
+  assert.ok(!picked.has('cursor-mystery-model-9000-high'));
 });
 
 console.log('mergeCompareSelection');
@@ -218,6 +251,204 @@ test('cacheSavingsFor uses input minus cache-read rate', () => {
   const rates = matchPricing('claude-4.5-sonnet', pricing);
   const savings = cacheSavingsFor({ cacheRead: 1_000_000 }, rates);
   assert.ok(Math.abs(savings - 2.7) < 1e-9);
+});
+
+console.log('promotional discounts');
+// A day's worth of Grok 4.6 requests. Fixture rates: $2 input / $0.5 cache
+// read / $6 output per 1M, so these tokens list at $0.20 each.
+const GROK_TOKENS = { input: 50_000, output: 10_000, cacheRead: 80_000, cacheWrite: 0 };
+const LIST_COST = 0.2;
+function grokEvent(i, factor, day = '2026-08-13', tokens = GROK_TOKENS) {
+  return {
+    id: `g${i}`,
+    timestampMs: new Date(`${day}T1${i % 9}:00:00`).getTime(),
+    modelRaw: 'cursor-grok-4.6-high',
+    modelTokenCost: LIST_COST * factor,
+    inputTokens: tokens.input,
+    outputTokens: tokens.output,
+    cacheReadTokens: tokens.cacheRead,
+    cacheWriteTokens: tokens.cacheWrite,
+  };
+}
+const halfPriceDay = [0, 1, 2, 3].map((i) => grokEvent(i, 0.5));
+
+test('the fixture rates price the sample day at list, so a gap means a promotion', () => {
+  const rates = matchPricing('cursor-grok-4.6-high', pricing);
+  assert.ok(Math.abs(estimateTokenCost(rates, GROK_TOKENS) - LIST_COST) < 1e-9);
+});
+test('a consistent half-price day is detected as a 50% promotion', () => {
+  const { discounts } = detectDiscounts(halfPriceDay, pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 50);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].samples, 4);
+});
+test('a near-miss ratio snaps to the round number a promotion would actually be', () => {
+  // 0.512 of list is a 48.8% gap — cent-rounding around a 50% promo.
+  const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => grokEvent(i, 0.512)), pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 50);
+});
+test('paying list price is not a discount', () => {
+  const { discounts, observed } = detectDiscounts([0, 1, 2, 3].map((i) => grokEvent(i, 1)), pricing);
+  assert.deepEqual(discounts, {});
+  // Still observed: we checked this day and concluded there was no promotion.
+  assert.ok(observed.has('cursor-grok-4-6-high|2026-08-13'));
+});
+test('a surcharge (billed above list) is never reported as a discount', () => {
+  const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => grokEvent(i, 1.4)), pricing);
+  assert.deepEqual(discounts, {});
+});
+test('one cheap request is not enough evidence', () => {
+  const { discounts, observed } = detectDiscounts([grokEvent(0, 0.5)], pricing);
+  assert.deepEqual(discounts, {});
+  assert.equal(observed.size, 0, 'too few samples is "unknown", not "no discount"');
+});
+test('scattered ratios are surcharge noise, not a promotion', () => {
+  const noisy = [0.5, 0.95, 0.6, 1.0, 0.45].map((f, i) => grokEvent(i, f));
+  const { discounts } = detectDiscounts(noisy, pricing);
+  assert.deepEqual(discounts, {}, 'no single rate explains these requests');
+});
+test('sub-cent requests are ignored — rounding moves them more than a promo would', () => {
+  const tiny = { input: 200, output: 50, cacheRead: 300, cacheWrite: 0 };
+  const { discounts, observed } = detectDiscounts(
+    [0, 1, 2, 3].map((i) => grokEvent(i, 0.5, '2026-08-13', tiny)),
+    pricing,
+  );
+  assert.deepEqual(discounts, {});
+  assert.equal(observed.size, 0);
+});
+test('Auto is skipped — its billed value belongs to a model Cursor does not name', () => {
+  const autos = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelRaw: 'auto' }));
+  assert.deepEqual(detectDiscounts(autos, pricing).discounts, {});
+});
+test('an unpriced cache write is skipped rather than guessed at', () => {
+  // Grok has no published cache-write rate, so estimateTokenCost would fall
+  // back to the input rate and invent a gap.
+  const withWrites = [0, 1, 2, 3].map((i) => grokEvent(i, 0.5, '2026-08-13', { ...GROK_TOKENS, cacheWrite: 40_000 }));
+  assert.deepEqual(detectDiscounts(withWrites, pricing).discounts, {});
+});
+test('discounts are tracked per day, so a promotion that ends is not backdated', () => {
+  const events = [
+    ...[0, 1, 2, 3].map((i) => grokEvent(i, 0.5, '2026-08-13')),
+    ...[4, 5, 6, 7].map((i) => grokEvent(i, 1, '2026-08-20')),
+  ];
+  const { discounts } = detectDiscounts(events, pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 50);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-20'], undefined);
+});
+test('detectedDiscountDays lists the discounted days for a model', () => {
+  const detected = detectDiscounts(halfPriceDay, pricing);
+  assert.deepEqual(detectedDiscountDays(detected, 'cursor-grok-4.6-high'), ['2026-08-13']);
+  assert.deepEqual(detectedDiscountDays(detected, 'gpt-5.2'), []);
+});
+test('no pricing table means nothing can be inferred', () => {
+  assert.deepEqual(detectDiscounts(halfPriceDay, null).discounts, {});
+});
+
+console.log('discountPeriods');
+test('consecutive discounted days collapse into one promotion window', () => {
+  const events = ['2026-08-12', '2026-08-13', '2026-08-14']
+    .flatMap((day, d) => [0, 1, 2, 3].map((i) => grokEvent(i, 0.5, day)));
+  const periods = discountPeriods(detectDiscounts(events, pricing));
+  assert.equal(periods.length, 1);
+  assert.deepEqual([periods[0].start, periods[0].end, periods[0].pct], ['2026-08-12', '2026-08-14', 50]);
+});
+test('a gap in the days splits the run into two promotions', () => {
+  const events = ['2026-08-12', '2026-08-20']
+    .flatMap((day) => [0, 1, 2, 3].map((i) => grokEvent(i, 0.5, day)));
+  assert.equal(discountPeriods(detectDiscounts(events, pricing)).length, 2);
+});
+
+console.log('manual discounts');
+const manualEntry = normalizeDiscountEntry({ models: ['grok-4-6'], start: '2026-08-12', end: '2026-08-19', pct: 50 });
+test('a valid entry is canonicalized and given an id', () => {
+  assert.deepEqual(manualEntry.models, ['grok-4-6']);
+  assert.equal(manualEntry.pct, 50);
+  assert.ok(manualEntry.id);
+});
+test('nonsensical entries are rejected rather than stored', () => {
+  assert.equal(normalizeDiscountEntry({ models: ['x'], start: '2026-08-12', end: '2026-08-19', pct: 0 }), null);
+  assert.equal(normalizeDiscountEntry({ models: ['x'], start: '2026-08-12', end: '2026-08-19', pct: 100 }), null);
+  assert.equal(normalizeDiscountEntry({ models: [], start: '2026-08-12', end: '2026-08-19', pct: 50 }), null);
+  assert.equal(normalizeDiscountEntry({ models: ['x'], start: '2026-08-19', end: '2026-08-12', pct: 50 }), null, 'backwards range');
+  assert.equal(normalizeDiscountEntry({ models: ['x'], start: 'whenever', end: '2026-08-19', pct: 50 }), null);
+});
+test('an entry applies only inside its own dates', () => {
+  assert.ok(manualDiscountFor([manualEntry], 'grok-4-6', '2026-08-12'), 'first day is inside');
+  assert.ok(manualDiscountFor([manualEntry], 'grok-4-6', '2026-08-19'), 'last day is inside');
+  assert.equal(manualDiscountFor([manualEntry], 'grok-4-6', '2026-08-11'), null);
+  assert.equal(manualDiscountFor([manualEntry], 'grok-4-6', '2026-08-20'), null);
+});
+test('an entry covers the billed variant strings of the model it names', () => {
+  assert.ok(manualDiscountFor([manualEntry], 'cursor-grok-4.6-high', '2026-08-13'));
+  assert.equal(manualDiscountFor([manualEntry], 'gpt-5.2', '2026-08-13'), null);
+});
+test('a model-specific entry beats a blanket one rather than the larger winning', () => {
+  const blanket = normalizeDiscountEntry({ models: ['*'], start: '2026-08-12', end: '2026-08-19', pct: 90 });
+  const picked = manualDiscountFor([blanket, manualEntry], 'grok-4-6', '2026-08-13');
+  assert.equal(picked.pct, 50, 'the entry naming the model is the more specific answer');
+  assert.equal(manualDiscountFor([blanket, manualEntry], 'gpt-5.2', '2026-08-13').pct, 90);
+});
+
+console.log('resolveDiscount');
+test('a measured discount outranks a hand-entered one', () => {
+  const detected = detectDiscounts(halfPriceDay, pricing);
+  const wrong = normalizeDiscountEntry({ models: ['grok-4-6'], start: '2026-08-01', end: '2026-08-31', pct: 20 });
+  const got = resolveDiscount('cursor-grok-4.6-high', '2026-08-13', { detected, manual: [wrong] });
+  assert.deepEqual([got.pct, got.source], [50, 'detected']);
+});
+test('a hand-entered discount fills a day with nothing to measure', () => {
+  const detected = detectDiscounts(halfPriceDay, pricing);
+  const got = resolveDiscount('grok-4-6', '2026-08-15', { detected, manual: [manualEntry] });
+  assert.deepEqual([got.pct, got.source], [50, 'manual']);
+});
+test('no evidence and no entry is no discount', () => {
+  assert.equal(resolveDiscount('gpt-5.2', '2026-08-13', { detected: detectDiscounts(halfPriceDay, pricing), manual: [] }), null);
+});
+
+console.log('applyDiscountToRates');
+test('every published rate is scaled, and the estimate falls by the same share', () => {
+  const rates = matchPricing('grok-4-6', pricing);
+  const cut = applyDiscountToRates(rates, 50);
+  assert.deepEqual([cut.input, cut.cacheRead, cut.output], [1, 0.25, 3]);
+  assert.ok(Math.abs(estimateTokenCost(cut, GROK_TOKENS) - LIST_COST / 2) < 1e-9);
+});
+test('a cache-write rate substituted from input is discounted along with it', () => {
+  // Grok publishes no cache-write rate, so matchPricing lends it the input
+  // rate — which must fall by the same share, not stay at list.
+  const cut = applyDiscountToRates(matchPricing('grok-4-6', pricing), 50);
+  assert.equal(cut.cacheWrite, 1);
+  assert.equal(cut.cacheWritePublished, false, 'still flagged as a substitution, not a published rate');
+});
+test('a genuinely absent rate stays absent rather than becoming zero', () => {
+  const cut = applyDiscountToRates({ input: 2, output: 6, cacheRead: 0.5, cacheWrite: null }, 50);
+  assert.equal(cut.cacheWrite, null);
+});
+test('no discount leaves the rates exactly as published', () => {
+  const rates = matchPricing('grok-4-6', pricing);
+  assert.equal(applyDiscountToRates(rates, 0), rates);
+  assert.equal(applyDiscountToRates(rates, null), rates);
+});
+
+console.log('modelsMissingDiscountInfo');
+const detectedForPrompt = detectDiscounts(halfPriceDay, pricing);
+test('a model with a detected discount needs no prompting', () => {
+  assert.deepEqual(modelsMissingDiscountInfo(['cursor-grok-4.6-high'], '2026-08-13', { detected: detectedForPrompt, manual: [] }), []);
+});
+test('a model that ran at list price that day is answered, not unknown', () => {
+  const detected = detectDiscounts([0, 1, 2, 3].map((i) => grokEvent(i, 1)), pricing);
+  assert.deepEqual(modelsMissingDiscountInfo(['cursor-grok-4.6-high'], '2026-08-13', { detected, manual: [] }), []);
+});
+test('a model never run that day is what the prompt is for', () => {
+  assert.deepEqual(
+    modelsMissingDiscountInfo(['gpt-5.2'], '2026-08-13', { detected: detectedForPrompt, manual: [] }),
+    ['gpt-5.2'],
+  );
+});
+test('a hand-entered discount also settles the question', () => {
+  const entry = normalizeDiscountEntry({ models: ['gpt-5-2'], start: '2026-08-01', end: '2026-08-31', pct: 30 });
+  assert.deepEqual(modelsMissingDiscountInfo(['gpt-5.2'], '2026-08-13', { detected: detectedForPrompt, manual: [entry] }), []);
+});
+test('with no day to price against, there is nothing to ask about', () => {
+  assert.deepEqual(modelsMissingDiscountInfo(['gpt-5.2'], null, { detected: detectedForPrompt, manual: [] }), []);
 });
 
 console.log('normalize');
@@ -588,6 +819,36 @@ test('cost-mode buttons declare no data-preset', () => {
   for (const tag of buttons) {
     assert.ok(!/data-preset/.test(tag), `cost-mode button also declares data-preset: ${tag}`);
   }
+});
+test('every id the discount UI wires up exists in the markup', () => {
+  // These are joined only by string ids, so a rename on one side fails silently
+  // at runtime — the listener never binds and the button does nothing.
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  for (const id of [
+    'simIntro', 'simIntroTitle', 'simIntroBody', 'simIntroDismiss', 'simIntroAdd',
+    'simDiscountExplain', 'simDiscountToggle', 'simDiscountSummary', 'simDiscountEditor',
+    'simDiscountPrompt', 'simCompareFootnote',
+  ]) {
+    assert.ok(html.includes(`id="${id}"`), `markup is missing id="${id}"`);
+  }
+});
+test('the intro dialog is a labelled modal that starts hidden', () => {
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  const tag = html.match(/<div[^>]*id="simIntro"[^>]*>/)?.[0] || '';
+  assert.ok(/role="dialog"/.test(tag), 'needs role="dialog"');
+  assert.ok(/aria-modal="true"/.test(tag), 'needs aria-modal so the rest of the page reads as inert');
+  assert.ok(/aria-labelledby="simIntroTitle"/.test(tag), 'needs an accessible name');
+  assert.ok(/\bhidden\b/.test(tag), 'must not be visible before the first Simulator visit');
+});
+test('the intro is shown once, not on every visit to the Simulator', () => {
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const fn = main.match(/function maybeShowSimIntro\(\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
+  assert.ok(fn.includes('SIM_INTRO_KEY'), 'must consult the persisted seen-flag before opening');
+  assert.ok(/return;/.test(fn), 'must bail out when already seen');
+  assert.ok(
+    /storage\.setItem\(SIM_INTRO_KEY/.test(main),
+    'the flag has to be written somewhere or the dialog reopens forever',
+  );
 });
 
 // --- TS modules -----------------------------------------------------------

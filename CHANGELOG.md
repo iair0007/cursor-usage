@@ -28,6 +28,35 @@ All notable user-facing changes. Earlier releases predate this file; see the
   selection with nothing in common with the current request is honored rather
   than replaced.
 
+- **Grok and Composer are priced from the right table.** cursor.com prices
+  Cursor's own hosted models in a separate "Cursor Models" table from the
+  third-party ones, and the scraper only ever read the latter — so Grok 4.6
+  came back with no rate at all, and the simulator listed the billed variant
+  string (`cursor-grok-4.6-high`) as its own unpriced pseudo-model. Reasoning
+  effort is part of that string, but it changes how many tokens a request uses,
+  not the price per token: there is one published rate per model. The parser now
+  reads every pricing table on the page, a `-fast` variant prices off its own
+  Fast row rather than the base model's, and a variant string that resolves to a
+  published rate is no longer offered as a separate row to compare against.
+- **Limited-time promotions are accounted for.** Cursor periodically discounts
+  a model for a week and announces it in prose, so the published rate table
+  keeps showing list price. Requests you actually made were never affected —
+  they carry Cursor's own billed figure — but the simulator's "what would this
+  have cost on model X" column was quietly pricing at list. Where you have run
+  a model, the discount is now **measured** from your own billing (billed token
+  value against the published rates, needing several requests in a day that
+  agree before it will say so); where you have not, the Simulator offers to let
+  you **record** the promotion by hand, and remembers it. Discounted models are
+  badged wherever they appear, with detected and hand-entered discounts kept
+  visibly distinct.
+- The Simulator explains that caveat **once, on first visit**, in a dismissable
+  dialog rather than in fine print nobody reads — the tab shows an estimate that
+  can be quietly too high, and a user has no way to guess that from the numbers.
+  It is reachable afterwards from "What's this?", for the day someone notices a
+  figure looks wrong. Estimates priced at full price because nothing could be
+  checked carry an asterisk and a footnote saying so, which stays put even after
+  the offer to add a discount is dismissed: dismissing an offer is not the same
+  as asking to stop being told which numbers are uncertain.
 - **Far fewer calls to cursor.com.** The quota, plan and spend-cap lookups now
   sit behind a short cache with in-flight de-duplication. Opening the dashboard
   used to fire dozens of identical requests: the panel asks for usage and for

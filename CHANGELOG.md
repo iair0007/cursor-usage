@@ -103,6 +103,13 @@ All notable user-facing changes. Earlier releases predate this file; see the
   precise about your bill. Badges say "Discounted"; the measured figure is one
   hover away, and the discount editor still lists every entry you added with
   its exact percentage, since that is where the number is acted on.
+- **Updated the Model column's tooltip** to explain the two things "Auto" can
+  now mean since routed rows started naming their model: plain "Auto" is Cursor
+  picking a model and not saying which (billed and priced at Auto's bundled
+  rate), while "Auto Balance → Grok 4.5" is Balance/Intelligence mode, billed
+  and priced at that model's own rate. The actual charge shown is always
+  Cursor's real number either way — only the estimates depend on which rate
+  applies.
 - **Fixed Auto losing its rates entirely.** cursor.com now publishes Auto's
   bundled price as an ordinary row in a pricing table ("Auto Cost", under Auto
   modes) rather than as the label-and-value list the old "Auto pricing" heading

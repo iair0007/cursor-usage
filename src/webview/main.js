@@ -205,6 +205,14 @@ const state = {
   planChangeDay: null,
   /** The auto-switch to the current-plan range happens once, not on every load. */
   planChangeAnnounced: false,
+  /**
+   * Calendar month (YYYY-MM) `planChangeDay` was last checked for. The check
+   * runs against the current month's own events regardless of the date filter
+   * — see ensurePlanChangeCurrentMonth() — so the chip reflects the account,
+   * not whatever range happens to be on screen. Null means not checked yet
+   * this session.
+   */
+  planCheckMonthKey: null,
   trend: {
     key: null,
     /** summarize() of the baseline period — drives the ▲/▼ badges. */
@@ -442,36 +450,40 @@ function renderPlanCycle(quota, hardLimit) {
 }
 
 /**
- * Notices a plan change in the events just loaded, reveals the "Current plan"
- * preset, and — the first time it's seen — switches to it.
+ * Applies the result of checking this calendar month's own events for a
+ * billing-system change: reveals or hides the "Current plan" chip, and — the
+ * first time it's seen — switches to it.
+ *
+ * Deliberately scoped to the current month rather than whatever range the
+ * user has loaded — see the call site in load(). Detecting it from the
+ * selected range meant a change from three weeks ago only surfaced the chip
+ * once someone happened to load a range that reached back that far; "Today"
+ * or "7 days" right after a mid-month switch would never show it at all,
+ * even though the chip exists precisely to help right after a switch.
  *
  * Mixing two billing systems in one total is the thing that made "Month to
- * date" read $202 when cursor.com said $2.79, so once we know where the change
- * happened, the range that only covers the current system is the honest
- * default. Only automatic once: after that the choice is the user's, and their
- * saved preset is respected.
+ * date" read $202 when cursor.com said $2.79, so once we know where the
+ * change happened, the range that only covers the current system is the
+ * honest default. Only automatic once: after that the choice is the user's,
+ * and their saved preset is respected.
  *
  * Returns true when it kicked off a reload, so the caller stops rendering the
  * range being replaced.
  */
-function applyPlanChangeDiscovery() {
-  const change = detectPlanChange(state.all);
+function applyPlanChangeResult(change, monthKey) {
+  state.planCheckMonthKey = monthKey;
   if (change) {
     state.planChangeDay = change.dayKey;
-    savePrefs({
-      preset: state.datePreset,
-      startDate: $('startDate').value,
-      endDate: $('endDate').value,
-      planChangeDay: change.dayKey,
-    });
-  } else if (state.planChangeDay && state.datePreset !== 'plan') {
-    // A boundary stored by an earlier session that a wider, stricter look no
-    // longer finds. Forget it rather than keeping a "Current plan" range built
-    // on a date this account can no longer show any evidence for. Skipped while
-    // that range is the one selected, since it holds only post-boundary rows
-    // and so can never contain the proof.
+    // planChangeDay is auto-injected by savePrefs() from state, which was
+    // just updated above.
+    savePrefs({});
+  } else if (state.planChangeDay) {
+    // This month's own events no longer show the evidence: the account
+    // changed plans in an earlier month (stale from a previous session) or
+    // never really changed at all. Either way, keeping the chip around would
+    // point at a range this account can no longer show any evidence for.
     state.planChangeDay = null;
-    savePrefs({ planChangeDay: null });
+    savePrefs({});
   }
   $('planPresetBtn')?.classList.toggle('hidden', !state.planChangeDay);
   if (!change || state.planChangeAnnounced || state.datePreset === 'plan') return false;
@@ -716,6 +728,11 @@ function getRangeForPreset(preset) {
     return null;
   }
   return { start: toDateInputValue(start), end: toDateInputValue(end), preset };
+}
+
+/** The current calendar month, as 'YYYY-MM' — the unit the plan-change check is scoped to. */
+function currentMonthKey(now = new Date()) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
 function detectPreset(start, end) {
@@ -1346,6 +1363,12 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
     tagNew = 'new',
     tagGone = 'stopped',
     betterWhen = 'down',
+    // The sessions dialog's two-column comparison reuses this table wholesale
+    // for its model breakdown, and needs it to carry the same alignment and
+    // sticky-header rules as the metrics table above it — rules scoped to
+    // that class so the period comparison (this function's other caller)
+    // isn't affected.
+    extraClass = '',
   } = opts;
   const curCost = Object.fromEntries(costByModel(currentEvents));
   const baseCost = Object.fromEntries(costByModel(baselineEvents));
@@ -1379,7 +1402,7 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
 
   return `
     <h4 class="compare-subhead">${esc(heading)}</h4>
-    <table class="compare-table compare-models">
+    <table class="compare-table compare-models${extraClass ? ` ${esc(extraClass)}` : ''}">
       <thead>
         <tr>
           <th scope="col">Model</th>
@@ -2062,6 +2085,7 @@ function renderSessionModelTable(ctxs, baseIndex, pair) {
       heading: 'Which models each session used',
       tagNew: 'only in A',
       tagGone: 'only in B',
+      extraClass: 'sessions-compare-table',
     });
   }
 
@@ -2865,14 +2889,30 @@ async function load() {
   updateFilterSummary();
   setBusy(true);
 
+  // The "Current plan" chip is a fact about the account, not about whatever
+  // range is on screen, so it's checked against this calendar month's own
+  // events rather than the selected range — see applyPlanChangeResult(). Once
+  // per month (effectively once per session): the reentrant load() below from
+  // an auto-switch already has planCheckMonthKey set, so it skips this.
+  const monthKey = currentMonthKey();
+  const needsMonthCheck = state.planCheckMonthKey !== monthKey;
+  // "Month to date" already requests exactly this window, so there's nothing
+  // to check that the main fetch won't already have — asking twice would be
+  // exactly the kind of redundant request an earlier round of this trimmed out.
+  const monthIsSelectedRange = needsMonthCheck && state.datePreset === 'mtd';
+  const monthWindow = needsMonthCheck && !monthIsSelectedRange ? getRangeForPreset('mtd') : null;
+
   try {
-    const [usage, pricingData, budget] = await Promise.all([
+    const [usage, pricingData, budget, monthUsage] = await Promise.all([
       rpc('usage', { startDate: start, endDate: end }),
       rpc('pricing').catch(() => ({ markdown: '' })),
       // Budget spend is always the current cycle, never the selected range —
       // a projection built from "Today" would be meaningless. Non-fatal: the
       // rest of the dashboard works without it.
       rpc('budget').catch(() => null),
+      monthWindow
+        ? rpc('usage', { startDate: toMs(monthWindow.start), endDate: toMs(monthWindow.end, true) }).catch(() => null)
+        : Promise.resolve(null),
     ]);
     if (seq !== loadSeq) return;
     state.budget = budget;
@@ -2896,10 +2936,20 @@ async function load() {
     populateModelFilter(state.all);
     populateSimulatorModels();
 
-    // The request picker reads state.filtered, which only refresh() updates —
-    // so it has to come after, or it lists the previous range's requests.
-    const switchedToPlanRange = applyPlanChangeDiscovery();
-    if (switchedToPlanRange) return; // load() re-entered with the narrower range
+    // Skipped (leaving planCheckMonthKey unset) when the dedicated fetch
+    // failed — non-fatal, same as pricing/budget above, and it means next
+    // load() simply tries again instead of the chip being wrongly hidden for
+    // the rest of the month on one dropped request.
+    if (needsMonthCheck && (monthIsSelectedRange || monthUsage)) {
+      const monthEvents = monthIsSelectedRange
+        ? state.all
+        : (monthUsage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
+      // The request picker reads state.filtered, which only refresh() updates
+      // — so the possible reload this can trigger has to come after, or it
+      // lists the previous range's requests.
+      const switchedToPlanRange = applyPlanChangeResult(detectPlanChange(monthEvents), monthKey);
+      if (switchedToPlanRange) return; // load() re-entered with the narrower range
+    }
 
     const render = () => {
       refresh();

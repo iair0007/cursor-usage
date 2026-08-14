@@ -5,6 +5,25 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.7.0 — 2026-08-14
 
+- **Fixed the "Current plan" chip only appearing when the selected date range
+  happened to contain the evidence.** It's checked against this calendar
+  month's own events now, independent of whatever range is on screen — an
+  account that switched plans on the 3rd stayed invisible on "Today" or
+  "7 days" for the rest of the month even though those are exactly when
+  someone would reach for it. Checked once per month (cached for the
+  session), not on every load.
+- **Fixed the session comparison's two tables drifting out of alignment.**
+  The model breakdown reused the period comparison's table markup, which
+  auto-sizes its own columns; put a few rows below a table with different
+  content, that produced two different column widths for the same sessions.
+  Both tables now share a fixed layout and a matching row-label column.
+- **The session comparison's header now stays in view while scrolling.** A
+  four-session table runs well past one screen, and a figure with no header
+  above it doesn't say which session it's for. Fixed a nested scroll
+  container that silently absorbed the sticky positioning meant for the outer
+  one — a spec quirk, not a typo: setting `overflow-x` on an element quietly
+  promotes its own `overflow-y` from `visible` to `auto` even when written
+  explicitly, which is what created the extra scroller in the first place.
 - **Fixed a failed lookup being cached.** The quota, plan and spend-cap cache
   stored the fallback that a failed request resolved to, so one dropped
   connection meant up to ten minutes with no plan name or spend cap even though

@@ -829,8 +829,27 @@ tfoot td {
 .sessions-dialog-head h3 { margin: 0; }
 .sessions-dialog-controls { display: flex; align-items: center; gap: 12px; }
 .sessions-diff-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
-.sessions-dialog-body { padding: 6px 16px 18px; overflow: auto; max-height: calc(86vh - 84px); }
-.sessions-dialog-scroll { overflow-x: auto; }
+.sessions-dialog-body { padding: 6px 16px 18px; }
+/* The sole scroll container, in both directions. It used to be split across
+   this element and .sessions-dialog-body — but overflow-x and overflow-y
+   can't disagree on visible/not: setting one to auto silently promotes the
+   other from visible to auto too (that's the spec, not a bug), so the inner
+   wrapper became a second vertical scroller that happened to never actually
+   scroll (its content always matched its own height). A sticky header's
+   `top: 0` resolves against the *nearest* scroll container, so it locked onto
+   that inert one and never stuck to anything. One scroller removes the
+   ambiguity.
+*/
+.sessions-dialog-scroll { overflow: auto; max-height: calc(86vh - 84px); }
+/* Both tables are wide, and a long comparison runs past a screen's height —
+   the header staying in view is what keeps a figure three rows down legible
+   as "session B's cache hit rate" rather than a bare percentage. */
+.sessions-compare-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--vscode-editorWidget-background, var(--panel));
+}
 /* The row labels are what every figure is read against, so they stay put while
    a wide comparison scrolls sideways. */
 .sessions-compare-table th[scope="row"] {
@@ -839,6 +858,19 @@ tfoot td {
   z-index: 1;
   background: var(--vscode-editorWidget-background, var(--panel));
 }
+/* The one cell that is both this column's header and this row's label sits
+   above both sticky axes, or the header row scrolling past horizontally would
+   show through the corner as the table pans sideways. */
+.sessions-compare-table thead th:first-child {
+  left: 0;
+  z-index: 3;
+}
+/* Every table in the dialog shares this width for its row-label column, so a
+   metric row in the top table and a model row in the one below it line up —
+   two tables of different content would otherwise auto-size their columns
+   independently and drift out of register with each other. */
+.sessions-compare-table th:first-child { width: 180px; }
+.sessions-compare-table { table-layout: fixed; }
 .sessions-compare-table td { min-width: 96px; }
 /* Four named columns have to fit without the last one falling off the edge, so
    a long conversation name is clipped here rather than setting the width. The

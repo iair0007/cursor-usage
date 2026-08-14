@@ -254,6 +254,42 @@ test('estimateTokenCost combines all rates', () => {
   const cost = estimateTokenCost(rates, { input: 1_000_000, output: 100_000, cacheRead: 2_000_000, cacheWrite: 0 });
   assert.ok(Math.abs(cost - (3.0 + 1.5 + 0.6)) < 1e-9);
 });
+console.log('parsePricing: Auto published as a table row');
+// cursor.com moved Auto's bundled rate out of a "### Auto pricing" label list
+// and into an ordinary pricing table under "Auto modes".
+const AUTO_ROW_DOC = `
+## Models and pricing
+
+### Auto modes
+
+| Name | Input | Cache Write | Cache Read | Output |
+| :--- | :--- | :--- | :--- | :--- |
+| ![icon](https://cursor.com/i.svg) Auto Cost | $1.25 | $1.25 | $0.25 | $6 |
+
+### Model pricing
+
+| Model | Context | Input | Cache write | Cache read | Output |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Grok 4.5 | 200k | $2.00 | - | $0.50 | $6.00 |
+`;
+const autoRowPricing = parsePricing(AUTO_ROW_DOC);
+test('the Auto Cost row becomes the Auto rate', () => {
+  // Left unread, plain "auto"/"default" requests had no rates at all — and so
+  // no cache-savings figure, on the mode most requests actually run in.
+  assert.ok(!autoRowPricing.fallback, 'parsed from the page, not the bundled catalog');
+  assert.deepEqual(autoRowPricing.auto, { input: 1.25, cacheWrite: 1.25, cacheRead: 0.25, output: 6 });
+  assert.equal(matchPricing('default', autoRowPricing).label, 'Auto');
+  assert.equal(matchPricing('auto', autoRowPricing).cacheWritePublished, true);
+});
+test('the router modes still split correctly on the new page shape', () => {
+  assert.equal(matchPricing('Cursor Grok 4.5 (Auto Balanced)', autoRowPricing).label, 'Grok 4.5');
+  assert.equal(matchPricing('Cursor Grok 4.5 (Auto Cost)', autoRowPricing).label, 'Auto');
+});
+test('the older "### Auto pricing" list is still understood', () => {
+  assert.equal(pricing.auto.input, 1.25);
+  assert.equal(matchPricing('default', pricing).label, 'Auto');
+});
+
 console.log('matchPricing and Cursor Router modes');
 test('a Balance/Intelligence row prices at the model the router picked', () => {
   // Those modes bill at the routed model's own rate — which is why Cursor

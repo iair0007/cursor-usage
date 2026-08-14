@@ -200,6 +200,23 @@ export function parsePricing(md) {
     i = j - 1;
   }
 
+  // cursor.com publishes Auto's bundled rate as an ordinary row in a pricing
+  // table now ("Auto Cost", under "Auto modes"), rather than as the
+  // label-and-value list the "### Auto pricing" heading used to carry. The
+  // table scan above already reads it, so adopt it as the Auto rate instead of
+  // leaving Auto unpriced — which cost every plain "auto"/"default" request its
+  // rates entirely, and with them its cache-savings figure.
+  if (auto.input == null) {
+    const autoRow = models.find((m) => m.name.includes('auto') && m.name.includes('cost'))
+      || models.find((m) => m.name === 'auto');
+    if (autoRow?.input != null) {
+      auto.input = autoRow.input;
+      auto.cacheWrite = autoRow.cacheWrite ?? autoRow.input;
+      auto.cacheRead = autoRow.cacheRead;
+      auto.output = autoRow.output;
+    }
+  }
+
   // Scrape found nothing usable (empty/unreachable doc, or page restructured) — fall back.
   if (auto.input == null && models.length === 0) {
     const fallbackModels = FALLBACK_PRICING.models.map((m) => ({ ...m, name: normModel(m.display) }));

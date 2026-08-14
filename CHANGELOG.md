@@ -79,6 +79,13 @@ All notable user-facing changes. Earlier releases predate this file; see the
   can land a few points either side of that once its own terms and cent
   rounding are through with it. A figure still inferred from the rate table is
   still snapped, since there the round number is the whole point.
+- **Fixed Auto losing its rates entirely.** cursor.com now publishes Auto's
+  bundled price as an ordinary row in a pricing table ("Auto Cost", under Auto
+  modes) rather than as the label-and-value list the old "Auto pricing" heading
+  carried. The parser only understood the old shape, so Auto came back with no
+  rates at all — no cache-savings figure on an Auto request, and nothing to
+  price a plain "auto"/"default" row against, on the mode most requests run in.
+  Both shapes are read now.
 - **Fixed two models being priced against the wrong row.** A request billed at
   a Fast rate matched the standard row — "cursor-grok-4.6-high-fast" doesn't
   contain "grok-4-6-fast" as a substring, since "high" sits in the middle — so

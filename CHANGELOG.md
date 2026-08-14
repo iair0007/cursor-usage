@@ -5,6 +5,20 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.7.0 — 2026-08-14
 
+- **Fixed discounts never being detected on the models Cursor discounts most.**
+  Grok and Composer are Cursor's own hosted models, priced in a table that
+  publishes no cache-write rate — and a request carrying cache-write tokens
+  used to be discarded rather than priced against a substituted rate. Since
+  agent requests essentially always carry them, every sample was thrown away
+  and the count never reached the threshold, so a promotion on those models was
+  undetectable at any volume. The unknown is now bounded instead of avoided:
+  the true rate can't be below zero or above the input rate it stands in for,
+  so the day is priced both ways and a discount has to hold at the stingy end
+  too. Cache writes that are really free, read against a substitution, are the
+  false positive the old behaviour guarded against — the floor still rejects
+  those, and a day it can't settle stays offered for manual entry rather than
+  being recorded as "no promotion". Models with a published cache-write rate
+  are unaffected.
 - **Fixed the "Current plan" chip only appearing when the selected date range
   happened to contain the evidence.** It's checked against this calendar
   month's own events now, independent of whatever range is on screen — an

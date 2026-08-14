@@ -325,11 +325,70 @@ test('Auto is skipped — its billed value belongs to a model Cursor does not na
   const autos = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelRaw: 'auto' }));
   assert.deepEqual(detectDiscounts(autos, pricing).discounts, {});
 });
-test('an unpriced cache write is skipped rather than guessed at', () => {
-  // Grok has no published cache-write rate, so estimateTokenCost would fall
-  // back to the input rate and invent a gap.
-  const withWrites = [0, 1, 2, 3].map((i) => grokEvent(i, 0.5, '2026-08-13', { ...GROK_TOKENS, cacheWrite: 40_000 }));
-  assert.deepEqual(detectDiscounts(withWrites, pricing).discounts, {});
+// Grok publishes no cache-write rate, so a request carrying cache writes has
+// two defensible prices: writes at the input rate (what estimateTokenCost
+// substitutes) and writes free. These fixtures name the billed figure outright,
+// since LIST_COST only covers the other tokens.
+//   40k writes → $0.28 with writes substituted, $0.20 with writes free.
+const WRITE_TOKENS = { ...GROK_TOKENS, cacheWrite: 40_000 };
+//   400k writes swamp the rest → $0.82 substituted, $0.02 free.
+const WRITE_HEAVY_TOKENS = { input: 5_000, output: 1_000, cacheRead: 8_000, cacheWrite: 400_000 };
+function grokWriteEvent(i, billed, tokens, day = '2026-08-13') {
+  return { ...grokEvent(i, 1, day, tokens), modelTokenCost: billed };
+}
+
+test('an unpriced cache write is bounded, not skipped — Grok stays detectable', () => {
+  // Half of $0.28. Skipping these outright, as this once did, meant Grok and
+  // Composer could never reach minSamples: their requests always carry writes.
+  const withWrites = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.14, WRITE_TOKENS));
+  const { discounts } = detectDiscounts(withWrites, pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 50);
+});
+test('a free cache write is not mistaken for a promotion', () => {
+  // Billed $0.20: list price if writes are free, a 28.6% "gap" against the
+  // substitution. Pricing writes at zero closes the gap, so this is unprovable.
+  const freeWrites = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.2, WRITE_TOKENS));
+  const { discounts, observed } = detectDiscounts(freeWrites, pricing);
+  assert.deepEqual(discounts, {});
+  assert.equal(observed.size, 0, 'inconclusive is "unknown", not "no discount"');
+});
+test('the reported figure prices writes at the documented rate, not the floor', () => {
+  // $0.10 is half the free-writes price and 64% off the substituted one, so no
+  // cache-write rate explains it away and the floor lets it through. The number
+  // shown is the substituted one — the floor decides whether to claim a
+  // discount at all, it does not water down the discount that is claimed.
+  const events = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.1, WRITE_TOKENS));
+  assert.equal(detectDiscounts(events, pricing).discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 65);
+});
+test('writes too dominant to bound leave the day unknown', () => {
+  // Half of $0.82 — but with writes free the day was billed 20x list, so the
+  // gap could be the substitution alone. The Simulator should still offer to
+  // record this promotion by hand.
+  const events = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.41, WRITE_HEAVY_TOKENS));
+  const { discounts, observed } = detectDiscounts(events, pricing);
+  assert.deepEqual(discounts, {});
+  assert.equal(observed.size, 0);
+});
+test('an unpublished write premium reads as no discount, never as a fake one', () => {
+  // Writes billed at 1.25x input (OpenAI's post-GPT-5.6 shape) without a
+  // published column: $0.30 against a $0.28 estimate, so the error is a missed
+  // promotion rather than an invented one.
+  const events = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.3, WRITE_TOKENS));
+  const { discounts, observed } = detectDiscounts(events, pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high|2026-08-13'), 'billed above list settles the question');
+});
+test('a published cache-write rate is used as-is — the floor only guards substitutions', () => {
+  const rates = matchPricing('claude-4.5-sonnet', pricing);
+  assert.ok(rates.cacheWritePublished, 'fixture publishes a cache-write rate for Sonnet');
+  const tokens = { input: 50_000, output: 10_000, cacheRead: 80_000, cacheWrite: 400_000 };
+  const list = estimateTokenCost(rates, tokens);
+  const events = [0, 1, 2, 3].map((i) => ({
+    ...grokWriteEvent(i, list * 0.5, tokens),
+    modelRaw: 'claude-4.5-sonnet',
+  }));
+  const { discounts } = detectDiscounts(events, pricing);
+  assert.equal(discounts['claude-4-5-sonnet']['2026-08-13'].pct, 50, 'writes dominate yet the rate is known');
 });
 test('discounts are tracked per day, so a promotion that ends is not backdated', () => {
   const events = [

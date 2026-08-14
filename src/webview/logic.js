@@ -471,31 +471,66 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
 
     const rates = matchPricing(e.modelRaw, pricing);
     if (!rates) continue;
-    // With no published cache-write rate, estimateTokenCost falls back to the
-    // input rate — a guess, and one that would masquerade as a discount.
-    if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) continue;
 
-    const expected = estimateTokenCost(rates, {
+    const tokens = {
       input: e.inputTokens,
       output: e.outputTokens,
       cacheRead: e.cacheReadTokens,
       cacheWrite: e.cacheWriteTokens,
-    });
+    };
+    const expected = estimateTokenCost(rates, tokens);
     if (expected == null || expected < cfg.minExpectedCost) continue;
+
+    // Where the table publishes no cache-write rate, estimateTokenCost bills
+    // those tokens at the input rate. That is not a wild guess — Anthropic is
+    // the outlier in charging a write premium, and the pools with no such
+    // column (xAI's, and OpenAI's before GPT-5.6) genuinely have no separate
+    // write fee — but it is still an assumption, and Cursor's own hosted
+    // models are exactly the ones it runs promotions on.
+    //
+    // Discarding the request instead, as this once did, made Grok and Composer
+    // permanently undetectable: their requests always carry cache-write tokens,
+    // so every sample was thrown away and the count never reached minSamples no
+    // matter how much the user ran them. So bound the unknown rather than duck
+    // it. The true rate cannot be below zero, nor above the input rate it was
+    // substituted from, so price the same tokens at the stingy end too and
+    // require the discount to survive there as well. Cache writes that are
+    // really free, read against a substitution, are precisely the false
+    // positive the old skip existed to prevent — and the floor still rejects
+    // that, while allowing the gaps too large for the substitution to explain.
+    let floorExpected = expected;
+    if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) {
+      floorExpected = estimateTokenCost({ ...rates, cacheWrite: 0 }, tokens);
+      if (floorExpected == null || !(floorExpected > 0)) continue;
+    }
 
     const day = dayKey(e.timestampMs);
     if (!day) continue;
     const bucketKey = `${n}|${day}`;
-    if (!buckets.has(bucketKey)) buckets.set(bucketKey, { n, day, ratios: [], label: rates.label });
-    buckets.get(bucketKey).ratios.push(actual / expected);
+    if (!buckets.has(bucketKey)) {
+      buckets.set(bucketKey, { n, day, ratios: [], floorRatios: [], label: rates.label });
+    }
+    const bucket = buckets.get(bucketKey);
+    bucket.ratios.push(actual / expected);
+    bucket.floorRatios.push(actual / floorExpected);
   }
 
-  for (const { n, day, ratios, label } of buckets.values()) {
+  for (const { n, day, ratios, floorRatios, label } of buckets.values()) {
     if (ratios.length < cfg.minSamples) continue;
-    observed.add(`${n}|${day}`);
 
     const sorted = [...ratios].sort((a, b) => a - b);
     const rawPct = (1 - median(sorted)) * 100;
+    // The same day priced with cache writes free. Equal to rawPct unless a
+    // substitution was involved, so this only ever bites where one was.
+    const floorPct = (1 - median([...floorRatios].sort((a, b) => a - b))) * 100;
+
+    // A gap the substitution alone could account for. That is inconclusive, not
+    // answered, so it is deliberately left out of `observed`: the Simulator
+    // keeps offering to record the promotion by hand, which is the right
+    // fallback for a day we cannot measure.
+    if (rawPct >= cfg.minPct && floorPct < cfg.minPct) continue;
+
+    observed.add(`${n}|${day}`);
     if (rawPct < cfg.minPct || rawPct > cfg.maxPct) continue;
 
     // A real promotion prices every request the same way. Wide scatter means

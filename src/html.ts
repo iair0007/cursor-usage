@@ -420,6 +420,15 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             </div>
             <p id="simCompareFilterHint" class="sim-filter-hint hidden">Select at least one model.</p>
           </label>
+          <div class="sim-discounts">
+            <div class="sim-discounts-bar">
+              <span class="sim-discounts-title">Promotions <span class="tip" tabindex="0" data-tip="Cursor runs limited-time discounts that never appear on its published rate table. Where you have used a model, the discount is measured from your own billing; where you have not, you can record it here so estimates stay honest.">ⓘ</span></span>
+              <button type="button" class="btn-text" id="simDiscountToggle">Manage</button>
+            </div>
+            <div id="simDiscountSummary" class="sim-discount-summary"></div>
+            <div id="simDiscountEditor" class="sim-discount-editor hidden"></div>
+          </div>
+          <p id="simDiscountPrompt" class="sim-note hidden"></p>
           <div class="sim-compare-table-wrap">
             <table class="sim-compare-table" id="simCompareTable">
               <thead>

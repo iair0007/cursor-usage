@@ -200,6 +200,12 @@ export function parsePricing(md) {
   return { auto, models, aliasIndex: buildAliasIndex(models), fallback: false };
 }
 
+/**
+ * `cacheWrite` falls back to the input rate when the table publishes none, so
+ * an estimate is still possible — but callers that are *measuring* rather than
+ * estimating need to know the difference, or they read the substitution as a
+ * real price. `cacheWritePublished` records which of the two this is.
+ */
 export function matchPricing(model, pricing) {
   const n = normModel(model);
   if (n.includes('auto') || n === 'default') {
@@ -207,6 +213,7 @@ export function matchPricing(model, pricing) {
       return {
         input: pricing.auto.input,
         cacheWrite: pricing.auto.cacheWrite ?? pricing.auto.input,
+        cacheWritePublished: pricing.auto.cacheWrite != null,
         cacheRead: pricing.auto.cacheRead,
         output: pricing.auto.output,
         label: 'Auto',
@@ -220,6 +227,7 @@ export function matchPricing(model, pricing) {
       return {
         input: m.input,
         cacheWrite: m.cacheWrite ?? m.input,
+        cacheWritePublished: m.cacheWrite != null,
         cacheRead: m.cacheRead,
         output: m.output,
         label: m.display,
@@ -241,6 +249,7 @@ export function matchPricing(model, pricing) {
     return {
       input: partial.input,
       cacheWrite: partial.cacheWrite ?? partial.input,
+      cacheWritePublished: partial.cacheWrite != null,
       cacheRead: partial.cacheRead,
       output: partial.output,
       label: partial.display,
@@ -357,6 +366,283 @@ export function estimateTokenCost(rates, tokens) {
   return cost;
 }
 
+// ---------------------------------------------------------------------------
+// Promotional discounts
+//
+// Cursor periodically runs limited-time promotions ("Grok 4.6 is 50% off for
+// one week"). They are announced in prose on the blog and never appear as a
+// machine-readable rate, so the published table this dashboard scrapes keeps
+// showing list price for the duration.
+//
+// This matters in exactly one place. A request you actually made carries
+// Cursor's own billed figure, so its cost is right whether or not a promo was
+// running. Only the simulator's "what would this have cost on model X" column
+// is computed from the published rates, so only that column can be stale.
+//
+// Two ways to close the gap, in order of preference:
+//   1. Infer it. When you did run the model, its billed token value can be
+//      divided by what the published rates say it should have cost. A ratio
+//      well under 1, holding across several requests the same day, is a
+//      discount — measured from real billing rather than guessed.
+//   2. Ask. For a model you have not run, there is nothing to measure, so the
+//      user can record the promo by hand and every estimate honours it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Thresholds for calling a cost gap a promotion rather than noise. Inference
+ * is a heuristic over rounded, surcharge-inclusive billing figures, so these
+ * are deliberately conservative: a missed promo leaves the estimate where it
+ * already was, while a false positive silently rewrites prices the user never
+ * got.
+ */
+export const DISCOUNT_DETECTION = {
+  /** Below a couple of cents, cent-rounding alone moves the ratio by more than a promo would. */
+  minExpectedCost: 0.02,
+  /** One cheap request proves nothing; a promo shows up across a day's traffic. */
+  minSamples: 3,
+  /** Under this, the gap is rounding and surcharge drift, not a promotion. */
+  minPct: 8,
+  /** Over this, something is wrong with the comparison — decline to guess. */
+  maxPct: 95,
+  /** How far a sample may sit from the median and still count as agreeing with it. */
+  tolerancePct: 6,
+  /** Share of samples that must agree before the median is trustworthy. */
+  minAgreement: 0.6,
+  /** Promotions are round numbers, so snap to the nearest step when close. */
+  snapStep: 5,
+  snapWithin: 2.5,
+};
+
+function median(sorted) {
+  if (!sorted.length) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function snapDiscountPct(pct, cfg) {
+  const step = cfg.snapStep;
+  const nearest = Math.round(pct / step) * step;
+  return Math.abs(nearest - pct) <= cfg.snapWithin ? nearest : Math.round(pct * 10) / 10;
+}
+
+/**
+ * Infers per-model, per-day discounts by comparing what Cursor billed for the
+ * tokens against what the published rates say those tokens should have cost.
+ *
+ * Returns `{ discounts, observed }`. `observed` carries the "model|day" pairs
+ * that had enough usable requests to reach a conclusion at all, so callers can
+ * tell "we checked and there was no promotion" from "we have no idea" — the
+ * second is what a manual entry is for, and prompting for the first would be
+ * nagging the user about something already answered.
+ */
+export function detectDiscounts(events = [], pricing = null, opts = {}) {
+  const cfg = { ...DISCOUNT_DETECTION, ...opts };
+  const discounts = {};
+  const observed = new Set();
+  if (!pricing) return { discounts, observed };
+
+  const buckets = new Map();
+  for (const e of events || []) {
+    if (!e || !e.timestampMs) continue;
+    const n = normModel(e.modelRaw);
+    // Auto routes to a model Cursor does not name, so its billed value cannot
+    // be checked against any single rate row.
+    if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) continue;
+
+    // The billed value of the tokens alone. `tokenCost` folds in the Cursor
+    // token fee, which is charged on top of the model rate and would read as a
+    // surcharge — comparing it against the rate table understates every promo.
+    const actual = e.modelTokenCost;
+    if (actual == null || !(actual > 0)) continue;
+
+    const rates = matchPricing(e.modelRaw, pricing);
+    if (!rates) continue;
+    // With no published cache-write rate, estimateTokenCost falls back to the
+    // input rate — a guess, and one that would masquerade as a discount.
+    if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) continue;
+
+    const expected = estimateTokenCost(rates, {
+      input: e.inputTokens,
+      output: e.outputTokens,
+      cacheRead: e.cacheReadTokens,
+      cacheWrite: e.cacheWriteTokens,
+    });
+    if (expected == null || expected < cfg.minExpectedCost) continue;
+
+    const day = dayKey(e.timestampMs);
+    if (!day) continue;
+    const bucketKey = `${n}|${day}`;
+    if (!buckets.has(bucketKey)) buckets.set(bucketKey, { n, day, ratios: [], label: rates.label });
+    buckets.get(bucketKey).ratios.push(actual / expected);
+  }
+
+  for (const { n, day, ratios, label } of buckets.values()) {
+    if (ratios.length < cfg.minSamples) continue;
+    observed.add(`${n}|${day}`);
+
+    const sorted = [...ratios].sort((a, b) => a - b);
+    const rawPct = (1 - median(sorted)) * 100;
+    if (rawPct < cfg.minPct || rawPct > cfg.maxPct) continue;
+
+    // A real promotion prices every request the same way. Wide scatter means
+    // the gap is coming from surcharges or model routing, not a rate change.
+    const agreeing = ratios.filter((r) => Math.abs((1 - r) * 100 - rawPct) <= cfg.tolerancePct).length;
+    if (agreeing / ratios.length < cfg.minAgreement) continue;
+
+    if (!discounts[n]) discounts[n] = {};
+    discounts[n][day] = {
+      pct: snapDiscountPct(rawPct, cfg),
+      samples: ratios.length,
+      label,
+    };
+  }
+
+  return { discounts, observed };
+}
+
+/** Contiguous day ranges per model, for describing a promotion as a period. */
+export function discountPeriods(detected) {
+  const out = [];
+  for (const [model, byDay] of Object.entries(detected?.discounts || {})) {
+    const days = Object.keys(byDay).sort();
+    let run = null;
+    for (const day of days) {
+      const pct = byDay[day].pct;
+      // Half a day of slack, so a run does not split just because the clocks
+      // changed overnight and "one day later" is 23 or 25 hours, not 24.
+      const prevDay = run && new Date(`${run.end}T12:00:00`);
+      const contiguous = run && pct === run.pct && prevDay
+        && (new Date(`${day}T12:00:00`) - prevDay) <= 86400000 * 1.5;
+      if (contiguous) {
+        run.end = day;
+        run.days++;
+      } else {
+        if (run) out.push(run);
+        run = { model, label: byDay[day].label, pct, start: day, end: day, days: 1 };
+      }
+    }
+    if (run) out.push(run);
+  }
+  return out.sort((a, b) => b.start.localeCompare(a.start) || a.model.localeCompare(b.model));
+}
+
+/** A manual entry's model list matches an event's model the way pricing does. */
+function discountEntryMatchLength(entry, modelName) {
+  let best = -1;
+  for (const m of entry.models || []) {
+    if (m === '*') {
+      if (best < 0) best = 0;
+      continue;
+    }
+    if (modelName === m || modelName.includes(m) || m.includes(modelName)) {
+      best = Math.max(best, m.length);
+    }
+  }
+  return best;
+}
+
+/**
+ * The hand-entered discount in force for a model on a day, if any. The most
+ * specific model match wins so a blanket "everything is 20% off" entry never
+ * overrides one naming the model outright; equally specific entries resolve to
+ * the larger discount.
+ */
+export function manualDiscountFor(entries, modelRaw, day) {
+  const n = normModel(modelRaw);
+  if (!n || !day) return null;
+  let best = null;
+  let bestSpecificity = -1;
+  for (const entry of entries || []) {
+    if (!entry || entry.pct == null) continue;
+    if (entry.start && day < entry.start) continue;
+    if (entry.end && day > entry.end) continue;
+    const specificity = discountEntryMatchLength(entry, n);
+    if (specificity < 0) continue;
+    if (specificity > bestSpecificity || (specificity === bestSpecificity && entry.pct > (best?.pct ?? -1))) {
+      best = entry;
+      bestSpecificity = specificity;
+    }
+  }
+  return best;
+}
+
+/**
+ * The discount to price a model at on a given day.
+ *
+ * Measured beats declared: a detected discount comes from Cursor's own billing
+ * for requests that really ran, while a manual entry is the user's recollection
+ * of an announcement. Manual entries therefore fill the gap for models with no
+ * usage to measure, rather than overriding the evidence.
+ */
+export function resolveDiscount(modelRaw, day, { detected, manual } = {}) {
+  const n = normModel(modelRaw);
+  const det = detected?.discounts?.[n]?.[day];
+  if (det) return { pct: det.pct, source: 'detected', samples: det.samples };
+  const entry = manualDiscountFor(manual, modelRaw, day);
+  if (entry) return { pct: entry.pct, source: 'manual', entryId: entry.id };
+  return null;
+}
+
+/** Any day in the loaded range on which this model was detected as discounted. */
+export function detectedDiscountDays(detected, modelRaw) {
+  const byDay = detected?.discounts?.[normModel(modelRaw)];
+  return byDay ? Object.keys(byDay).sort() : [];
+}
+
+export function applyDiscountToRates(rates, pct) {
+  if (!rates || !pct) return rates;
+  const factor = 1 - pct / 100;
+  const scale = (v) => (v == null ? null : v * factor);
+  return {
+    ...rates,
+    input: scale(rates.input),
+    output: scale(rates.output),
+    cacheRead: scale(rates.cacheRead),
+    cacheWrite: scale(rates.cacheWrite),
+    discountPct: pct,
+  };
+}
+
+/**
+ * Which of these models the dashboard genuinely cannot price for a given day —
+ * no measurement, no manual entry — and so is worth asking the user about.
+ *
+ * A model that ran that day and showed no discount is *answered*, not unknown,
+ * and prompting for it would be nagging about a question already settled.
+ */
+export function modelsMissingDiscountInfo(modelKeys, day, { detected, manual } = {}) {
+  if (!day) return [];
+  return (modelKeys || []).filter((key) => {
+    const n = normModel(key);
+    if (!n) return false;
+    if (detected?.discounts?.[n]?.[day]) return false;
+    if (detected?.observed?.has(`${n}|${day}`)) return false;
+    return !manualDiscountFor(manual, key, day);
+  });
+}
+
+/** Validates and canonicalizes a hand-entered discount before it is stored. */
+export function normalizeDiscountEntry(raw) {
+  if (!raw) return null;
+  const pct = Number(raw.pct);
+  if (!Number.isFinite(pct) || pct <= 0 || pct >= 100) return null;
+  const models = [...new Set((raw.models || [])
+    .map((m) => (m === '*' ? '*' : normModel(m)))
+    .filter(Boolean))];
+  if (!models.length) return null;
+  const isDay = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
+  const start = isDay(raw.start) ? raw.start : null;
+  const end = isDay(raw.end) ? raw.end : null;
+  if (!start || !end || end < start) return null;
+  return {
+    id: raw.id || `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+    models,
+    start,
+    end,
+    pct: Math.round(pct * 10) / 10,
+  };
+}
+
 export function displayModel(raw) {
   const n = normModel(raw);
   if (!raw || n === 'default' || n.includes('auto')) return 'Auto';
@@ -392,6 +678,10 @@ export function normalize(raw, pricing, opts = {}) {
 
   // tokenCost = actual model/API spend from tokens (what drives optimization)
   const tokenCost = modelCents != null ? (modelCents + feeCents) / 100 : null;
+  // The same figure without the Cursor token fee, which is charged on top of
+  // the model's own rate. Discount detection compares this against the rate
+  // table, and folding the fee in would read as a surcharge on every model.
+  const modelTokenCost = modelCents != null ? modelCents / 100 : null;
   // requestCharge = flat usage-based fee ($0.04/request on some plans) — NOT token cost
   const requestCharge = !isTokenBased && chargedCents != null ? chargedCents / 100 : null;
   // Primary cost: token-based plans use chargedCents; others use tokenCost
@@ -432,6 +722,7 @@ export function normalize(raw, pricing, opts = {}) {
     valueCost: cost,
     billedCost,
     tokenCost,
+    modelTokenCost,
     requestCharge,
     isTokenBased,
     billingRegime,

@@ -963,6 +963,119 @@ tfoot td {
 .sim-picker-sep { color: var(--muted); }
 .sim-filter-hint { color: var(--amber); font-size: 11px; margin: 4px 0 0; }
 
+/* Promotions: detected discounts and hand-entered ones */
+.discount-tag {
+  display: inline-block;
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 1px 8px;
+  margin-left: 6px;
+  vertical-align: middle;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--green-strong) 18%, transparent);
+  color: var(--green-strong);
+  border: 1px solid color-mix(in srgb, var(--green-strong) 35%, transparent);
+}
+/* Declared rather than measured — dashed, so the two never read alike. */
+.discount-tag-manual { border-style: dashed; }
+
+.sim-discounts {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--bg);
+}
+.sim-discounts-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sim-discounts-title { font-size: 12px; font-weight: 600; color: var(--muted); }
+.sim-discount-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.discount-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--green-strong) 35%, transparent);
+  background: color-mix(in srgb, var(--green-strong) 12%, transparent);
+}
+.discount-chip-manual { border-style: dashed; }
+.discount-chip-src { color: var(--muted); font-size: 10px; }
+
+.sim-discount-editor { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+.discount-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+.discount-field { display: flex; flex-direction: column; gap: 4px; }
+.discount-field-models { flex: 1 1 260px; min-width: 220px; }
+.discount-field-pct { width: 110px; }
+.discount-label { font-size: 11px; color: var(--muted); }
+.discount-model-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  max-height: 108px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.discount-model-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.discount-actions { display: flex; align-items: center; gap: 10px; }
+.discount-entry-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.discount-entry-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.btn-quiet { color: var(--muted); }
+
+.sim-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.sim-note-text { font-size: 12px; color: var(--text); }
+.sim-note-actions { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+
 .sim-compare-table-wrap { overflow-x: auto; }
 .sim-compare-table td, .sim-compare-table th { font-variant-numeric: tabular-nums; }
 .row-actual { background: color-mix(in srgb, var(--accent) 8%, transparent); }

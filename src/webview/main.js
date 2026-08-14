@@ -10,6 +10,14 @@ import {
   parsePricing,
   matchPricing,
   estimateTokenCost,
+  detectDiscounts,
+  discountPeriods,
+  resolveDiscount,
+  detectedDiscountDays,
+  applyDiscountToRates,
+  modelsMissingDiscountInfo,
+  normalizeDiscountEntry,
+  dayKey,
   simulatorModels,
   defaultCompareSelection,
   mergeCompareSelection,
@@ -188,6 +196,18 @@ const state = {
     error: null,
   },
   analyzeThresholds: { ...ANALYZE_THRESHOLD_DEFAULTS },
+  /**
+   * Promotions inferred from billing vs. the published rate table, recomputed
+   * whenever the loaded events change. See detectDiscounts().
+   */
+  detectedDiscounts: { discounts: {}, observed: new Set() },
+  /** Hand-entered promotions, persisted — they outlive any one loaded range. */
+  manualDiscounts: [],
+  /** Compare-model keys the last simulator render could not price for the day. */
+  discountPromptKeys: [],
+  /** Request ids whose "we don't know about a promo" prompt the user dismissed. */
+  discountPromptDismissed: new Set(),
+  discountEditorOpen: false,
   /** Severity of the banner currently shown, so view switches can keep the ones that still apply. */
   alertType: null,
   /** Note to fold into the next load's banner (see takePendingNotice). */
@@ -202,6 +222,8 @@ const fmt = {
   pct(v) { return v == null ? '—' : `${v.toFixed(1)}%`; },
   /** One decimal, for per-day rates where whole numbers hide the difference. */
   rate(v) { return v == null ? '—' : v.toFixed(1); },
+  /** Promotions are usually round ("50%"); only show a decimal when there is one. */
+  discountPct(v) { return v == null ? '—' : `${Number.isInteger(v) ? v : v.toFixed(1)}%`; },
   date(ms) {
     if (!ms) return '—';
     return new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -732,6 +754,65 @@ function applyDateRange(start, end, preset) {
   updateFilterSummary();
 }
 
+// ---------------------------------------------------------------------------
+// Promotional discounts (see detectDiscounts() in logic.js for the rationale)
+// ---------------------------------------------------------------------------
+
+/** Restores hand-entered promotions. They are never re-derivable, so they persist. */
+function initDiscountPrefs() {
+  const stored = loadPrefs()?.manualDiscounts;
+  if (!Array.isArray(stored)) return;
+  state.manualDiscounts = stored.map(normalizeDiscountEntry).filter(Boolean);
+}
+
+function saveManualDiscounts() {
+  savePrefs({ manualDiscounts: state.manualDiscounts });
+}
+
+function discountContext() {
+  return { detected: state.detectedDiscounts, manual: state.manualDiscounts };
+}
+
+/** The promotion in force for a model on the day a given request ran. */
+function discountForEvent(modelRaw, timestampMs) {
+  return resolveDiscount(modelRaw, dayKey(timestampMs), discountContext());
+}
+
+const DISCOUNT_TIPS = {
+  detected: 'Cursor billed these tokens for noticeably less than its published rates. Inferred by comparing what you were charged against the rate table — Cursor does not publish promotions in machine-readable form.',
+  manual: 'A promotion you recorded by hand. Estimates for this model use the reduced rate for the dates you gave.',
+};
+
+function discountBadge(discount, extraClass = '') {
+  if (!discount) return '';
+  const label = discount.source === 'manual' ? 'entered' : 'detected';
+  return ` <span class="discount-tag ${extraClass}" title="${esc(DISCOUNT_TIPS[discount.source])}">−${fmt.discountPct(discount.pct)} ${label}</span>`;
+}
+
+/**
+ * The badge for a model in a table that spans the whole loaded range rather
+ * than one request. A promotion that ran for part of the range still belongs
+ * on the row — the summary it labels includes those days' spend — so the badge
+ * names the number of days rather than implying the whole period was discounted.
+ */
+function rangeDiscountBadge(modelRaw) {
+  const days = detectedDiscountDays(state.detectedDiscounts, modelRaw);
+  if (days.length) {
+    const byDay = state.detectedDiscounts.discounts[normModel(modelRaw)];
+    const top = Math.max(...days.map((d) => byDay[d].pct));
+    const span = days.length === 1 ? fmt.shortDate(days[0]) : `${days.length} days`;
+    return ` <span class="discount-tag" title="${esc(DISCOUNT_TIPS.detected)}">−${fmt.discountPct(top)} on ${esc(span)}</span>`;
+  }
+  const manual = state.manualDiscounts.find((entry) => manualEntryCoversModel(entry, modelRaw));
+  if (!manual) return '';
+  return ` <span class="discount-tag discount-tag-manual" title="${esc(DISCOUNT_TIPS.manual)}">−${fmt.discountPct(manual.pct)} entered</span>`;
+}
+
+function manualEntryCoversModel(entry, modelRaw) {
+  const n = normModel(modelRaw);
+  return (entry.models || []).some((m) => m === '*' || n === m || n.includes(m) || m.includes(n));
+}
+
 const COMPARE_MODES = ['previous', 'prevMonth', 'custom'];
 
 /** Restores the comparison baseline chosen in a previous session. */
@@ -1216,7 +1297,7 @@ function renderModelDeltaTable(currentEvents, baselineEvents, currentWindow, bas
     // attention with the ones that did.
     const quiet = Math.abs(d.delta) < 0.005 ? ' class="compare-row-quiet"' : '';
     return `<tr${quiet}>
-        <th scope="row">${esc(d.model)}${tag}</th>
+        <th scope="row">${esc(d.model)}${tag}${rangeDiscountBadge(d.model)}</th>
         <td>${fmt.money(d.current)}<span class="compare-sub">${fmt.num(cN)} req · ${fmt.money(cAvg)}/req</span></td>
         <td>${fmt.money(d.baseline)}<span class="compare-sub">${fmt.num(bN)} req · ${fmt.money(bAvg)}/req</span></td>
         <td>${deltaCell(d.current, d.baseline)}</td>
@@ -1653,7 +1734,7 @@ function renderTable(events, summary) {
       : (e.cacheReadTokens > 0 ? ' title="No matching model pricing — savings unavailable"' : '');
     return `<tr class="${expensive ? 'expensive' : ''}">
       <td>${fmt.date(e.timestampMs)}</td>
-      <td>${esc(e.model)}</td>
+      <td>${esc(e.model)}${discountBadge(discountForEvent(e.modelRaw, e.timestampMs))}</td>
       <td class="cost">${fmt.money(e.cost)}</td>
       <td class="usage-fee${showUsageFee ? '' : ' hidden'}">${e.requestCharge != null ? fmt.money(e.requestCharge) : '—'}</td>
       <td class="savings"${savingsTitle}>${e.cacheSavings != null ? fmt.money(e.cacheSavings) : '—'}</td>
@@ -2088,6 +2169,9 @@ async function load() {
     const normOpts = { freePlan: isFreePlan() };
     const normalized = (usage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
     state.all = filterByRange(normalized, start, end);
+    // Promotions are inferred from the events themselves, so this has to be
+    // rebuilt whenever the loaded range changes — every renderer below reads it.
+    state.detectedDiscounts = detectDiscounts(state.all, state.pricing);
     // Not signed in is not "zero usage" — keep the placeholders in that case.
     state.loaded = usage.authMode !== 'none';
     state.page = 1;
@@ -2156,6 +2240,7 @@ async function load() {
     // numbers were for the range now shown in the toolbar.
     state.all = [];
     state.loaded = false;
+    state.detectedDiscounts = { discounts: {}, observed: new Set() };
     destroyCharts();
     refresh();
     populateSimRequestPicker(null);
@@ -2467,7 +2552,7 @@ function renderAnalyzeFindings(findings) {
 function renderAnalyzeModelPanel(modelRows, totalCost) {
   const rows = modelRows.slice(0, 8).map((r) => `
     <tr>
-      <td>${esc(r.model)}</td>
+      <td>${esc(r.model)}${rangeDiscountBadge(r.model)}</td>
       <td class="num">${fmt.money(r.cost)}</td>
       <td class="num">${fmt.num(r.count)}</td>
       <td class="num">${fmt.money(r.avg)}</td>
@@ -2509,7 +2594,7 @@ function renderAnalyzeExpensivePanel(expensive) {
   const rows = expensive.map((e) => `
     <tr>
       <td>${fmt.date(e.timestampMs)}</td>
-      <td>${esc(e.model)}</td>
+      <td>${esc(e.model)}${discountBadge(discountForEvent(e.modelRaw, e.timestampMs))}</td>
       <td class="num">${fmt.money(e.cost)}</td>
       <td class="num">${fmt.num(e.cacheReadTokens)}</td>
       <td class="num">${fmt.num(e.totalTokens)}</td>
@@ -3010,13 +3095,22 @@ function buildCompareRows(event) {
     estCost: actualCost,
     savings: event.cacheSavings,
     diff: null,
+    // Whatever promotion was running is already inside the billed figure, so
+    // this is flagged for context only — never applied a second time.
+    discount: discountForEvent(event.modelRaw, event.timestampMs),
     isActual: true,
   };
 
+  // The replay prices this request's tokens as of the day it ran, so that is
+  // the day whose promotions apply — not today's.
+  const day = dayKey(event.timestampMs);
+
   const altRows = [];
+  const unknown = [];
   for (const m of getCompareModels(state.pricing)) {
     if (isSameModel(m.key, event.modelRaw, state.pricing)) continue;
-    const rates = m.rates;
+    const discount = resolveDiscount(m.key, day, discountContext());
+    const rates = discount ? applyDiscountToRates(m.rates, discount.pct) : m.rates;
     // Unpriced models stay in the table with an empty cost cell. Dropping them
     // made a model the user had just run look like it didn't exist.
     const estCost = rates ? estimateTokenCost(rates, tokens) : null;
@@ -3025,9 +3119,14 @@ function buildCompareRows(event) {
     // The rates that priced this row, when they came from a differently-named
     // catalog entry, are an approximation the user should be able to see.
     const via = rates && normModel(rates.label) !== normModel(m.key) ? rates.label : null;
-    altRows.push({ key: m.key, label: m.label, via, estCost, savings, diff, isActual: false });
+    altRows.push({ key: m.key, label: m.label, via, estCost, savings, diff, discount, isActual: false });
+    if (m.rates && !discount) unknown.push(m.key);
   }
-  return { actualRow, altRows };
+
+  // Models priced at list because nothing tells us otherwise — no requests that
+  // day to measure, and no entry from the user. Worth one quiet offer to fix.
+  state.discountPromptKeys = modelsMissingDiscountInfo(unknown, day, discountContext());
+  return { actualRow, altRows, event };
 }
 
 function sortCompareRows(rows, key, dir) {
@@ -3047,7 +3146,7 @@ function sortCompareRows(rows, key, dir) {
 function renderCompareRow(row) {
   if (row.isActual) {
     return `<tr class="row-actual">
-      <td>${esc(row.label)} <span class="sim-tag">actual</span></td>
+      <td>${esc(row.label)} <span class="sim-tag">actual</span>${discountBadge(row.discount)}</td>
       <td>${fmt.money(row.estCost)}</td>
       <td>—</td>
       <td>${row.savings != null ? fmt.money(row.savings) : '—'}</td>
@@ -3061,7 +3160,7 @@ function renderCompareRow(row) {
       ? ` <span class="sim-tag sim-tag-muted">via ${esc(row.via)} rates</span> ${tip('Cursor bills this variant under a model string that is not on the pricing table, so the estimate uses the closest published rates. Reasoning level and any long-context or Fast surcharge are not reflected.')}`
       : '';
   return `<tr class="${rowClass}">
-    <td>${esc(row.label)}${note}</td>
+    <td>${esc(row.label)}${note}${discountBadge(row.discount)}</td>
     <td>${fmt.money(row.estCost)}</td>
     <td class="${diffClass}">${formatDiff(row.diff)}</td>
     <td>${row.savings != null ? fmt.money(row.savings) : '—'}</td>
@@ -3105,6 +3204,183 @@ function renderCompareTableFromState() {
 
   $('simCompareBody').innerHTML = rows.map(renderCompareRow).join('');
   updateCompareSortHeaders();
+  renderDiscountPrompt(filtered);
+}
+
+/**
+ * The one-line offer to record a promotion we could not measure.
+ *
+ * Only for models actually on screen, and only once per request — a nag that
+ * reappears on every re-render for a promotion the user knows isn't running
+ * would be worse than the stale estimate it is trying to prevent.
+ */
+function renderDiscountPrompt(visibleRows) {
+  const el = $('simDiscountPrompt');
+  if (!el) return;
+  const shown = new Set(visibleRows.map((r) => r.key));
+  const keys = (state.discountPromptKeys || []).filter((k) => shown.has(k));
+  const dismissed = state.discountPromptDismissed.has(state.simRequestId);
+  if (!keys.length || dismissed || state.discountEditorOpen) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+  const catalog = getCompareModels(state.pricing);
+  const names = keys.slice(0, 3).map((k) => catalog.find((x) => x.key === k)?.label || k);
+  const more = keys.length > names.length ? ` and ${keys.length - names.length} more` : '';
+  el.innerHTML = `
+    <span class="sim-note-text">
+      Priced at list for ${esc(names.join(', '))}${esc(more)} — you didn't run ${keys.length > 1 ? 'them' : 'it'} that day, so a promotion wouldn't show up here.
+      ${tip('Cursor runs limited-time promotions that never reach its published rate table. When you have used a model, this dashboard measures the discount from your own billing; when you have not, there is nothing to measure.')}
+    </span>
+    <span class="sim-note-actions">
+      <button type="button" class="btn-text" id="simDiscountPromptAdd">Add a discount</button>
+      <button type="button" class="btn-text btn-quiet" id="simDiscountPromptDismiss">Not now</button>
+    </span>`;
+  el.classList.remove('hidden');
+  $('simDiscountPromptAdd')?.addEventListener('click', () => {
+    setDiscountEditorOpen(true, keys);
+  });
+  $('simDiscountPromptDismiss')?.addEventListener('click', () => {
+    state.discountPromptDismissed.add(state.simRequestId);
+    el.classList.add('hidden');
+  });
+}
+
+function addDays(day, n) {
+  const d = new Date(`${day}T12:00:00`);
+  d.setDate(d.getDate() + n);
+  return dayKey(d.getTime());
+}
+
+function setDiscountEditorOpen(open, preselectKeys = []) {
+  state.discountEditorOpen = open;
+  renderDiscountEditor(preselectKeys);
+  renderDiscountSummary();
+  if (state.simCompareContext) renderCompareTableFromState();
+}
+
+/**
+ * What the dashboard currently believes about promotions, measured and
+ * declared alike. Shown even when the editor is closed: a discount silently
+ * reshaping the comparison table is worse than no discount at all.
+ */
+function renderDiscountSummary() {
+  const el = $('simDiscountSummary');
+  if (!el) return;
+  const periods = discountPeriods(state.detectedDiscounts);
+  const chips = [];
+  for (const p of periods) {
+    const range = p.start === p.end ? fmt.shortDate(p.start) : `${fmt.shortDate(p.start)}–${fmt.shortDate(p.end)}`;
+    chips.push(`<span class="discount-chip" title="${esc(DISCOUNT_TIPS.detected)}"><strong>−${fmt.discountPct(p.pct)}</strong> ${esc(p.label || p.model)} · ${esc(range)} <span class="discount-chip-src">detected</span></span>`);
+  }
+  for (const entry of state.manualDiscounts) {
+    const models = entry.models.includes('*') ? 'all models' : entry.models.join(', ');
+    const range = entry.start === entry.end ? fmt.shortDate(entry.start) : `${fmt.shortDate(entry.start)}–${fmt.shortDate(entry.end)}`;
+    chips.push(`<span class="discount-chip discount-chip-manual" title="${esc(DISCOUNT_TIPS.manual)}"><strong>−${fmt.discountPct(entry.pct)}</strong> ${esc(models)} · ${esc(range)} <span class="discount-chip-src">entered</span></span>`);
+  }
+  el.innerHTML = chips.length
+    ? chips.join('')
+    : '<span class="sim-note-text">No promotions detected in this range, and none entered.</span>';
+}
+
+function renderDiscountEditor(preselectKeys = []) {
+  const el = $('simDiscountEditor');
+  if (!el) return;
+  el.classList.toggle('hidden', !state.discountEditorOpen);
+  if (!state.discountEditorOpen) {
+    el.innerHTML = '';
+    return;
+  }
+
+  const preselect = new Set(preselectKeys);
+  const models = getCompareModels(state.pricing).filter((m) => m.priced !== false);
+  const checkboxes = models.map((m) => `
+    <label class="discount-model-opt">
+      <input type="checkbox" value="${esc(m.key)}"${preselect.has(m.key) ? ' checked' : ''} />
+      <span>${esc(m.label)}</span>
+    </label>`).join('');
+
+  const event = state.simCompareContext?.event;
+  const start = (event && dayKey(event.timestampMs)) || dayKey(Date.now());
+  const end = addDays(start, 6);
+
+  const existing = state.manualDiscounts.map((entry) => {
+    const modelText = entry.models.includes('*') ? 'All models' : entry.models.join(', ');
+    return `<li>
+      <span><strong>−${fmt.discountPct(entry.pct)}</strong> ${esc(modelText)} · ${esc(fmt.shortDate(entry.start))}–${esc(fmt.shortDate(entry.end))}</span>
+      <button type="button" class="btn-text btn-quiet" data-discount-remove="${esc(entry.id)}">Remove</button>
+    </li>`;
+  }).join('');
+
+  el.innerHTML = `
+    <p class="sim-note-text">
+      Record a promotion Cursor announced but never published as a rate. Every estimate for these models within these dates uses the reduced price.
+      ${tip('Your own requests are always billed at whatever you were actually charged — this only affects the "what would this have cost on another model" estimates.')}
+    </p>
+    <div class="discount-form">
+      <div class="discount-field discount-field-models">
+        <span class="discount-label">Models on promotion</span>
+        <div class="discount-model-list" id="simDiscountModels">${checkboxes || '<span class="sim-note-text">Load usage data first.</span>'}</div>
+      </div>
+      <div class="discount-field">
+        <label class="discount-label" for="simDiscountStart">From</label>
+        <input type="date" id="simDiscountStart" value="${esc(start)}" />
+      </div>
+      <div class="discount-field">
+        <label class="discount-label" for="simDiscountEnd">To</label>
+        <input type="date" id="simDiscountEnd" value="${esc(end)}" />
+      </div>
+      <div class="discount-field discount-field-pct">
+        <label class="discount-label" for="simDiscountPct">Discount %</label>
+        <input type="number" id="simDiscountPct" min="1" max="99" step="1" value="50" />
+      </div>
+      <div class="discount-actions">
+        <button type="button" class="btn-primary" id="simDiscountSave">Save</button>
+        <button type="button" class="btn-text" id="simDiscountCancel">Close</button>
+      </div>
+    </div>
+    <p id="simDiscountError" class="sim-filter-hint hidden"></p>
+    ${existing ? `<ul class="discount-entry-list">${existing}</ul>` : ''}`;
+
+  $('simDiscountSave')?.addEventListener('click', saveDiscountFromEditor);
+  $('simDiscountCancel')?.addEventListener('click', () => setDiscountEditorOpen(false));
+  el.querySelectorAll('[data-discount-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.discountRemove;
+      state.manualDiscounts = state.manualDiscounts.filter((e) => e.id !== id);
+      saveManualDiscounts();
+      setDiscountEditorOpen(true);
+      runCompareFromRequest();
+    });
+  });
+}
+
+function saveDiscountFromEditor() {
+  const err = $('simDiscountError');
+  const fail = (msg) => {
+    if (!err) return;
+    err.textContent = msg;
+    err.classList.remove('hidden');
+  };
+  const checked = [...document.querySelectorAll('#simDiscountModels input:checked')].map((el) => el.value);
+  if (!checked.length) return fail('Pick at least one model.');
+
+  const entry = normalizeDiscountEntry({
+    models: checked,
+    start: $('simDiscountStart')?.value,
+    end: $('simDiscountEnd')?.value,
+    pct: $('simDiscountPct')?.value,
+  });
+  if (!entry) return fail('Enter a discount between 1 and 99% and an end date on or after the start date.');
+
+  state.manualDiscounts = [...state.manualDiscounts, entry];
+  saveManualDiscounts();
+  err?.classList.add('hidden');
+  setDiscountEditorOpen(false);
+  // Re-price the table so the new discount is visible immediately.
+  runCompareFromRequest();
+  refresh();
 }
 
 function runCompareFromRequest() {
@@ -3127,7 +3403,7 @@ function runCompareFromRequest() {
     summary.classList.remove('hidden');
     summary.innerHTML = `
       <div><dt>When</dt><dd>${fmt.date(event.timestampMs)}</dd></div>
-      <div><dt>Model used ${tip('The model Cursor billed for this request. Auto means Cursor chose the model automatically.')}</dt><dd>${esc(event.model)}</dd></div>
+      <div><dt>Model used ${tip('The model Cursor billed for this request. Auto means Cursor chose the model automatically.')}</dt><dd>${esc(event.model)}${discountBadge(discountForEvent(event.modelRaw, event.timestampMs))}</dd></div>
       <div><dt>Actual token cost ${tip('What Cursor charged for model/API tokens on this request. Does not include flat usage fees on some plans, and always the token value rather than the Billed figure — the comparison below prices tokens, so its baseline has to as well.')}</dt><dd>${fmt.money(actualCost)}</dd></div>
       <div><dt>Input / output ${tip('Token counts from your request — replayed as-is when estimating other models.')}</dt><dd>${fmt.num(tokens.input)} / ${fmt.num(tokens.output)}</dd></div>
       <div><dt>Cache read / write ${tip('Prompt cache tokens from this request. Savings estimates assume similar cache behavior on other models.')}</dt><dd>${fmt.num(tokens.cacheRead)} / ${fmt.num(tokens.cacheWrite)}</dd></div>
@@ -3137,6 +3413,7 @@ function runCompareFromRequest() {
   populateCompareModelFilters(event);
   state.simCompareContext = buildCompareRows(event);
   renderCompareTableFromState();
+  renderDiscountSummary();
 }
 
 function setSimModeUI(mode) {
@@ -3156,6 +3433,9 @@ function refreshSimulator() {
   populateSimRequestPicker(state.simRequestId);
   if (state.simMode === 'request') runCompareFromRequest();
   else runSimulator();
+  // Also when there is no request to compare: what the dashboard believes
+  // about promotions should be visible before anything is selected.
+  renderDiscountSummary();
 }
 
 function openCompare(requestId) {
@@ -3177,24 +3457,33 @@ function runSimulator() {
     cacheWrite: tokenInput('simCacheWrite'),
   };
   const modelKey = $('simModel').value;
-  const rates = matchPricing(modelKey, state.pricing);
-  if (!rates) {
+  const published = matchPricing(modelKey, state.pricing);
+  if (!published) {
     $('simCost').textContent = '—';
     $('simSavings').textContent = '—';
     $('simNoCache').textContent = '—';
     $('simRates').textContent = 'No pricing matched for this model.';
     return;
   }
+  // A hypothetical token profile has no date of its own, so it is priced as of
+  // today — the only day a "what would this cost me" answer can mean.
+  const discount = resolveDiscount(modelKey, dayKey(Date.now()), discountContext());
+  const rates = discount ? applyDiscountToRates(published, discount.pct) : published;
   const cost = estimateTokenCost(rates, tokens);
   const savings = cacheSavingsFor({ cacheRead: tokens.cacheRead }, rates);
   const noCache = cost != null && savings != null ? cost + savings : cost;
   $('simCost').textContent = fmt.money(cost);
   $('simSavings').textContent = fmt.money(savings);
   $('simNoCache').textContent = fmt.money(noCache);
-  const parts = [`${rates.label} rates (per 1M tokens)`];
-  if (rates.input != null) parts.push(`input $${rates.input}`);
-  if (rates.output != null) parts.push(`output $${rates.output}`);
-  if (rates.cacheRead != null) parts.push(`cache read $${rates.cacheRead}`);
+  // Naming the discount matters: without it these read as the published rates,
+  // and a user checking them against cursor.com would find they disagree.
+  const rate = (v) => `$${Math.round(v * 1000) / 1000}`;
+  const parts = [discount
+    ? `${rates.label} rates less ${fmt.discountPct(discount.pct)} ${discount.source === 'manual' ? 'entered' : 'detected'} (per 1M tokens)`
+    : `${rates.label} rates (per 1M tokens)`];
+  if (rates.input != null) parts.push(`input ${rate(rates.input)}`);
+  if (rates.output != null) parts.push(`output ${rate(rates.output)}`);
+  if (rates.cacheRead != null) parts.push(`cache read ${rate(rates.cacheRead)}`);
   $('simRates').textContent = parts.join(' · ');
 }
 
@@ -3239,6 +3528,7 @@ async function init() {
   initDateRange();
   initPeriodComparePrefs();
   initCompareModelPrefs();
+  initDiscountPrefs();
 
   const storedMode = storage.getItem(COST_MODE_KEY);
   if (storedMode === 'billed' || storedMode === 'value') state.costMode = storedMode;
@@ -3393,6 +3683,10 @@ async function init() {
     document.querySelectorAll('#simCompareModelFilters input').forEach((cb) => { cb.checked = false; });
     clearCompareModelSelection();
     renderCompareTableFromState();
+  });
+
+  $('simDiscountToggle')?.addEventListener('click', () => {
+    setDiscountEditorOpen(!state.discountEditorOpen);
   });
 
   $('simCompareTable')?.addEventListener('click', (ev) => {

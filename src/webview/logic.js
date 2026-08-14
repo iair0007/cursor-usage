@@ -730,7 +730,18 @@ export function normalize(raw, pricing, opts = {}) {
   // The same figure without the Cursor token fee, which is charged on top of
   // the model's own rate. Discount detection compares this against the rate
   // table, and folding the fee in would read as a surcharge on every model.
-  const modelTokenCost = modelCents != null ? modelCents / 100 : null;
+  //
+  // Cursor does not always break the model's own value out as
+  // tokenUsage.totalCents. Where it doesn't, a token-billed request still
+  // carries it: the charge is that value plus the token fee. Without this,
+  // detection had nothing to measure on such an account and reported "no
+  // discount found" for every model, which is indistinguishable from having
+  // checked. Per-request billing is a flat fee unrelated to the tokens, so it
+  // is deliberately left out rather than compared against a rate table.
+  const modelCentsResolved = modelCents != null
+    ? modelCents
+    : (isTokenBased && chargedCents != null ? Math.max(0, chargedCents - feeCents) : null);
+  const modelTokenCost = modelCentsResolved != null ? modelCentsResolved / 100 : null;
   // requestCharge = flat usage-based fee ($0.04/request on some plans) — NOT token cost
   const requestCharge = !isTokenBased && chargedCents != null ? chargedCents / 100 : null;
   // Primary cost: token-based plans use chargedCents; others use tokenCost

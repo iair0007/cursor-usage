@@ -891,10 +891,12 @@ function initPeriodComparePrefs() {
   if (COMPARE_MODES.includes(prefs?.compareMode)) state.trend.mode = prefs.compareMode;
   if (prefs?.compareStart) state.trend.customStart = prefs.compareStart;
   if (prefs?.compareEnd) state.trend.customEnd = prefs.compareEnd;
-  if (prefs?.comparePrimaryStart && prefs?.comparePrimaryEnd) {
-    state.trend.primaryStart = prefs.comparePrimaryStart;
-    state.trend.primaryEnd = prefs.comparePrimaryEnd;
-  }
+  // The pinned left column is deliberately not restored. A baseline mode is a
+  // preference — "compare me against last month" stays true tomorrow. Pinning
+  // the left column to fixed dates is an act, not a preference: it detaches
+  // Analyze and the Overview badge from the toolbar entirely, and restoring it
+  // silently meant opening the dashboard days later to a comparison that
+  // ignored every date you picked, with nothing on screen saying why.
   // A stored "custom" with no dates would leave the panel prompting forever.
   if (state.trend.mode === 'custom' && !(state.trend.customStart && state.trend.customEnd)) {
     state.trend.mode = 'previous';
@@ -1242,9 +1244,21 @@ function renderComparison() {
     statusEl.textContent = text || '';
     statusEl.classList.toggle('hidden', !text);
   };
+  // Drawn in every state, including the ones that return early. A pin rewrites
+  // what this whole panel is about, and its only control used to be the column
+  // header's date button — which these branches never draw. Landing on one, as
+  // an empty baseline does, left the panel ignoring the toolbar with nothing on
+  // screen saying so and no way back.
+  const pinBanner = () => (hasPrimaryOverride()
+    ? `<div class="compare-pin-note">
+        <span>Pinned to <strong>${esc(windowLabel(currentPrimaryWindow()))}</strong>, so the toolbar's dates
+          are not being used here.</span>
+        <button type="button" class="btn-text" data-unpin-primary>Follow the filter bar</button>
+      </div>`
+    : '');
   const clear = (text) => {
     setStatus(text);
-    bodyEl.innerHTML = '';
+    bodyEl.innerHTML = pinBanner();
     noteEl.classList.add('hidden');
   };
 
@@ -1279,8 +1293,10 @@ function renderComparison() {
   // An empty baseline makes every delta "+100% (new)", which is noise dressed
   // as insight — say plainly that there's nothing on the other side.
   if (!baselineEvents.length) {
-    bodyEl.innerHTML = `<p class="compare-empty">No requests in ${esc(windowLabel(baseWindow))}, so there's nothing to compare against.
-      ${state.trend.mode === 'previous' ? 'Try a longer period, or pick a custom baseline.' : 'Pick a different baseline.'}</p>`;
+    bodyEl.innerHTML = `${pinBanner()}<p class="compare-empty">No requests in ${esc(windowLabel(baseWindow))}, so there's nothing to compare against.
+      ${hasPrimaryOverride()
+        ? 'That window follows the pinned period above, not the toolbar.'
+        : state.trend.mode === 'previous' ? 'Try a longer period, or pick a custom baseline.' : 'Pick a different baseline.'}</p>`;
     noteEl.classList.add('hidden');
     return;
   }
@@ -1298,6 +1314,7 @@ function renderComparison() {
     </th>`;
 
   bodyEl.innerHTML = `
+    ${pinBanner()}
     <table class="compare-table">
       <thead>
         <tr>
@@ -1488,12 +1505,12 @@ function resetCompareEditor() {
 }
 
 function saveComparePrefs() {
+  // The pin is not stored — see initPeriodComparePrefs(). It lasts as long as
+  // the dashboard is open, and no longer.
   savePrefs({
     compareMode: state.trend.mode,
     compareStart: state.trend.customStart,
     compareEnd: state.trend.customEnd,
-    comparePrimaryStart: state.trend.primaryStart,
-    comparePrimaryEnd: state.trend.primaryEnd,
   });
 }
 // ---------------------------------------------------------------------------
@@ -1625,6 +1642,13 @@ function toggleSessionSelected(id) {
   } else {
     if (sessions.selected.length >= MAX_COMPARE_SESSIONS) {
       showAlert('info', `You can compare up to ${MAX_COMPARE_SESSIONS} sessions at once — clear one first.`);
+      // The click already ticked the box: the browser toggles it before the
+      // change event, and returning here without redrawing left it ticked for a
+      // row that was never added. Rows past the fourth looked selected, got no
+      // slot letter, and were missing from a comparison that appeared to ignore
+      // them — and the alert saying why is at the top of the page, out of sight
+      // from the bottom of a long list.
+      renderSessions();
       return;
     }
     sessions.selected.push(id);
@@ -2129,25 +2153,43 @@ function renderSessionModelTable(ctxs, pair) {
     });
   }
 
-  const costs = ctxs.map((c) => Object.fromEntries(costByModel(c.events)));
-  const models = [...new Set(costs.flatMap((byModel) => Object.keys(byModel)))];
+  // Keyed on requests, not on cost. costByModel() drops a request with no cost
+  // figure and cannot tell $0.00 from absent, so a model used on included or
+  // unpriced requests — Auto on a plan that bundles them — vanished from the
+  // table, or showed a dash meaning "never touched it" against a session that
+  // had used it all along.
+  const usage = ctxs.map((c) => {
+    const byModel = new Map();
+    for (const e of c.events) {
+      const prev = byModel.get(e.model) || { cost: 0, requests: 0 };
+      byModel.set(e.model, { cost: prev.cost + (e.cost ?? 0), requests: prev.requests + 1 });
+    }
+    return byModel;
+  });
+  const models = [...new Set(usage.flatMap((byModel) => [...byModel.keys()]))];
   if (!models.length) return '';
+  const costs = usage.map((byModel) => Object.fromEntries(
+    [...byModel].map(([model, v]) => [model, v.cost]),
+  ));
   // Biggest spend across all the sessions first — the model that explains the
   // most of what's on screen leads.
   models.sort((a, b) => costs.reduce((s, c) => s + (c[b] || 0), 0) - costs.reduce((s, c) => s + (c[a] || 0), 0));
 
   const rows = models.map((model) => {
-    const values = costs.map((byModel) => byModel[model] || 0);
-    const used = values.filter((v) => v > 0);
-    const max = Math.max(...values);
-    const min = Math.min(...values);
-    const cells = values.map((v) => {
+    const entries = usage.map((byModel) => byModel.get(model) || null);
+    // Only the sessions that actually ran the model take part in the colouring
+    // — a session that never touched it is not the cheapest one for it.
+    const spent = entries.filter((v) => v).map((v) => v.cost);
+    const max = Math.max(...spent);
+    const min = Math.min(...spent);
+    const cells = entries.map((v) => {
       // A model one session never touched is a blank, not a $0.00 to compare:
       // "didn't use it" and "used it for nothing" are different statements.
-      if (v === 0) return '<td class="cell-absent">—</td>';
-      const cls = used.length < 2 || fmt.money(max) === fmt.money(min) ? ''
-        : v === max ? 'cell-bad' : v === min ? 'cell-good' : '';
-      return `<td class="${cls}">${fmt.money(v)}</td>`;
+      if (!v) return '<td class="cell-absent">—</td>';
+      const cls = spent.length < 2 || fmt.money(max) === fmt.money(min) ? ''
+        : v.cost === max ? 'cell-bad' : v.cost === min ? 'cell-good' : '';
+      const req = `<span class="compare-sub">${fmt.num(v.requests)} req</span>`;
+      return `<td class="${cls}">${fmt.money(v.cost)}${req}</td>`;
     }).join('');
     return `<tr><th scope="row">${esc(model)}</th>${cells}</tr>`;
   }).join('');
@@ -2705,9 +2747,16 @@ function overviewCostSubHtml(summary) {
     : '';
   // The badge poses a question it can't answer on its own — against what, and
   // because of what — so it links to the view that does.
-  const trend = badge
-    ? `${badge}<button type="button" class="btn-link-inline compare-link" data-goto-compare>Compare periods →</button>`
-    : '';
+  const link = '<button type="button" class="btn-link-inline compare-link" data-goto-compare>Compare periods →</button>';
+  // A pin means there is no honest delta to put here: the only baseline loaded
+  // belongs to the pinned window, not to the range this card is showing. Say
+  // that, rather than dropping the badge and its link without explanation —
+  // silence read as the feature having disappeared, and the control that undoes
+  // it lives in the panel this link goes to.
+  const trend = badge ? `${badge}${link}`
+    : hasPrimaryOverride()
+      ? `<span class="trend-badge trend-flat">no trend — comparison pinned</span>${link}`
+      : '';
   const planChange = planChangeNote(summary, { short: true });
   return planChange ? `${trend}<span class="ov-stat-note">${esc(planChange)}</span>` : trend;
 }
@@ -4225,9 +4274,19 @@ function renderDiscountSummary() {
     const range = entry.start === entry.end ? fmt.shortDate(entry.start) : `${fmt.shortDate(entry.start)}–${fmt.shortDate(entry.end)}`;
     chips.push(`<span class="discount-chip discount-chip-manual" title="${esc(DISCOUNT_TIPS.manual)}"><strong>−${fmt.discountPct(entry.pct)}</strong> ${esc(models)} · ${esc(range)} <span class="discount-chip-src">you added</span></span>`);
   }
-  el.innerHTML = chips.length
-    ? chips.join('')
-    : `<span class="sim-note-muted">None found in this date range, and none added. Estimates below use Cursor's normal prices.</span>`;
+  if (chips.length) {
+    el.innerHTML = chips.join('');
+    return;
+  }
+  // "None found" covers two very different situations, and reading the wrong
+  // one costs real money: a range we measured and found clean, versus one we
+  // could not measure at all. The second is what the manual entry is for, and
+  // saying only "none found" made a promotion that was running look like a
+  // promotion that was checked for.
+  const checked = state.detectedDiscounts.observed?.size || 0;
+  el.innerHTML = checked
+    ? `<span class="sim-note-muted">Checked ${fmt.num(checked)} model-day${checked === 1 ? '' : 's'} in this range and found no discount, and none added. Estimates below use Cursor's normal prices.</span>`
+    : `<span class="sim-note-muted">Not enough comparable requests in this range to tell — a discount needs a few requests on the same model and day to measure. Add one below if you know of one.</span>`;
 }
 
 function renderDiscountEditor(preselectKeys = []) {
@@ -4541,6 +4600,15 @@ async function init() {
   });
   // The column headers are rebuilt on every render, so the click is delegated.
   $('compareBody')?.addEventListener('click', (ev) => {
+    if (ev.target.closest('[data-unpin-primary]')) {
+      state.trend.primaryStart = '';
+      state.trend.primaryEnd = '';
+      state.trend.editing = null;
+      saveComparePrefs();
+      renderComparison();
+      void loadTrendComparison();
+      return;
+    }
     const btn = ev.target.closest('[data-edit-window]');
     if (btn) openCompareEditor(btn.dataset.editWindow);
   });

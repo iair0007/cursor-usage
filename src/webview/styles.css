@@ -1506,3 +1506,21 @@ thead .tip:focus::after {
   .app { padding: 10px 12px 32px; }
   .cache-stat-grid { grid-template-columns: 1fr; }
 }
+
+/* A pinned left column detaches this panel from the toolbar, so it says so
+   plainly and carries its own way back — the column header's date button is
+   not drawn in every state this can appear in. */
+.compare-pin-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--vscode-editorWidget-border, #454545);
+  border-left: 3px solid var(--warn, #cca700);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--panel));
+  font-size: 12px;
+}
+.compare-pin-note span { color: var(--vscode-descriptionForeground, #9d9d9d); }

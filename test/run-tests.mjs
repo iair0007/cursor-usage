@@ -542,6 +542,23 @@ test('token-based event uses chargedCents as primary cost', () => {
   assert.equal(e.totalTokens, 51200);
   assert.equal(e.timestampMs, 1750000000000);
 });
+test('modelTokenCost strips the Cursor token fee from the billed figure', () => {
+  assert.equal(normalize(tokenBasedRaw, pricing).modelTokenCost, 1.0);
+});
+test('modelTokenCost is recovered when Cursor omits tokenUsage.totalCents', () => {
+  // Without this the field is null, and discount detection — its only consumer
+  // — skips every request and reports "no discount" on an account it never
+  // managed to measure at all.
+  const { totalCents, ...noTotal } = tokenBasedRaw.tokenUsage;
+  const e = normalize({ ...tokenBasedRaw, tokenUsage: noTotal }, pricing);
+  assert.equal(e.modelTokenCost, 1.2, 'chargedCents 123 less the 3c token fee');
+});
+test('a per-request charge is never mistaken for a token value', () => {
+  // A flat fee has nothing to do with the tokens, so comparing it against a
+  // rate table would read as a ~100% discount on every such request.
+  const { totalCents, ...noTotal } = usageBasedRaw.tokenUsage;
+  assert.equal(normalize({ ...usageBasedRaw, tokenUsage: noTotal }, pricing).modelTokenCost, null);
+});
 test('usage-based event separates flat fee from token cost', () => {
   const e = normalize(usageBasedRaw, pricing);
   assert.equal(e.cost, 0.02);

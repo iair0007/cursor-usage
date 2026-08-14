@@ -47,6 +47,33 @@ All notable user-facing changes. Earlier releases predate this file; see the
   stored the fallback that a failed request resolved to, so one dropped
   connection meant up to ten minutes with no plan name or spend cap even though
   the next request would have succeeded. Only successes are cached now.
+- **Fixed a pinned comparison quietly taking over the dashboard.** Pinning
+  Compare periods' left column to fixed dates was stored and restored, so
+  opening the dashboard days later gave a comparison that ignored every date in
+  the toolbar — and, because the Overview's trend badge has no honest delta
+  while a pin is in force, that card silently lost its badge and its link to
+  the comparison too. The only control that undid it was the column header's
+  date button, which the panel doesn't draw when the baseline comes back empty:
+  pin a single day, and there was no way back at all. The pin now lasts only as
+  long as the dashboard is open, announces itself wherever it applies, carries
+  its own "Follow the filter bar" button in every state, and the Overview says
+  the trend is unavailable because of it rather than showing nothing.
+- **Fixed discounts going undetected on accounts where Cursor doesn't itemise
+  the model's token value.** Detection compares that value against the
+  published rates, and where the field was missing every request was skipped —
+  so a promotion that was running read exactly like a range that had been
+  checked and found clean. The value is recovered from the charge and the token
+  fee for token-billed requests, and the panel now distinguishes "checked these
+  models and found nothing" from "not enough comparable requests to tell".
+- **Fixed the fifth session appearing to be selected.** Ticking past the
+  four-session limit left the box ticked for a row that was never added: it got
+  no slot letter and was missing from the comparison, and the alert explaining
+  why is at the top of the page, out of sight from the bottom of a long list.
+- **The model breakdown tells "didn't use it" from "used it for nothing".** A
+  model was listed by cost, so a session that used one on included or unpriced
+  requests — Auto, on a plan that bundles them — showed a dash meaning it had
+  never touched it, or dropped out of the table entirely. Rows are built from
+  the requests themselves now, and each figure carries its request count.
 - **Refresh now picks up renamed chats.** Cursor names a conversation once it
   has a subject, and the index those names come from is cached for five minutes
   to keep a multi-gigabyte file off the scroll path. Refresh drops it, rather

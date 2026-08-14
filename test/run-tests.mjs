@@ -254,6 +254,28 @@ test('estimateTokenCost combines all rates', () => {
   const cost = estimateTokenCost(rates, { input: 1_000_000, output: 100_000, cacheRead: 2_000_000, cacheWrite: 0 });
   assert.ok(Math.abs(cost - (3.0 + 1.5 + 0.6)) < 1e-9);
 });
+console.log('matchPricing and Cursor Router modes');
+test('a Balance/Intelligence row prices at the model the router picked', () => {
+  // Those modes bill at the routed model's own rate — which is why Cursor
+  // names it in the row. Pricing it at Auto's bundled rate understates a
+  // routed Grok request by roughly half.
+  const r = matchPricing('Cursor Grok 4.5 (Auto Balanced)', pricing);
+  assert.equal(r.label, 'Grok 4.5');
+});
+test('a Cost-mode row keeps Auto\'s bundled rate even though a model is named', () => {
+  // Cost mode is the one that keeps bundled Auto pricing whatever it routes to.
+  const r = matchPricing('Cursor Grok 4.5 (Auto Cost)', pricing);
+  assert.equal(r.label, 'Auto');
+});
+test('bare Auto and default still price as Auto', () => {
+  assert.equal(matchPricing('auto', pricing).label, 'Auto');
+  assert.equal(matchPricing('default', pricing).label, 'Auto');
+});
+test('a Fast variant reaches the Fast row despite an interleaved word', () => {
+  // "grok-4-6-fast" is not a substring of "cursor-grok-4-6-high-fast".
+  assert.equal(matchPricing('cursor-grok-4.6-high-fast', pricing).label, 'Grok 4.6 (Fast)');
+  assert.equal(matchPricing('cursor-grok-4.6-high', pricing).label, 'Grok 4.6');
+});
 test('cacheSavingsFor uses input minus cache-read rate', () => {
   const rates = matchPricing('claude-4.5-sonnet', pricing);
   const savings = cacheSavingsFor({ cacheRead: 1_000_000 }, rates);

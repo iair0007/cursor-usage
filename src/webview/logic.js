@@ -230,11 +230,20 @@ export function matchPricing(model, pricing) {
     output: pricing.auto.output,
     label: 'Auto',
   } : null);
-  // Auto is the last resort, not the first. Cursor names some rows for the
-  // model Auto settled on — "Cursor Grok 4.5 (Auto Balanced)" — and matching on
-  // the word "auto" anywhere in the string priced those at Auto's rate while
-  // the table listed the real model a few rows down.
-  if (n === 'auto' || n === 'default' || n === 'cursor-auto') {
+  // Auto is billed one of two ways, and which one depends on the router mode.
+  // Cost mode keeps Auto's bundled flat rate whatever it routes to. Balance and
+  // Intelligence bill at the routed model's own rate — "if your request is
+  // routed to Opus 5, you are billed at Opus 5 pricing" — which is exactly why
+  // Cursor names the model in those rows ("Cursor Grok 4.5 (Auto Balanced)").
+  //
+  // So the bundled rate is right for bare Auto and for Cost mode, and wrong for
+  // a named Balance/Intelligence row, where the model beside it is the answer.
+  // Matching on the word "auto" anywhere used to price every one of them at the
+  // bundled rate — roughly half what a routed Grok request really costs.
+  const autoRouted = n.includes('auto');
+  const bundledAuto = n === 'auto' || n === 'default' || n === 'cursor-auto'
+    || (autoRouted && n.includes('cost'));
+  if (bundledAuto) {
     const rates = autoRates();
     if (rates) return rates;
   }
@@ -287,8 +296,8 @@ export function matchPricing(model, pricing) {
       label: partial.display,
     };
   }
-  // Auto-routed traffic the table cannot name any better.
-  if (n.includes('auto')) return autoRates();
+  // Auto-routed traffic whose model the table cannot name any better.
+  if (autoRouted) return autoRates();
   return null;
 }
 

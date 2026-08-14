@@ -84,9 +84,14 @@ All notable user-facing changes. Earlier releases predate this file; see the
   contain "grok-4-6-fast" as a substring, since "high" sits in the middle — so
   its estimates were about half what it really cost. And a row Cursor names for
   the model Auto settled on, like "Cursor Grok 4.5 (Auto Balanced)", was priced
-  at Auto's rate purely because the word "auto" appeared in it, with the real
-  model listed a few rows down. Rows are matched word-wise now, most specific
-  first, and Auto is the last resort rather than the first.
+  at Auto's rate purely because the word "auto" appeared in it. Auto is billed
+  two different ways and the row was naming which: Cost mode keeps Auto's
+  bundled flat rate whatever it routes to, while Balance and Intelligence bill
+  at the routed model's own rate — which is precisely why Cursor names the
+  model in those rows. Routed requests were priced at roughly half what they
+  cost. Rows are matched word-wise now, most specific first; the bundled rate
+  is kept for bare Auto and for Cost mode, and a named Balance/Intelligence row
+  prices against the model beside it.
 - **Fixed a discount being missing from the estimates for the model it was
   found on.** Detection keys on the name Cursor bills under
   ("cursor-grok-4.6-high"), while the Simulator asks by catalog row ("Grok

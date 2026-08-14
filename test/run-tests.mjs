@@ -36,6 +36,7 @@ const {
   cacheSavingsFor,
   describeDiscountRun,
   detectDiscounts,
+  discountImpact,
   discountPeriods,
   resolveDiscount,
   manualDiscountFor,
@@ -255,6 +256,59 @@ test('estimateTokenCost combines all rates', () => {
   const cost = estimateTokenCost(rates, { input: 1_000_000, output: 100_000, cacheRead: 2_000_000, cacheWrite: 0 });
   assert.ok(Math.abs(cost - (3.0 + 1.5 + 0.6)) < 1e-9);
 });
+console.log('discountImpact (what the promotion did to the bill)');
+function impactEvent(i, model, list, billed, day = '2026-08-13') {
+  return {
+    timestampMs: new Date(`${day}T1${i % 9}:00:00`).getTime(),
+    modelRaw: model,
+    listTokenCost: list,
+    billedTokenCost: billed,
+    cost: billed,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  };
+}
+test('it measures the money the promotion actually took off', () => {
+  const events = [
+    impactEvent(0, 'cursor-grok-4.6-high', 0.86, 0.39),
+    impactEvent(1, 'cursor-grok-4.6-high', 0.52, 0.24),
+  ];
+  const detected = detectDiscounts(events, pricing);
+  const impact = discountImpact(events, detected);
+  assert.equal(impact.requests, 2);
+  assert.ok(Math.abs(impact.savedDollars - 0.75) < 1e-9, '(0.86-0.39) + (0.52-0.24)');
+  assert.equal(impact.models[0].label, 'cursor-grok-4.6-high');
+  assert.deepEqual(impact.days, ['2026-08-13']);
+});
+test('it counts what ran on other models the same days', () => {
+  const events = [
+    impactEvent(0, 'cursor-grok-4.6-high', 0.86, 0.39),
+    impactEvent(1, 'cursor-grok-4.6-high', 0.52, 0.24),
+    impactEvent(2, 'claude-sonnet-5', 0.5, 0.5),
+    // A different day entirely — not an alternative to that day's promotion.
+    impactEvent(3, 'claude-sonnet-5', 0.9, 0.9, '2026-08-20'),
+  ];
+  const impact = discountImpact(events, detectDiscounts(events, pricing));
+  assert.equal(impact.otherRequests, 1, 'only the same-day one');
+  assert.ok(Math.abs(impact.otherDollars - 0.5) < 1e-9);
+});
+test('no promotion means nothing to report, not a zero-dollar one', () => {
+  const events = [0, 1, 2].map((i) => impactEvent(i, 'cursor-grok-4.6-high', 0.5, 0.5));
+  const impact = discountImpact(events, detectDiscounts(events, pricing));
+  assert.deepEqual(impact.models, []);
+  assert.equal(impact.savedDollars, 0);
+  assert.equal(impact.otherDollars, 0, 'no discounted day, so nothing is an alternative to it');
+});
+test('a discounted request missing either figure still counts, without inventing dollars', () => {
+  const events = [
+    impactEvent(0, 'cursor-grok-4.6-high', 0.86, 0.39),
+    { ...impactEvent(1, 'cursor-grok-4.6-high', 0.52, 0.24), listTokenCost: null, billedTokenCost: null },
+  ];
+  // The second is measured off the first's model-day, so it is discounted too.
+  const impact = discountImpact(events, detectDiscounts([events[0]], pricing));
+  assert.equal(impact.requests, 2);
+  assert.ok(Math.abs(impact.savedDollars - 0.47) < 1e-9, 'only the request that carried both figures');
+});
+
 console.log('displayModel and Cursor Router routing');
 test('a routed row names the model and the mode it was billed under', () => {
   // Balance and Intelligence bill at the routed model's rate, so which model

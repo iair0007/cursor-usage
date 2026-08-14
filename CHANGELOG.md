@@ -79,6 +79,16 @@ All notable user-facing changes. Earlier releases predate this file; see the
   can land a few points either side of that once its own terms and cent
   rounding are through with it. A figure still inferred from the rate table is
   still snapped, since there the round number is the whole point.
+- **Promotions now surface as tips, on Overview and in Analyze.** A promotion
+  is only useful while it is running, and Cursor announces them nowhere this
+  dashboard can read — so once one is measured it is worth saying so. Two
+  findings: what the discounts actually took off the bill, measured the same way
+  they were found, and — when a meaningful share of the period ran on other
+  models on the same days — that a discounted model was available while it did.
+  The second carries a deadline, so it takes the Overview card ahead of an
+  equally urgent finding about a spending pattern, which will still be there
+  next week. Both stay quiet below a floor in dollars and in share, so a small
+  range and an account already using the discounted model say nothing.
 - **Auto now shows which model the router picked.** Balance and Intelligence
   bill at the routed model's own rate, and Cursor names that model in the row
   when the team leaves the underlying model on display — so a request that cost

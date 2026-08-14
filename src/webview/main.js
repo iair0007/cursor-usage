@@ -12,6 +12,7 @@ import {
   estimateTokenCost,
   detectDiscounts,
   describeDiscountRun,
+  discountImpact,
   discountPeriods,
   resolveDiscount,
   detectedDiscountDays,
@@ -143,6 +144,12 @@ const ANALYZE_THRESHOLD_DEFAULTS = {
   coldStartCount: 5,
   heavyOutputTokens: 2000,
   heavyOutputCount: 3,
+  // A promotion is only worth pointing at if there is enough spend on other
+  // models to be worth moving — in dollars and as a share of the period, so
+  // the tip stays quiet on a small range and on an account already using it.
+  promoAlternativeDollars: 1,
+  promoAlternativeSharePct: 20,
+  promoAlternativeTopSharePct: 50,
 };
 
 const state = {
@@ -2825,7 +2832,11 @@ function refresh() {
 /** Highest-severity finding worth surfacing on the simple Overview screen. */
 function pickTopFinding(findings) {
   if (!findings?.length) return null;
-  return findings.find((f) => f.severity === 'high')
+  // A promotion runs for days and then stops; a spending pattern will still be
+  // there next week. Where both are urgent, the one with a deadline wins the
+  // single slot this card has.
+  return findings.find((f) => f.severity === 'high' && f.timeSensitive)
+    || findings.find((f) => f.severity === 'high')
     || findings.find((f) => f.severity === 'medium')
     || findings[0];
 }
@@ -3362,6 +3373,43 @@ function buildAnalyzeFindings(events, summary, ctx, thresholds = state.analyzeTh
         ? 'Review expensive Auto requests — pin a cheaper model for simple edits.'
         : `Try Auto or a lighter model for routine tasks instead of ${top.model}.`,
     });
+  }
+
+  // Promotions run for a few days at a time and are announced nowhere this
+  // dashboard can read, so the one place they can be pointed out is here,
+  // while they are still on.
+  const promo = discountImpact(events, state.detectedDiscounts);
+  if (promo.models.length) {
+    const lead = promo.models[0];
+    const span = promo.days.length === 1
+      ? fmt.shortDate(promo.days[0])
+      : `${fmt.shortDate(promo.days[0])}–${fmt.shortDate(promo.days[promo.days.length - 1])}`;
+    if (promo.savedDollars > 0) {
+      findings.push({
+        severity: 'positive',
+        title: `Discounts saved ${fmt.money(promo.savedDollars)}`,
+        body: `${fmt.num(promo.requests)} request${promo.requests === 1 ? '' : 's'} ran while `
+          + `${lead.label} was below its published price (${span}).`,
+        action: 'Cursor discounts a model for a few days at a time — worth leaning on it while it lasts.',
+      });
+    }
+    // Only worth raising if the alternative spend is big enough to be worth
+    // moving, both in absolute terms and against the period.
+    const share = summary.totalCost > 0 ? (promo.otherDollars / summary.totalCost) * 100 : 0;
+    if (promo.otherDollars >= thresholds.promoAlternativeDollars
+      && share >= thresholds.promoAlternativeSharePct) {
+      findings.push({
+        // A promotion runs for days, not weeks, so a large share of spend
+        // sitting on something else is worth the top slot on Overview while
+        // there is still time to act on it.
+        severity: share >= thresholds.promoAlternativeTopSharePct ? 'high' : 'medium',
+        timeSensitive: true,
+        title: `${lead.label} was discounted on those days`,
+        body: `${fmt.money(promo.otherDollars)} of ${costModeNoun()} (${fmt.pct(share)}) ran on other models `
+          + `over ${span}, while ${lead.label} was going below its published price.`,
+        action: `Price a real request on ${lead.label} in Simulator → Compare before moving routine work to it.`,
+      });
+    }
   }
 
   if (summary.totalSavings > 0 && summary.noCache > 0) {

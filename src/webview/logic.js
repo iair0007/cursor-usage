@@ -837,6 +837,73 @@ export function resolveDiscount(modelRaw, day, { detected, manual } = {}) {
   return null;
 }
 
+/**
+ * What the promotions in this range did to the bill, and what ran alongside
+ * them.
+ *
+ * `saved` counts only requests whose model and day carry a detected discount,
+ * and measures each one the same way the discount itself was found: Cursor's
+ * list value for those tokens against what it charged. So it is the money the
+ * promotion actually took off, not an estimate of it.
+ *
+ * `other` is what was spent on everything else on those same days — the part
+ * worth a second look, since a promotion is only useful if you were reaching
+ * for the model while it was running.
+ */
+export function discountImpact(events = [], detected = null) {
+  const ctx = { detected, manual: [] };
+  const byModel = new Map();
+  const days = new Set();
+  let savedDollars = 0;
+  let requests = 0;
+
+  for (const e of events || []) {
+    const day = dayKey(e?.timestampMs);
+    if (!day) continue;
+    if (resolveDiscount(e.modelRaw, day, ctx)?.source !== 'detected') continue;
+    const hit = resolveDiscount(e.modelRaw, day, ctx);
+    days.add(day);
+    requests++;
+    // Absent either figure the request still counts as discounted — it is on a
+    // model-day the promotion was measured on — but contributes no dollars,
+    // rather than a guess at them.
+    const saved = e.listTokenCost != null && e.billedTokenCost != null
+      ? Math.max(0, e.listTokenCost - e.billedTokenCost)
+      : 0;
+    savedDollars += saved;
+
+    const key = normModel(e.modelRaw);
+    const row = byModel.get(key)
+      || { model: key, label: displayModel(e.modelRaw), savedDollars: 0, requests: 0, pct: 0, days: new Set() };
+    row.savedDollars += saved;
+    row.requests++;
+    row.pct = Math.max(row.pct, hit.pct);
+    row.days.add(day);
+    byModel.set(key, row);
+  }
+
+  let otherDollars = 0;
+  let otherRequests = 0;
+  for (const e of events || []) {
+    const day = dayKey(e?.timestampMs);
+    if (!day || !days.has(day)) continue;
+    if (resolveDiscount(e.modelRaw, day, ctx)?.source === 'detected') continue;
+    otherDollars += e.cost ?? 0;
+    otherRequests++;
+  }
+
+  return {
+    savedDollars,
+    requests,
+    days: [...days].sort(),
+    otherDollars,
+    otherRequests,
+    models: [...byModel.values()]
+      .map((m) => ({ ...m, days: [...m.days].sort() }))
+      .sort((a, b) => b.savedDollars - a.savedDollars || b.requests - a.requests),
+  };
+}
+
 /** Any day in the loaded range on which this model was detected as discounted. */
 export function detectedDiscountDays(detected, modelRaw) {
   const n = normModel(modelRaw);

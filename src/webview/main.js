@@ -470,18 +470,26 @@ function renderPlanCycle(quota, hardLimit) {
  * Returns true when it kicked off a reload, so the caller stops rendering the
  * range being replaced.
  */
-function applyPlanChangeResult(change, monthKey) {
-  state.planCheckMonthKey = monthKey;
+function applyPlanChangeResult(change, monthKey, canDisprove) {
+  // Only when a month check actually ran and returned; a dropped request must
+  // leave this unset so the next load() retries.
+  if (monthKey) state.planCheckMonthKey = monthKey;
   if (change) {
     state.planChangeDay = change.dayKey;
     // planChangeDay is auto-injected by savePrefs() from state, which was
     // just updated above.
     savePrefs({});
-  } else if (state.planChangeDay) {
-    // This month's own events no longer show the evidence: the account
-    // changed plans in an earlier month (stale from a previous session) or
-    // never really changed at all. Either way, keeping the chip around would
-    // point at a range this account can no longer show any evidence for.
+  } else if (state.planChangeDay && canDisprove) {
+    // A boundary stored by an earlier session that a look straddling it no
+    // longer finds. Forget it rather than keeping a "Current plan" range built
+    // on a date this account can no longer show any evidence for.
+    //
+    // Only when the examined events could have held the proof. Absence of
+    // evidence in a window that sits wholly on one side of the boundary — this
+    // calendar month, for a change that happened in an earlier one — says
+    // nothing about it, and erasing on that basis took the chip away from
+    // exactly the accounts it exists for, along with the straddle warning that
+    // reads the same field.
     state.planChangeDay = null;
     savePrefs({});
   }
@@ -1549,6 +1557,7 @@ async function loadSessionTitles(ids) {
   wanted.forEach((id) => titlesPending.add(id));
 
   let found = {};
+  let failed = false;
   try {
     found = (await rpc('sessionTitles', { ids: wanted })).titles || {};
   } catch {
@@ -1556,6 +1565,7 @@ async function loadSessionTitles(ids) {
     // chats elsewhere: all of them just mean the ids stay on screen, which is
     // what they already say. Not worth an alert, and the extension host has
     // already logged the reason.
+    failed = true;
   }
 
   // Ids that came back unnamed are recorded as null rather than left out, so
@@ -1563,6 +1573,11 @@ async function loadSessionTitles(ids) {
   let learned = false;
   for (const id of wanted) {
     titlesPending.delete(id);
+    // A call that failed taught us nothing, and null here is indistinguishable
+    // from "asked, and this conversation has no name" — which the has() guard
+    // above treats as settled, so one timed-out lookup would leave raw ids on
+    // screen for the life of the webview. Leave them unknown and ask again.
+    if (failed) continue;
     const title = found[id] || null;
     if (!titles.has(id)) {
       titles.set(id, title);
@@ -1657,6 +1672,12 @@ function renderSessions() {
     pagerEl.innerHTML = '';
     noteEl.classList.add('hidden');
     search?.classList.add('hidden');
+    // The tray reads the selection off state, not off this argument, so it has
+    // to be dropped here too. Left standing, a period with nothing to select
+    // still showed its chips over an empty list, with Compare enabled and
+    // leading to a dialog of blank columns.
+    state.sessions.selected = [];
+    state.sessions.baseId = null;
     renderSessionTray([]);
   };
 
@@ -1726,8 +1747,17 @@ function renderSessions() {
       + 'in this period carried no conversation id and are not listed above, so the session totals '
       + 'add up to less than the period total.');
   }
-  notes.push('Sessions are grouped by the conversation id on each request. Only the dates in the toolbar '
-    + 'above scope this list.');
+  // Sessions aggregate state.filtered, which applyFilters() has already
+  // narrowed by the model dropdown — so the model filter scopes this list too,
+  // and saying otherwise made every figure here look wrong to anyone who had
+  // one set: a session's cost, span and share of the period are all computed
+  // over that model's requests alone.
+  const model = $('modelFilter').value;
+  notes.push('Sessions are grouped by the conversation id on each request.');
+  notes.push(model
+    ? `Filtered to ${displayModel(model)}: a session that used other models too is counted here for its `
+      + `${displayModel(model)} requests only. Choose "All models" for full session totals.`
+    : 'The dates in the toolbar above scope this list.');
   noteEl.textContent = notes.join(' ');
   noteEl.classList.remove('hidden');
 }
@@ -1735,6 +1765,16 @@ function renderSessions() {
 function renderSessionList(root, pagerRoot, sessions, periodCost) {
   const query = state.sessions.query;
   const titleOf = (id) => state.sessions.titles.get(id);
+
+  // A search matches on names, so the names have to be known before the filter
+  // runs — not just the ones on the current page. Paging in the titles as the
+  // user scrolled meant a session two pages down was searched with the one
+  // field being searched still missing, and reported "no match" for a name
+  // sitting in the list. The "no matches" branch below returns before the
+  // page's own lookup, so that state could never recover on its own either.
+  // Without a query the page's rows are still all that's needed.
+  if (query) void loadSessionTitles(sessions.map((t) => t.sessionId));
+
   const matches = filterSessions(sessions, query, titleOf);
 
   if (!matches.length) {
@@ -2065,7 +2105,7 @@ function renderSessionCompare() {
         <tbody>${rows}</tbody>
       </table>
       ${emptyNote}
-      ${renderSessionModelTable(ctxs, baseIndex, pair)}
+      ${renderSessionModelTable(ctxs, pair)}
     </div>`;
 }
 
@@ -2076,7 +2116,7 @@ function renderSessionCompare() {
  * get a straight matrix, since a column of deltas against a base repeated four
  * times is a worse read than the costs themselves with the extremes marked.
  */
-function renderSessionModelTable(ctxs, baseIndex, pair) {
+function renderSessionModelTable(ctxs, pair) {
   if (pair) {
     // Same column order and the same direction as the table above it.
     return renderModelDeltaTable(ctxs[0].events, ctxs[1].events, {
@@ -2936,19 +2976,42 @@ async function load() {
     populateModelFilter(state.all);
     populateSimulatorModels();
 
+    // Two windows, because they answer different questions. The dedicated month
+    // fetch keeps the chip independent of the range on screen; the loaded range
+    // is the only one that can still see a change from an earlier month, which
+    // the month window by definition cannot. Either may establish the boundary.
+    //
     // Skipped (leaving planCheckMonthKey unset) when the dedicated fetch
     // failed — non-fatal, same as pricing/budget above, and it means next
     // load() simply tries again instead of the chip being wrongly hidden for
     // the rest of the month on one dropped request.
-    if (needsMonthCheck && (monthIsSelectedRange || monthUsage)) {
+    const monthChecked = needsMonthCheck && (monthIsSelectedRange || monthUsage);
+    let monthChange = null;
+    if (monthChecked) {
       const monthEvents = monthIsSelectedRange
         ? state.all
         : (monthUsage.events || []).map((raw) => normalize(raw, state.pricing, normOpts));
-      // The request picker reads state.filtered, which only refresh() updates
-      // — so the possible reload this can trigger has to come after, or it
-      // lists the previous range's requests.
-      const switchedToPlanRange = applyPlanChangeResult(detectPlanChange(monthEvents), monthKey);
-      if (switchedToPlanRange) return; // load() re-entered with the narrower range
+      monthChange = detectPlanChange(monthEvents);
+    }
+
+    // Which of those windows, if any, could have disproved a stored boundary:
+    // one that straddles it. A range starting at or after the boundary holds no
+    // pre-boundary rows, so finding none there is not evidence of anything —
+    // "Current plan" is precisely such a range.
+    const stored = state.planChangeDay;
+    const straddles = (from, to) => Boolean(stored) && dayKey(from) < stored && stored <= dayKey(to);
+    const canDisprove = straddles(start, end)
+      || (monthChecked && straddles(
+        monthWindow ? toMs(monthWindow.start) : start,
+        monthWindow ? toMs(monthWindow.end, true) : end,
+      ));
+
+    // The request picker reads state.filtered, which only refresh() updates —
+    // so the possible reload this can trigger has to come after, or it lists
+    // the previous range's requests.
+    const change = monthChange || detectPlanChange(state.all);
+    if (applyPlanChangeResult(change, monthChecked ? monthKey : null, canDisprove)) {
+      return; // load() re-entered with the narrower range
     }
 
     const render = () => {

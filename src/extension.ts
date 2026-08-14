@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { setApiLogger } from './api';
 import { storeAdminApiKey, storeManualSessionToken, clearStoredCredentials } from './auth';
+import { clearConversationTitleCache } from './conversations';
 import { DashboardPanel } from './panel';
 import { UsageService } from './service';
 import { UsageStatusBar } from './statusBar';
@@ -31,6 +32,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('cursorUsage.refresh', () => {
       service.invalidateCaches();
+      // Chat names change as you work, and the index behind them is cached for
+      // five minutes to keep a multi-GB file off the scroll path. An explicit
+      // Refresh is the one moment the wait isn't worth it.
+      clearConversationTitleCache();
       DashboardPanel.refresh();
       void statusBar.refresh();
     }),

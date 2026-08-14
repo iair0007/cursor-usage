@@ -20,12 +20,17 @@ All notable user-facing changes. Earlier releases predate this file; see the
   being recorded as "no promotion". Models with a published cache-write rate
   are unaffected.
 - **Fixed the "Current plan" chip only appearing when the selected date range
-  happened to contain the evidence.** It's checked against this calendar
-  month's own events now, independent of whatever range is on screen — an
-  account that switched plans on the 3rd stayed invisible on "Today" or
-  "7 days" for the rest of the month even though those are exactly when
-  someone would reach for it. Checked once per month (cached for the
-  session), not on every load.
+  happened to contain the evidence.** An account that switched plans on the 3rd
+  stayed invisible on "Today" or "7 days" for the rest of the month, even though
+  those are exactly when someone would reach for it. This calendar month's own
+  events are now checked as well as the selected range — once per month, cached
+  for the session, not on every load. The two windows answer different
+  questions and both still count: the month keeps the chip independent of what
+  is on screen, while the loaded range is the only thing that can still see a
+  change from an earlier month. A boundary already known is only forgotten by a
+  range that straddles it and finds nothing, since a range sitting wholly on one
+  side never held the proof to begin with — which also keeps the warning about
+  a range spanning two pricing systems on screen where it belongs.
 - **Fixed the session comparison's two tables drifting out of alignment.**
   The model breakdown reused the period comparison's table markup, which
   auto-sizes its own columns; put a few rows below a table with different
@@ -42,6 +47,12 @@ All notable user-facing changes. Earlier releases predate this file; see the
   stored the fallback that a failed request resolved to, so one dropped
   connection meant up to ten minutes with no plan name or spend cap even though
   the next request would have succeeded. Only successes are cached now.
+- **Refresh now picks up renamed chats.** Cursor names a conversation once it
+  has a subject, and the index those names come from is cached for five minutes
+  to keep a multi-gigabyte file off the scroll path. Refresh drops it, rather
+  than showing the old name until the cache expires on its own. A name lookup
+  that fails outright is also no longer remembered as "this conversation has no
+  name", which left raw ids on screen until the dashboard was reopened.
 - **Fixed the Overview trend badge comparing two unrelated periods.** Once the
   comparison's left column is pinned, its baseline belongs to that pinned
   window, not to the range the Overview card is showing. The badge is now
@@ -53,7 +64,10 @@ All notable user-facing changes. Earlier releases predate this file; see the
   request, tokens in/out/cached, cache hit rate and savings, cold starts,
   errored requests, and a model-by-model breakdown. Pick the dates in the
   toolbar first and the list follows — there is no second date control to keep
-  in sync.
+  in sync. The model filter scopes it too, and the note under the list says so
+  when one is set, since a session that reached for several models is then
+  counted for one model's requests alone. Search matches names as well as ids
+  and models, across the whole period rather than the page you are looking at.
 - **The session comparison moved into its own dialog, opened from a selection
   tray.** Ticking rows used to draw a table at the top of the panel, so picking
   two sessions from the bottom of a long list looked like nothing had happened.

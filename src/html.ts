@@ -350,7 +350,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             <div class="compare-controls">
               <label class="sessions-search">
                 <span class="sr-only">Filter sessions</span>
-                <input type="search" id="sessionSearch" placeholder="Filter by id or model" />
+                <input type="search" id="sessionSearch" placeholder="Filter by name, id or model" />
               </label>
             </div>
           </div>

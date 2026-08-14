@@ -118,14 +118,20 @@ export async function readConversationTitles(
   // Whatever the index didn't name, ask for row by row — but only up to the
   // cap, and only when there's a database to ask.
   if (missing.length) {
+    let unresolved = missing;
     for (const dbPath of candidateStateDbPaths(context)) {
-      const batch = missing.slice(0, MAX_ROW_LOOKUPS);
+      // Recomputed per database rather than fixed up front: whatever the last
+      // one named is not worth asking the next about, and re-sending it spent
+      // the row-lookup budget on ids already in hand — so with two candidate
+      // paths a long list could come back short for no reason.
+      unresolved = unresolved.filter((id) => !found.has(id));
+      if (!unresolved.length) break;
       try {
+        const batch = unresolved.slice(0, MAX_ROW_LOOKUPS);
         for (const [id, title] of await readComposerNames(dbPath, batch)) found.set(id, title);
       } catch (e: any) {
         log(`Conversation name lookup failed: ${e?.message || e}`);
       }
-      if (found.size === wanted.length) break;
     }
   }
 

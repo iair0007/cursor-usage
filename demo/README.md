@@ -40,12 +40,43 @@ capturing before the scripted timeline does.
 path by default (this repo's sandbox has Playwright's bundled Chromium at
 `/opt/pw-browsers/...` and a full-featured system `ffmpeg`; espeak-ng needs
 the `espeak-ng` and `mbrola-us1` packages). Override with
-`DEMO_CHROMIUM=/path/to/chrome`, `DEMO_FFMPEG=/path/to/ffmpeg`, or
-`DEMO_ESPEAK=/path/to/espeak-ng` if those differ in your environment.
-`generate-voiceover.mjs` also takes `--voice` (any `espeak-ng --voices=mbrola`
-name, default `mb-us1`) and `--rate` (words per minute, default 165).
+`DEMO_CHROMIUM=/path/to/chrome`, `DEMO_FFMPEG=/path/to/ffmpeg`,
+`DEMO_ESPEAK=/path/to/espeak-ng`, or `DEMO_SAY=/path/to/say` if those differ
+in your environment.
 Playwright itself needs to be resolvable — either `npm install playwright`
 locally, or point `NODE_PATH` at wherever it's installed globally.
+
+### Voice engine
+
+`generate-voiceover.mjs --engine <espeak|say>` picks the synthesizer:
+
+- **`espeak`** (espeak-ng + an mbrola diphone voice) — the default anywhere
+  that isn't macOS. Fully offline, no model download, which is why it's what
+  this repo's sandboxed environment uses (its network policy blocks Hugging
+  Face and GitHub release downloads, where most real neural TTS voices live).
+  Sounds synthetic — a GPS voice, not a narrator. `--voice` takes any name
+  from `espeak-ng --voices=mbrola` (default `mb-us1`); `--rate` is words per
+  minute (default 165).
+- **`say`** — macOS's built-in TTS (the same engine behind Siri/VoiceOver).
+  Default when this runs on a Mac. Sounds like an actual person, not
+  synthetic. `--voice` takes any installed voice name (`Samantha` ships on
+  every Mac with no download; `say -v '?'` lists what you have; for a
+  noticeably better result, download a Premium/Enhanced voice — System
+  Settings → Accessibility → Spoken Content → System Voice → Manage Voices —
+  and pass it quoted, e.g. `--voice "Ava (Premium)"`). Only runs on macOS
+  itself, so run this pipeline on your own Mac (with Claude Code or a plain
+  terminal — no MCP server needed, `say` is just a CLI) rather than in this
+  sandbox to use it:
+
+  ```bash
+  git fetch origin claude/extension-demo-videos-q57z32
+  git checkout claude/extension-demo-videos-q57z32
+  npm install && npm run compile
+  node demo/generate-fixtures.mjs
+  node demo/generate-voiceover.mjs --engine say --voice "Ava (Premium)"
+  node demo/record.mjs   # needs `npx playwright install chromium` once, first time
+  ./demo/render.sh        # needs ffmpeg — `brew install ffmpeg`
+  ```
 
 ## What it shows
 

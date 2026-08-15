@@ -10,6 +10,17 @@
 
 Costs, cache savings, model breakdowns, per-session comparisons, budget burn-rate, rule-based insights, and a cost simulator — with zero setup. No proxy server, no login: it reuses the session Cursor created when you signed in.
 
+## 60-second tour
+
+<!-- Served from GitHub Pages, not raw.githubusercontent.com: raw returns .mp4
+     as application/octet-stream with X-Content-Type-Options: nosniff, so
+     browsers refuse to play it in a <video>. Pages sends a real video/mp4. -->
+<video controls preload="none" playsinline poster="https://iair0007.github.io/cursor-usage/demo-poster.jpg" width="900">
+  <source src="https://iair0007.github.io/cursor-usage/demo-short.mp4" type="video/mp4">
+</video>
+
+*Video not playing? Watch the [60-second tour](https://iair0007.github.io/cursor-usage/demo-short.mp4) or the [full 2½-minute walkthrough](https://iair0007.github.io/cursor-usage/) instead.*
+
 ![Overview tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-overview.png)
 
 ## Install

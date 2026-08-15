@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cursor Usage Dashboard</title>
 <meta name="description" content="Track your remaining Cursor requests and spend, right inside Cursor. Status bar quota gauge, monthly budget burn-rate, cost dashboard, cache savings, model breakdown, session comparisons, cost simulator.">
-<link rel="icon" href="../resources/icon.png">
+<link rel="icon" href="icon.png">
 <style>
   :root {
     --bg: #0f1720;
@@ -94,6 +94,18 @@
     overflow: hidden;
     box-shadow: 0 20px 60px -20px rgba(0,0,0,0.6);
   }
+  /* The <video> carries width/height so the browser reserves the right box
+     before the poster loads; these keep it fluid on narrow screens. */
+  .hero-shot video {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .hero-note {
+    margin: 14px 0 0;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
 
   section {
     padding: 56px 0;
@@ -179,7 +191,10 @@
 
 <div class="wrap">
   <header class="hero">
-    <img class="icon" src="../resources/icon.png" alt="Cursor Usage Dashboard icon">
+    <!-- Pages serves docs/ as the site root, so resources/ (a sibling of docs/,
+         outside it) is unreachable from here — this is a copy of
+         resources/icon.png. The old ../resources path 404'd on the live site. -->
+    <img class="icon" src="icon.png" alt="Cursor Usage Dashboard icon">
     <h1>Cursor Usage Dashboard</h1>
     <p class="tagline">See exactly where your Cursor requests and tokens go — right inside Cursor. Request quota, monthly budget burn-rate, cache savings, per-session comparisons, and a cost simulator. No proxy, no login.</p>
 
@@ -195,8 +210,19 @@
     </div>
 
     <div class="hero-shot">
-      <img src="screenshot-overview.png" alt="Cursor Usage Dashboard overview tab">
+      <!-- Served from GitHub Pages rather than raw.githubusercontent.com: raw
+           returns .mp4 as application/octet-stream with X-Content-Type-Options:
+           nosniff, which browsers refuse to play in a <video>. Pages sends the
+           real video/mp4 type. preload="none" so the 7.8MB file is only
+           fetched if someone actually presses play. -->
+      <video controls preload="none" playsinline poster="demo-poster.jpg"
+             width="1600" height="900" aria-label="Narrated walkthrough of the Cursor Usage Dashboard">
+        <source src="demo.mp4" type="video/mp4">
+        <p>Your browser can't play this video —
+          <a href="demo.mp4">download the walkthrough</a> instead.</p>
+      </video>
     </div>
+    <p class="hero-note">Narrated walkthrough · 2 min 24 s · <a href="demo-short.mp4">60-second version</a></p>
   </header>
 
   <section id="install">

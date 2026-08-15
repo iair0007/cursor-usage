@@ -6,3 +6,5 @@ media/sql-wasm.wasm
 *.vsix
 .DS_Store
 test/.build/
+demo/data.js
+demo/out/

@@ -29,6 +29,21 @@ discount, period/session comparison, the Simulator, and how to install it.
 
 ## Pipeline
 
+`playwright` (drives the harness) and `kokoro-js` (synthesizes the narration)
+are **deliberately not devDependencies**, and are installed on demand instead.
+Between them they pull ~390MB — mostly `onnxruntime-node` and
+`@huggingface/transformers` — and `npm ci` installs devDependencies, so every
+CI run and every contributor doing nothing but `npm run compile` would have
+paid for a video pipeline they never invoke. Both scripts print this command
+if the package is missing, so there is nothing to remember:
+
+```bash
+npm install --no-save playwright kokoro-js
+npx playwright install chromium   # once, for the browser itself
+```
+
+Then:
+
 ```bash
 npm install
 npm run compile              # builds media/main.js + media/styles.css
@@ -72,8 +87,9 @@ the `espeak-ng` and `mbrola-us1` packages). Override with
 `DEMO_CHROMIUM=/path/to/chrome`, `DEMO_FFMPEG=/path/to/ffmpeg`,
 `DEMO_ESPEAK=/path/to/espeak-ng`, or `DEMO_SAY=/path/to/say` if those differ
 in your environment.
-Playwright itself needs to be resolvable — either `npm install playwright`
-locally, or point `NODE_PATH` at wherever it's installed globally.
+Playwright itself needs to be resolvable — either `npm install --no-save
+playwright` locally (see above), or point `NODE_PATH` at wherever it's
+installed globally.
 
 ### Voice engine
 
@@ -108,12 +124,12 @@ Run the full pipeline on your own Mac (with Claude Code or a plain terminal —
 no MCP server needed):
 
   ```bash
-  git fetch origin claude/extension-demo-videos-q57z32
-  git checkout claude/extension-demo-videos-q57z32
   npm install && npm run compile
+  npm install --no-save playwright kokoro-js   # not devDependencies — see Pipeline
+  npx playwright install chromium              # once, first time
   node demo/generate-fixtures.mjs
   node demo/generate-voiceover.mjs   # kokoro, af_heart — add --voice/--speed to tweak
-  node demo/record.mjs   # needs `npx playwright install chromium` once, first time
+  node demo/record.mjs
   ./demo/render.sh        # needs ffmpeg — `brew install ffmpeg`
   ```
 

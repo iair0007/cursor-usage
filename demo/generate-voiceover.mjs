@@ -93,7 +93,16 @@ function synthSay(text, outPath) {
 let kokoroTTS = null;
 async function synthKokoro(text, outPath) {
   if (!kokoroTTS) {
-    const { KokoroTTS } = await import('kokoro-js');
+    // Imported on demand, and deliberately not a devDependency: it pulls
+    // onnxruntime-node and @huggingface/transformers, ~390MB that every
+    // `npm ci` — including CI's, which only lints and compiles — would
+    // otherwise have to download. Install it when you actually cut a video.
+    const { KokoroTTS } = await import('kokoro-js').catch(() => {
+      console.error('kokoro-js is not installed. It is not a devDependency because it pulls ~390MB of ML runtime.\n'
+        + '  npm install --no-save kokoro-js\n'
+        + 'Or pick another engine: --engine say (macOS) / --engine espeak.');
+      process.exit(1);
+    });
     console.log(`Loading Kokoro model (${KOKORO_MODEL})... first run downloads ~86MB, cached after.`);
     kokoroTTS = await KokoroTTS.from_pretrained(KOKORO_MODEL, { dtype: 'q8', device: 'cpu' });
   }

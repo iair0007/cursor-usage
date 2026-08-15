@@ -23,7 +23,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
 import { beatsForCut, outDirForCut, TAIL_PAD_MS, captionChunks } from './script.mjs';
 import { getDurationMs, concatWavs, padToDuration, silenceFile } from './audio-util.mjs';
 
@@ -60,6 +59,16 @@ function nominalWaitMs(beat) {
 }
 
 async function main() {
+  // Imported here rather than at the top of the file so a missing Playwright
+  // gives an instruction instead of a module-resolution stack trace. It is not
+  // a devDependency on purpose: cutting a video is an occasional local task,
+  // and `npm ci` (CI included) should not carry it.
+  const { chromium } = await import('playwright').catch(() => {
+    console.error('playwright is not installed — it is not a devDependency, since only video cutting needs it.\n'
+      + '  npm install --no-save playwright && npx playwright install chromium');
+    process.exit(1);
+  });
+
   console.log(`Cut: ${CUT} (${BEATS.length} beats) -> demo/${outDirForCut(CUT)}/`);
   console.log(voiceManifest
     ? `Using demo/${outDirForCut(CUT)}/voice/manifest.json for nominal beat timing (narrated cut).`

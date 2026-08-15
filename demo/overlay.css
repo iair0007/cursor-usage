@@ -1,0 +1,83 @@
+/* Demo-only chrome layered over the real dashboard styles.css, used solely
+   to record the 30s walkthrough video. Not shipped with the extension. */
+
+.demo-slide {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(160deg, #0b1220 0%, #131c2e 55%, #0b1220 100%);
+  color: #f4f6fb;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  opacity: 1;
+  transition: opacity 420ms ease;
+}
+
+.demo-slide-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.demo-slide-inner {
+  max-width: 720px;
+  text-align: center;
+  padding: 0 32px;
+}
+
+.demo-logo {
+  font-size: 56px;
+  line-height: 1;
+  margin-bottom: 18px;
+  color: #6ea8fe;
+}
+
+.demo-slide h1 {
+  font-size: 40px;
+  margin: 0 0 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.demo-slide p {
+  font-size: 19px;
+  margin: 0;
+  color: #c7d0e3;
+  line-height: 1.5;
+}
+
+.demo-outro-url {
+  margin-top: 14px !important;
+  font-size: 16px !important;
+  color: #6ea8fe !important;
+  font-weight: 600;
+}
+
+.demo-slide-inner-img img {
+  max-width: min(760px, 90vw);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  margin-bottom: 22px;
+}
+
+.demo-caption {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 1001;
+  background: rgba(15, 20, 32, 0.92);
+  color: #fff;
+  padding: 12px 26px;
+  border-radius: 999px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 1;
+  transition: opacity 300ms ease;
+  white-space: nowrap;
+}

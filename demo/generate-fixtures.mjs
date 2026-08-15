@@ -154,12 +154,38 @@ sessions.push({
 });
 
 // ---------------------------------------------------------------------------
-// Discount window: Grok 4.6 runs at an actual 40% discount for a few days,
-// consistently, so detectDiscounts() picks it up as a measured promotion.
+// Discount window: Grok 4.6 runs at an actual 40% discount, consistently,
+// for one day — so detectDiscounts() picks it up as a measured promotion.
+//
+// Positioned three days back because that is when Cursor's real Grok 4.6
+// promotion ran relative to when this demo was cut: a viewer who remembers
+// the actual sale should see the badge on the day it actually happened, not
+// on some arbitrary other day, or the whole feature reads as invented.
+//
+// Aligned to local calendar-day boundaries (matching dayKey() in
+// src/webview/logic.js, which buckets by local day) rather than a raw
+// now-relative offset — detectDiscounts() requires ~60% of a day's samples
+// to agree within tolerance, and a window that starts or ends mid-day mixes
+// discounted and full-price requests into the same day-bucket, which reads
+// as "scattered" and gets rejected as noise instead of a real promotion.
 // ---------------------------------------------------------------------------
 
-const discountStart = now - 6 * DAY_MS;
-const discountEnd = now - 3 * DAY_MS;
+const DISCOUNT_DAYS_AGO = 3;
+const startOfLocalDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+const discountStart = startOfLocalDay(new Date(now - DISCOUNT_DAYS_AGO * DAY_MS));
+const discountEnd = discountStart + DAY_MS - 1;
+
+// Detection needs at least three Grok requests inside that day before it will
+// call a promotion, and the random session mix does not reliably produce them
+// on any one given day. This session guarantees them — and, being all Grok on
+// the discounted day, it also makes the day's samples agree with each other.
+sessions.push({
+  id: 'conv_grokday',
+  startMs: discountStart + 10 * 60 * 60 * 1000,
+  length: 9,
+  title: 'Port streaming parser to Grok 4.6',
+  forcedModel: 'cursor-grok-4.6-high',
+});
 
 // ---------------------------------------------------------------------------
 // Build events
@@ -170,7 +196,7 @@ const events = [];
 
 for (const session of sessions) {
   let cacheReadTokens = 0;
-  const forcedModel = session.heavy ? 'claude-4-5-sonnet' : null;
+  const forcedModel = session.forcedModel || (session.heavy ? 'claude-4-5-sonnet' : null);
   for (let i = 0; i < session.length; i++) {
     const ts = session.startMs + i * randInt(45, 240) * 1000;
     if (ts > now) break;
@@ -188,9 +214,6 @@ for (const session of sessions) {
     const tokens = { input: inputTokens, output: outputTokens, cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens };
     const totalCents = estimateCents(model, tokens);
 
-    const discounted = model === 'cursor-grok-4.6-high' && ts >= discountStart && ts <= discountEnd;
-    const chargedCents = discounted ? Math.round(totalCents * 0.6) : totalCents;
-
     eventSeq += 1;
     events.push({
       id: `evt_${eventSeq.toString(36).padStart(6, '0')}`,
@@ -199,7 +222,14 @@ for (const session of sessions) {
       kind: 'composer',
       conversationId: session.id,
       isTokenBasedCall: true,
-      chargedCents,
+      // Undiscounted for now — chargedCents is set to match totalCents until
+      // the discount pass below (after the budget-scaling pass further down,
+      // deliberately: at this per-event scale, list costs are often 1-3
+      // cents, where Math.round(cents * 0.6) frequently rounds right back to
+      // the same integer it started from — collapsing the discount before it
+      // exists. Scaling first means the 40%-off cut lands on cent values
+      // large enough for that rounding to actually preserve a visible gap.
+      chargedCents: totalCents,
       cursorTokenFee: null,
       tokenUsage: {
         inputTokens,
@@ -228,6 +258,15 @@ const scale = cycleSpendRaw > 0 ? TARGET_CYCLE_SPEND / cycleSpendRaw : 1;
 for (const e of events) {
   e.chargedCents = Math.round(e.chargedCents * scale);
   e.tokenUsage.totalCents = Math.round(e.tokenUsage.totalCents * scale);
+}
+
+// Discount pass, after scaling (see the comment on chargedCents above for
+// why): cuts chargedCents to 60% of the now-scaled list cost for Grok 4.6
+// requests inside the discount window, so detectDiscounts() has a real,
+// consistently-sized gap to measure for every request that day.
+for (const e of events) {
+  if (e.model !== 'cursor-grok-4.6-high' || e.timestamp < discountStart || e.timestamp > discountEnd) continue;
+  e.chargedCents = Math.round(e.tokenUsage.totalCents * 0.6);
 }
 
 const spentDollars = events

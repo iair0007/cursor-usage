@@ -8,7 +8,12 @@
 
 (function () {
   const DATA = window.__DEMO_DATA__;
-  let webviewState = {};
+  // Pre-seeds the "seen" flag for the Simulator's one-time intro dialog
+  // (src/webview/main.js's SIM_INTRO_KEY) so the recorded walkthrough goes
+  // straight to the Simulator's actual content instead of a modal explaining
+  // it — the modal is real product UI, just not what a first-look demo beat
+  // should spend its seconds on.
+  let webviewState = { prefs: { 'cursorUsage.simIntroSeen': '1' } };
 
   function respond(id, result) {
     window.postMessage({ type: 'rpc-result', id, result }, '*');

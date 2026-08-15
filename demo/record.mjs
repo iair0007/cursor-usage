@@ -24,11 +24,19 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { BEATS, TAIL_PAD_MS } from './script.mjs';
+import { beatsForCut, outDirForCut, TAIL_PAD_MS, captionChunks } from './script.mjs';
 import { getDurationMs, concatWavs, padToDuration, silenceFile } from './audio-util.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const outDir = path.join(__dirname, 'out');
+
+const args = process.argv.slice(2);
+const cutFlagIndex = args.indexOf('--cut');
+// Which cut to record: `full` (the default walkthrough) or `short` (the
+// 60-second social cut). Must match the cut generate-voiceover.mjs was run
+// with, since this reads that cut's manifest for its beat timing.
+const CUT = cutFlagIndex >= 0 ? args[cutFlagIndex + 1] : 'full';
+const BEATS = beatsForCut(CUT);
+const outDir = path.join(__dirname, outDirForCut(CUT));
 const voiceDir = path.join(outDir, 'voice');
 fs.mkdirSync(voiceDir, { recursive: true });
 
@@ -52,10 +60,11 @@ function nominalWaitMs(beat) {
 }
 
 async function main() {
+  console.log(`Cut: ${CUT} (${BEATS.length} beats) -> demo/${outDirForCut(CUT)}/`);
   console.log(voiceManifest
-    ? 'Using demo/out/voice/manifest.json for nominal beat timing (narrated cut).'
-    : 'No voiceover manifest found — using caption-only fallback timing. '
-      + 'Run demo/generate-voiceover.mjs first for a narrated cut.');
+    ? `Using demo/${outDirForCut(CUT)}/voice/manifest.json for nominal beat timing (narrated cut).`
+    : 'No voiceover manifest found for this cut — using caption-only fallback timing. '
+      + `Run "node demo/generate-voiceover.mjs --cut ${CUT}" first for a narrated cut.`);
 
   const browser = await chromium.launch(CHROMIUM_PATH ? { executablePath: CHROMIUM_PATH } : {});
   const context = await browser.newContext({
@@ -82,12 +91,19 @@ async function main() {
   const leadMs = Date.now() - recordingStartedAt;
   fs.writeFileSync(path.join(outDir, 'lead-ms.txt'), String(leadMs));
 
-  const caption = async (text) => {
-    await page.evaluate((text) => {
-      const el = document.getElementById('demoCaption');
-      el.textContent = text || '';
-      el.classList.toggle('demo-slide-hidden', !text);
-    }, text);
+  // Subtitles are the beat's narration verbatim, split into caption-sized
+  // chunks and handed to the page, which advances them on its own timer (see
+  // demo-runtime.js) — so subtitle changes are not serialised behind whatever
+  // Playwright happens to be doing in the middle of the beat.
+  const captionForBeat = async (beat) => {
+    const chunks = captionChunks(beat.narration);
+    // Spread across the narration audio, not the whole beat: the tail pad and
+    // any slack at the end of a beat is silence, and holding the last subtitle
+    // through it reads better than stretching every chunk to cover it.
+    const spanMs = voiceManifest?.[beat.id]?.narrationMs || nominalWaitMs(beat);
+    await page.evaluate(([chunks, spanMs]) => {
+      window.__demoCaptions.play(chunks, spanMs);
+    }, [chunks, spanMs]);
   };
   const hideSlide = (id) => page.evaluate((id) => {
     document.getElementById(id).classList.add('demo-slide-hidden');
@@ -95,95 +111,238 @@ async function main() {
   const showSlide = (id) => page.evaluate((id) => {
     document.getElementById(id).classList.remove('demo-slide-hidden');
   }, id);
-  const byId = Object.fromEntries(BEATS.map((b) => [b.id, b]));
+
+  // Moves Playwright's real mouse in visible steps (rather than teleporting),
+  // so demo/demo-runtime.js's fake-cursor-follows-real-events trick has
+  // motion to draw — see overlay.css's #demoCursor.
+  const moveCursorTo = async (x, y, steps = 26) => {
+    await page.mouse.move(x, y, { steps });
+  };
+  const moveCursorToCenterOf = async (locator) => {
+    const box = await locator.boundingBox();
+    if (!box) return null;
+    await moveCursorTo(box.x + box.width / 2, box.y + box.height / 2);
+    return box;
+  };
+  // Moves the mouse to an element, pauses so the viewer can register where
+  // it's headed, then clicks — instead of jumping straight to a hidden
+  // Playwright-internal click with no visible approach.
+  const clickWithCursor = async (selector, { settleMs = 350 } = {}) => {
+    const el = page.locator(selector).first();
+    await moveCursorToCenterOf(el);
+    await page.waitForTimeout(150);
+    await el.click();
+    await page.waitForTimeout(settleMs);
+  };
+
+  // Leaves the opening slides behind for the first beat that shows the real
+  // dashboard. Which beat that is depends on the cut — the short cut has no
+  // status-bar beat and goes straight from the intro card to Overview — so
+  // every dashboard beat calls this rather than one designated beat owning it.
+  // Idempotent: hiding an already-hidden slide is a no-op.
+  const enterDashboard = async () => {
+    await hideSlide('demoIntro');
+    await hideSlide('demoStatusBar');
+  };
+
+  // Navigates only when the target isn't already on screen. Beats where the
+  // click itself is the point (Requests, Analyze) click unconditionally and
+  // visibly; these are for beats that merely need to *be* somewhere, since a
+  // cut can drop whichever earlier beat used to navigate there.
+  const viewVisible = (id) => page.locator(`#${id}`).evaluate((el) => !el.classList.contains('hidden')).catch(() => false);
+  const ensureApp = async (app, viewId) => {
+    if (await viewVisible(viewId)) return;
+    await clickWithCursor(`[data-app="${app}"]`);
+  };
+  const ensureAnalyzePanel = async (panel) => {
+    await ensureApp('analyze', 'analyzeView');
+    await clickWithCursor(`[data-analyze-panel="${panel}"]`);
+  };
 
   // Measures the real wall-clock time each beat takes (its actions plus its
   // wait), which is what the post-recording resync step pads narration to.
   const actualMs = {};
-  const runBeat = async (id, fn) => {
-    const t0 = Date.now();
-    await fn();
-    actualMs[id] = Date.now() - t0;
+
+  // When the beat currently running started, for holdBeat below.
+  let beatStartedAt = Date.now();
+
+  /**
+   * Holds the beat until its narration has played out — counting the time its
+   * own actions already took.
+   *
+   * A beat's audio starts when the beat does and runs for narrationMs, while
+   * its clicks and typing happen at the front. Waiting the full nominal length
+   * *after* those actions therefore left the difference as silence at the end
+   * of every beat, and it compounded: two navigation clicks are ~1.5s of dead
+   * air on their own. Waiting only the remainder makes a beat last about
+   * narration + TAIL_PAD_MS regardless of how much work it did, so the pause
+   * between beats is the intended breath rather than an accident of how many
+   * elements Playwright had to click.
+   *
+   * `reserveMs` leaves time at the end for something that still has to happen
+   * after the hold — closing the Sessions dialog, say — so that too lands
+   * inside the beat instead of pushing past it.
+   */
+  const holdBeat = async (beat, { reserveMs = 0 } = {}) => {
+    const remaining = nominalWaitMs(beat) - reserveMs - (Date.now() - beatStartedAt);
+    if (remaining > 0) await page.waitForTimeout(remaining);
   };
 
-  await runBeat('intro', async () => {
-    await page.waitForTimeout(nominalWaitMs(byId.intro));
-  });
+  // One handler per beat id, rather than a fixed sequence: a cut is just a
+  // list of beat ids (see script.mjs's BEATS / SHORT_BEATS), and the loop at
+  // the bottom runs whichever of these it names, in its order.
+  const handlers = {};
 
-  await runBeat('statusBar', async () => {
+  handlers.intro = async (beat) => {
+    await holdBeat(beat);
+  };
+
+  handlers.statusBar = async (beat) => {
     await hideSlide('demoIntro');
     await showSlide('demoStatusBar');
-    await page.waitForTimeout(nominalWaitMs(byId.statusBar));
+    await page.waitForTimeout(500);
+    // The arrow calls out the pill before the pointer arrives, so the eye
+    // already knows where to look by the time the cursor gets there.
+    await page.evaluate(() => document.getElementById('mockArrow')?.classList.add('demo-force-visible'));
+    await page.waitForTimeout(700);
+    await moveCursorToCenterOf(page.locator('#mockPill'));
+    // Real :hover state (overlay.css's `.ide-pill:hover + .ide-tooltip`),
+    // triggered by the mouse actually being there — not a scripted toggle.
+    await holdBeat(beat, { reserveMs: 250 });
+    await page.evaluate(() => document.getElementById('mockArrow')?.classList.remove('demo-force-visible'));
+    await page.waitForTimeout(250);
     await hideSlide('demoStatusBar');
-  });
+  };
 
-  await runBeat('overview', async () => {
-    await caption(byId.overview.caption);
-    await page.waitForTimeout(nominalWaitMs(byId.overview));
-  });
+  handlers.overview = async (beat) => {
+    await enterDashboard();
+    await holdBeat(beat);
+  };
 
-  await runBeat('requestsTable', async () => {
-    await caption(byId.requestsTable.caption);
-    await page.click('[data-app="usage"]');
-    await page.waitForTimeout(nominalWaitMs(byId.requestsTable));
-  });
+  handlers.requestsTable = async (beat) => {
+    await enterDashboard();
+    await clickWithCursor('[data-app="usage"]');
+    await holdBeat(beat);
+  };
 
-  await runBeat('requestsAnalytics', async () => {
-    await caption(byId.requestsAnalytics.caption);
-    await page.click('[data-panel="analytics"]');
-    await page.waitForTimeout(nominalWaitMs(byId.requestsAnalytics));
-  });
+  handlers.discount = async (beat) => {
+    await enterDashboard();
+    // The short cut has no requestsTable beat before this one, so the Requests
+    // tab may still need opening.
+    await ensureApp('usage', 'usageView');
+    // Widen the page so a discounted request (Grok 4.6, a few days back in
+    // the fixture data) is likely on-screen without needing to paginate.
+    await page.selectOption('#pageSize', '100').catch(() => {});
+    await page.waitForTimeout(400);
+    const tag = page.locator('#tableBody .discount-tag').first();
+    if (await tag.count()) {
+      await tag.scrollIntoViewIfNeeded().catch(() => {});
+      await page.evaluate(() => {
+        document.querySelector('#tableBody .discount-tag')?.closest('tr')?.classList.add('demo-row-highlight');
+      });
+      await page.waitForTimeout(300);
+      await moveCursorToCenterOf(tag);
+    }
+    await holdBeat(beat);
+  };
 
-  await runBeat('findings', async () => {
-    await caption(byId.findings.caption);
-    await page.click('[data-app="analyze"]');
-    await page.waitForTimeout(nominalWaitMs(byId.findings));
-  });
+  handlers.requestsAnalytics = async (beat) => {
+    await ensureApp('usage', 'usageView');
+    await clickWithCursor('[data-panel="analytics"]');
+    await holdBeat(beat);
+  };
 
-  await runBeat('compare', async () => {
-    await caption(byId.compare.caption);
-    await page.click('[data-analyze-panel="compare"]');
-    await page.waitForTimeout(nominalWaitMs(byId.compare));
-  });
+  handlers.findings = async (beat) => {
+    await enterDashboard();
+    await clickWithCursor('[data-app="analyze"]');
+    await holdBeat(beat);
+  };
 
-  await runBeat('sessions', async () => {
-    await caption(byId.sessions.caption);
-    await page.click('[data-analyze-panel="sessions"]');
-    const budgetMs = nominalWaitMs(byId.sessions);
-    let spent = 0;
-    const step = async (ms) => { await page.waitForTimeout(ms); spent += ms; };
-    await step(1200);
+  handlers.compare = async (beat) => {
+    await enterDashboard();
+    await ensureAnalyzePanel('compare');
+    await holdBeat(beat);
+  };
+
+  handlers.sessions = async (beat) => {
+    await enterDashboard();
+    await ensureAnalyzePanel('sessions');
+    await page.waitForTimeout(700);
     const checkboxes = page.locator('#sessionsList input[type="checkbox"][data-session-id]');
     if (await checkboxes.count() >= 2) {
+      await moveCursorToCenterOf(checkboxes.nth(0));
       await checkboxes.nth(0).check();
+      await page.waitForTimeout(350);
+      await moveCursorToCenterOf(checkboxes.nth(1));
       await checkboxes.nth(1).check();
-      await step(500);
+      await page.waitForTimeout(350);
       const compareBtn = page.locator('#trayCompare');
       if (await compareBtn.isEnabled()) {
+        await moveCursorToCenterOf(compareBtn);
         await compareBtn.click();
-        await step(1000);
+        // The dialog is a native modal, so it enters the top layer above the
+        // subtitles — put them back on top of it.
+        await page.evaluate(() => window.__demoCaptions.raise());
+        // The comparison dialog is the payoff of this beat, so it holds the
+        // screen for the rest of it — reserving just enough at the end to
+        // close again inside the beat rather than after it.
+        await holdBeat(beat, { reserveMs: 400 });
         await page.locator('#sessionsDialogClose').click().catch(() => {});
+        await page.waitForTimeout(400);
+        return;
       }
     }
-    if (spent < budgetMs) await page.waitForTimeout(budgetMs - spent);
-  });
+    await holdBeat(beat);
+  };
 
-  await runBeat('simulator', async () => {
-    await caption(byId.simulator.caption);
-    await page.click('[data-app="simulator"]');
-    const budgetMs = nominalWaitMs(byId.simulator);
-    const firstLeg = Math.min(1800, budgetMs);
-    await page.waitForTimeout(firstLeg);
+  handlers.simulator = async (beat) => {
+    await enterDashboard();
+    await clickWithCursor('[data-app="simulator"]');
+    await page.waitForTimeout(1500);
     const discountNote = page.locator('#simDiscountSummary');
-    if (await discountNote.count()) await discountNote.scrollIntoViewIfNeeded().catch(() => {});
-    if (budgetMs > firstLeg) await page.waitForTimeout(budgetMs - firstLeg);
-  });
+    if (await discountNote.count()) {
+      await discountNote.scrollIntoViewIfNeeded().catch(() => {});
+      await moveCursorToCenterOf(discountNote).catch(() => {});
+    }
+    await holdBeat(beat);
+  };
 
-  await runBeat('outro', async () => {
-    await caption(null);
+  handlers.install = async (beat) => {
+    await showSlide('demoInstall');
+    await page.waitForTimeout(600);
+    const search = page.locator('#mockExtSearch');
+    await moveCursorToCenterOf(search);
+    await search.click();
+    await page.waitForTimeout(300);
+    // Typed for real, one key at a time, so the publisher name appears the way
+    // a viewer would type it rather than materialising all at once.
+    await search.type('iair0007', { delay: 190 });
+    await page.waitForTimeout(400);
+    await page.evaluate(() => document.getElementById('mockExtResults')?.classList.add('demo-force-visible'));
+    await page.waitForTimeout(300);
+    await moveCursorToCenterOf(page.locator('.ext-item-publisher'));
+    await holdBeat(beat);
+    await hideSlide('demoInstall');
+  };
+
+  handlers.outro = async (beat) => {
+    await page.evaluate(() => window.__demoCursor?.hide());
     await showSlide('demoOutro');
-    await page.waitForTimeout(nominalWaitMs(byId.outro));
-  });
+    await holdBeat(beat);
+  };
+
+  for (const beat of BEATS) {
+    const handler = handlers[beat.id];
+    if (!handler) throw new Error(`No handler in record.mjs for beat "${beat.id}" (from the ${CUT} cut in script.mjs)`);
+    // The clock holdBeat measures its remaining time against — set before the
+    // subtitles go up, since that is also when this beat's narration starts.
+    beatStartedAt = Date.now();
+    // Subtitles start with the beat, before its actions, so the first chunk is
+    // already up while the click/navigation that opens the beat plays out.
+    await captionForBeat(beat);
+    await handler(beat);
+    actualMs[beat.id] = Date.now() - beatStartedAt;
+  }
 
   if (errors.length) {
     console.error('Console/page errors during recording:');

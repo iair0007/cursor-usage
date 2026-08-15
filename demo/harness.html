@@ -510,29 +510,105 @@
   <!-- Demo-only overlay chrome: not part of the shipped extension. -->
   <div id="demoIntro" class="demo-slide">
     <div class="demo-slide-inner">
-      <div class="demo-logo">◔</div>
+      <img class="demo-logo" src="../resources/icon.png" alt="Cursor Usage Dashboard" />
       <h1>Cursor Usage Dashboard</h1>
       <p>See exactly where your Cursor requests and tokens go — right inside Cursor.</p>
     </div>
   </div>
   <div id="demoStatusBar" class="demo-slide demo-slide-hidden">
-    <div class="demo-slide-inner demo-slide-inner-img">
-      <img src="../docs/screenshot-statusbar.png" alt="Status bar" />
-      <p>Always-on status bar — click it to open the dashboard</p>
+    <div class="demo-slide-inner">
+      <div class="ide-mock">
+        <div class="ide-titlebar">
+          <span class="ide-dot ide-dot-r"></span>
+          <span class="ide-dot ide-dot-y"></span>
+          <span class="ide-dot ide-dot-g"></span>
+          <span class="ide-titlebar-file">budget.ts — my-project</span>
+        </div>
+        <div class="ide-body">
+          <div class="ide-sidebar">⧉<br />⌘<br />⚙</div>
+          <div class="ide-editor"><span class="cm">// monthly spend guardrail</span><br /><span class="kw">export</span> <span class="kw">function</span> <span class="fn">checkBudget</span>(<span class="ty">spend</span>: <span class="ty">number</span>) {<br />&nbsp;&nbsp;<span class="kw">const</span> cap = <span class="str">40.00</span>;<br />&nbsp;&nbsp;<span class="kw">return</span> spend / cap;<br />}</div>
+        </div>
+        <div class="ide-statusbar">
+          <div class="ide-statusbar-left">
+            <span>⑂ main</span>
+            <span>✓ Prettier</span>
+          </div>
+          <div class="ide-statusbar-right">
+            <span>Ln 4, Col 18</span>
+            <span>TypeScript</span>
+            <!-- Both filled in by demo-runtime.js from the fixture data, so the
+                 figures and wording match src/statusBar.ts rather than drifting. -->
+            <span class="ide-pill" id="mockPill">📊 —</span>
+            <div class="ide-tooltip" id="mockTooltip"></div>
+            <svg class="ide-arrow" id="mockArrow" viewBox="0 0 46 46" fill="none">
+              <path d="M6 8 C 18 4, 30 10, 36 24" stroke="#6ea8fe" stroke-width="3" stroke-linecap="round" fill="none" />
+              <path d="M28 20 L 37 25 L 31 33" stroke="#6ea8fe" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+            </svg>
+          </div>
+        </div>
+      </div>
+      <!-- No caption line here: the subtitles now carry the narration
+           verbatim, and a second sentence saying the same thing competes
+           with them for the eye. -->
+    </div>
+  </div>
+  <div id="demoInstall" class="demo-slide demo-slide-hidden">
+    <div class="demo-slide-inner">
+      <div class="ide-mock">
+        <div class="ide-titlebar">
+          <span class="ide-dot ide-dot-r"></span>
+          <span class="ide-dot ide-dot-y"></span>
+          <span class="ide-dot ide-dot-g"></span>
+          <span class="ide-titlebar-file">Extensions — my-project</span>
+        </div>
+        <div class="ide-body">
+          <div class="ide-sidebar">⧉<br /><span class="ide-sidebar-active">⊞</span><br />⚙</div>
+          <div class="ext-panel">
+            <div class="ext-search">
+              <span class="ext-search-icon">⌕</span>
+              <!-- A real input: record.mjs types into it with Playwright's
+                   keyboard, so the keystrokes on screen are real ones. -->
+              <input id="mockExtSearch" type="text" placeholder="Search Extensions in Marketplace" autocomplete="off" />
+            </div>
+            <div class="ext-results" id="mockExtResults">
+              <div class="ext-item">
+                <img class="ext-item-icon" src="../resources/icon.png" alt="" />
+                <div class="ext-item-body">
+                  <div class="ext-item-title">Cursor Usage Dashboard</div>
+                  <div class="ext-item-desc">See exactly where your Cursor requests and tokens go</div>
+                  <div class="ext-item-meta"><span class="ext-item-publisher">iair0007</span></div>
+                </div>
+                <button type="button" class="ext-install">Install</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="ide-statusbar">
+          <div class="ide-statusbar-left"><span>⑂ main</span></div>
+          <div class="ide-statusbar-right"><span>Extensions</span></div>
+        </div>
+      </div>
+      <!-- Deliberately no caption line — see #demoStatusBar above. -->
     </div>
   </div>
   <div id="demoOutro" class="demo-slide demo-slide-hidden">
     <div class="demo-slide-inner">
-      <div class="demo-logo">◔</div>
+      <img class="demo-logo" src="../resources/icon.png" alt="Cursor Usage Dashboard" />
       <h1>Cursor Usage Dashboard</h1>
       <p>Free on Open VSX · zero setup · no proxy, no login</p>
       <p class="demo-outro-url">iair0007.github.io/cursor-usage</p>
     </div>
   </div>
-  <div id="demoCaption" class="demo-caption demo-slide-hidden"></div>
+  <!-- popover, not a plain div: the Sessions comparison is a native <dialog>
+       opened with showModal(), which renders in the browser's top layer above
+       every z-index on the page. A popover is promoted to that same top layer,
+       so the subtitles can be raised back over the dialog (demo-runtime.js). -->
+  <div id="demoCaption" class="demo-caption" popover="manual"></div>
+  <div id="demoCursor"></div>
 
   <script src="./data.js"></script>
   <script src="./bridge.js"></script>
   <script src="../media/main.js"></script>
+  <script src="./demo-runtime.js"></script>
 </body>
 </html>

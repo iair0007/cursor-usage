@@ -1,10 +1,31 @@
 # Demo video generator
 
-Produces a ~30s walkthrough video of the dashboard, without needing a real
+Produces a narrated walkthrough video of the dashboard, without needing a real
 Cursor install or a real cursor.com account. It runs the actual webview
 bundle (`media/main.js`, built from `src/webview/`) in a plain browser tab,
 with `bridge.js` standing in for the extension host (`src/panel.ts`) and
 serving synthetic-but-realistic usage data instead of live RPC calls.
+
+## Cuts
+
+Two videos come out of the same harness, fixtures and beat handlers — they
+differ only in which beats they play and how the narration is worded:
+
+| Cut | Length | Beats | Output | For |
+| --- | --- | --- | --- | --- |
+| `full` (default) | ~2m25s | 12 | `demo/out/` | the marketplace listing, docs, anyone who wants the whole tour |
+| `short` | ~50s | 8 | `demo/out/short/` | social feeds, where nobody watches two minutes |
+
+Each cut owns its directory for every stage (voice clips, manifest, `.webm`,
+mp4, gif), so re-rendering one can never overwrite the other. Pass
+`--cut short` to the two node scripts and `short` to `render.sh`; omitting it
+everywhere gives the full cut, exactly as before.
+
+The short cut is not a trimmed re-edit — its narration is rewritten shorter in
+`script.mjs`'s `SHORT_BEATS`, because each beat's length is set by its
+narration audio. It drops the status bar, request log and Analytics beats,
+keeping what the extension is distinctive for: the budget runway, the measured
+discount, period/session comparison, the Simulator, and how to install it.
 
 ## Pipeline
 
@@ -18,6 +39,14 @@ node demo/record.mjs              # pass 2: drives harness.html with Playwright,
                                    #         then resyncs demo/out/voice/narration.wav to the *measured*
                                    #         per-beat timing (pass 3, runs automatically at the end)
 ./demo/render.sh                  # muxes video + narration.wav into demo/out/demo.mp4, plus demo/out/demo.gif
+```
+
+The same three steps for the 60-second cut:
+
+```bash
+node demo/generate-voiceover.mjs --cut short
+node demo/record.mjs --cut short
+./demo/render.sh short            # writes demo/out/short/demo.mp4 + .gif
 ```
 
 Narration is entirely optional — skip `generate-voiceover.mjs` and the other
@@ -48,51 +77,90 @@ locally, or point `NODE_PATH` at wherever it's installed globally.
 
 ### Voice engine
 
-`generate-voiceover.mjs --engine <espeak|say>` picks the synthesizer:
+`generate-voiceover.mjs --engine <kokoro|say|espeak>` picks the synthesizer:
 
-- **`espeak`** (espeak-ng + an mbrola diphone voice) — the default anywhere
-  that isn't macOS. Fully offline, no model download, which is why it's what
-  this repo's sandboxed environment uses (its network policy blocks Hugging
-  Face and GitHub release downloads, where most real neural TTS voices live).
-  Sounds synthetic — a GPS voice, not a narrator. `--voice` takes any name
-  from `espeak-ng --voices=mbrola` (default `mb-us1`); `--rate` is words per
-  minute (default 165).
+- **`kokoro`** (default) — [Kokoro-82M](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX),
+  an open-weight (MIT-licensed) neural TTS model run fully locally via the
+  `kokoro-js` npm package (an `onnxruntime` dependency, no PyTorch/Python
+  needed). No API key, no account, no cloud calls — just a one-time ~86MB
+  model download from Hugging Face on first run, cached under
+  `node_modules/@huggingface/transformers/.cache` (so a clean `npm install`
+  re-downloads it). Sounds close to a real narrator, clearly better than
+  `say`/`espeak`. `--voice` takes any Kokoro voice name — `af_heart` (US
+  female, the default) and `bf_emma` (British female) are good starting
+  points; `--speed` is a multiplier (default `1.0`). Needs internet access to
+  Hugging Face the first time it runs; after that it's fully offline.
 - **`say`** — macOS's built-in TTS (the same engine behind Siri/VoiceOver).
-  Default when this runs on a Mac. Sounds like an actual person, not
-  synthetic. `--voice` takes any installed voice name (`Samantha` ships on
-  every Mac with no download; `say -v '?'` lists what you have; for a
-  noticeably better result, download a Premium/Enhanced voice — System
-  Settings → Accessibility → Spoken Content → System Voice → Manage Voices —
-  and pass it quoted, e.g. `--voice "Ava (Premium)"`). Only runs on macOS
-  itself, so run this pipeline on your own Mac (with Claude Code or a plain
-  terminal — no MCP server needed, `say` is just a CLI) rather than in this
-  sandbox to use it:
+  Sounds like an actual person, but is a level below Kokoro. `--voice` takes
+  any installed voice name (`Samantha` ships on every Mac with no download;
+  `say -v '?'` lists what you have; for a better result, download a
+  Premium/Enhanced voice — System Settings → Accessibility → Spoken Content →
+  System Voice → Manage Voices — and pass it quoted, e.g.
+  `--voice "Ava (Premium)"`). Only runs on macOS itself.
+- **`espeak`** (espeak-ng + an mbrola diphone voice) — no model download, so
+  it works even behind network policies that block Hugging Face/GitHub
+  (this repo's sandboxed environment, notably, which is why it's used there
+  instead of `kokoro`). Sounds synthetic — a GPS voice, not a narrator.
+  `--voice` takes any name from `espeak-ng --voices=mbrola` (default
+  `mb-us1`); `--rate` is words per minute (default 165).
+
+Run the full pipeline on your own Mac (with Claude Code or a plain terminal —
+no MCP server needed):
 
   ```bash
   git fetch origin claude/extension-demo-videos-q57z32
   git checkout claude/extension-demo-videos-q57z32
   npm install && npm run compile
   node demo/generate-fixtures.mjs
-  node demo/generate-voiceover.mjs --engine say --voice "Ava (Premium)"
+  node demo/generate-voiceover.mjs   # kokoro, af_heart — add --voice/--speed to tweak
   node demo/record.mjs   # needs `npx playwright install chromium` once, first time
   ./demo/render.sh        # needs ffmpeg — `brew install ffmpeg`
   ```
 
 ## What it shows
 
-Intro card → status bar screenshot (`docs/screenshot-statusbar.png`) →
-Overview (cost/requests/cache stats + a budget burn-rate projection,
-deliberately on a dollar-metered "Business" plan so that card renders) →
-Requests table → Analytics charts → Analyze Findings → Compare periods →
-Sessions (including a two-session compare) → Simulator (with a measured Grok
-4.6 discount, so the "Discounted" badge shows up for real) → outro card, each
-beat narrated per `script.mjs`.
+Intro card → status bar (a mocked-up IDE window — see below — with a real
+`:hover` tooltip and a pointing arrow) → Overview (cost/requests/cache stats +
+a budget burn-rate projection, deliberately on a dollar-metered "Business"
+plan so that card renders) → Requests table → a dedicated discount beat
+(widens the page and highlights an actual `.discount-tag`-badged row so a
+real detected Grok 4.6 promotion is on screen, not just mentioned) →
+Analytics charts → Analyze Findings → Compare periods → Sessions (including a
+two-session compare, whose dialog holds the screen for the rest of that beat)
+→ Simulator (its one-time intro dialog is pre-dismissed via `bridge.js` so
+the tab's real content shows immediately; the discount summary is scrolled
+into view too) → an install beat (a mocked Extensions panel that Playwright
+really types `iair0007` into — the publisher name finds the extension faster
+than its own name does) → outro card, each beat narrated per `script.mjs`
+and subtitled with that same narration verbatim.
+
+A fake cursor (`demo/cursor-overlay.js` + `overlay.css`'s `#demoCursor`)
+tracks Playwright's real mouse — every click in `record.mjs` moves the mouse
+there first via `clickWithCursor()`/`moveCursorToCenterOf()`, so the video
+shows where each action is happening rather than cutting straight to the
+result. Clicks also leave a brief ripple.
+
+The status-bar and install beats don't screenshot a real Cursor window — this
+pipeline only ever runs the dashboard webview standalone (see the top of this
+file), never the full IDE around it — so `harness.html`'s `#demoStatusBar`
+and `#demoInstall` slides mock a minimal editor window instead (`.ide-mock`
+in `overlay.css`). The status-bar pill and its hover card are not hand-written
+prose: `demo-runtime.js` builds both from `data.js` using the same format
+strings as `statusBarText()` and the tooltip in `src/statusBar.ts`, down to
+the budget runway line ("At $X/day (cycle average): ~N days of budget left"),
+so they re-derive whenever the fixtures do.
 
 ## Files
 
-- `script.mjs` — single source of truth for the beats: on-screen caption,
-  spoken narration line, and (for beats with no narration) a `minMs` floor.
-  Edit narration/caption wording here.
+- `script.mjs` — single source of truth for the beats of both cuts (`BEATS`
+  and `SHORT_BEATS`, resolved by `beatsForCut()`), and for where each cut's
+  files go (`outDirForCut()`). A beat is its spoken narration line plus a
+  `minMs` floor for beats whose on-screen action needs longer than the audio.
+  Edit narration wording here. `record.mjs` holds one handler per beat *id*,
+  so a cut is just a list of ids and either cut can use any beat. Also exports `captionChunks()`,
+  which splits a narration line into subtitle-sized pieces at sentence,
+  comma, and em-dash boundaries — the subtitles are the narration verbatim,
+  so there is no separate caption text that could drift out of sync with it.
 - `generate-fixtures.mjs` — synthesizes ~45 days of usage events, sessions,
   a budget/burn-rate story, and a real (measured) promotional-discount
   window, and writes them to `data.js` as `window.__DEMO_DATA__`.
@@ -103,7 +171,16 @@ beat narrated per `script.mjs`.
   instead of a real extension host.
 - `harness.html` — the dashboard's body markup (kept in sync with
   `src/html.ts` by hand) plus demo-only intro/outro slides and a caption bar.
-- `overlay.css` — styling for the demo-only slides/captions.
+- `overlay.css` — styling for the demo-only slides/subtitles, the fake
+  cursor/click-ripple, the status-bar and Extensions-panel IDE mocks, and the
+  discount-row highlight.
+- `demo-runtime.js` — the demo-only page runtime, loaded by `harness.html`:
+  draws the fake cursor and click ripple from real `mousemove`/`mousedown`
+  events (driven by `record.mjs`'s actual Playwright mouse movements), runs
+  the subtitle player, and fills in the status-bar mock's pill and hover
+  tooltip from the fixture data, mirroring the format strings in
+  `src/statusBar.ts` / `src/shared/usageLogic.ts` so those figures stay
+  honest instead of being hardcoded.
 - `audio-util.mjs` — shared ffmpeg/wav helpers (duration probing, silence
   generation, concatenation, padding) used by the two scripts below.
 - `generate-voiceover.mjs` — pass 1: synthesizes each beat's narration-only

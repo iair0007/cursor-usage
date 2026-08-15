@@ -26,11 +26,21 @@
   padding: 0 32px;
 }
 
+/* The extension's real published icon (resources/icon.png, the same file
+   package.json points at), not a stand-in glyph — the intro and outro cards
+   should show viewers the exact tile they'll be looking for in the
+   marketplace. Its own artwork is already a rounded dark tile, so it needs no
+   background or border of its own. */
 .demo-logo {
-  font-size: 56px;
-  line-height: 1;
-  margin-bottom: 18px;
-  color: #6ea8fe;
+  display: block;
+  width: 124px;
+  height: 124px;
+  margin: 0 auto 24px;
+  border-radius: 26px;
+  /* The icon tile is itself near-black, and so is the slide behind it — the
+     hairline keeps its edge from disappearing into the background. */
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 16px 46px rgba(0, 0, 0, 0.5);
 }
 
 .demo-slide h1 {
@@ -54,30 +64,356 @@
   font-weight: 600;
 }
 
-.demo-slide-inner-img img {
-  max-width: min(760px, 90vw);
-  border-radius: 10px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-  margin-bottom: 22px;
+/* Fake mouse cursor + click ripple, driven by demo/demo-runtime.js from
+   real `mousemove`/`mousedown` events Playwright's page.mouse dispatches —
+   so it tracks record.mjs's actual pointer motion rather than being scripted
+   separately. Purely visual, never intercepts input. */
+#demoCursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 26px;
+  height: 26px;
+  z-index: 999999;
+  pointer-events: none;
+  transform: translate(-2px, -2px);
+  opacity: 0;
+  background: #fff;
+  clip-path: polygon(0% 0%, 0% 76%, 27% 62%, 39% 88%, 53% 82%, 41% 55%, 70% 55%);
+  filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.8)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+  transition: filter 120ms ease, opacity 200ms ease;
 }
 
-.demo-caption {
+#demoCursor.demo-cursor-active {
+  filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.8)) drop-shadow(0 0 8px rgba(110, 168, 254, 0.9));
+}
+
+.demo-click-ripple {
   position: fixed;
-  left: 50%;
-  bottom: 28px;
-  transform: translateX(-50%);
-  z-index: 1001;
-  background: rgba(15, 20, 32, 0.92);
-  color: #fff;
-  padding: 12px 26px;
-  border-radius: 999px;
+  z-index: 999998;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: rgba(110, 168, 254, 0.35);
+  border: 2px solid rgba(110, 168, 254, 0.9);
+  pointer-events: none;
+  animation: demo-ripple 550ms ease-out forwards;
+}
+
+@keyframes demo-ripple {
+  from { transform: scale(0.4); opacity: 1; }
+  to { transform: scale(4); opacity: 0; }
+}
+
+/* Minimal fake Cursor-IDE window for the status-bar beat — a real editor
+   screenshot doesn't exist for this pipeline (the harness only ever runs
+   the webview panel, never the full IDE chrome around it), so this mocks
+   just enough of the window (title bar, a code pane, the status bar row)
+   to give the real status-bar item somewhere honest to sit. */
+.ide-mock {
+  width: min(920px, 88vw);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #1e1f24;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  text-align: left;
+}
+
+.ide-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #26272e;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ide-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+.ide-dot-r { background: #ff5f57; }
+.ide-dot-y { background: #febc2e; }
+.ide-dot-g { background: #28c840; }
+
+.ide-titlebar-file {
+  margin: 0 auto;
+  color: #9aa0ac;
+  font-size: 12.5px;
+}
+
+.ide-body {
+  display: flex;
+  height: 220px;
+}
+
+.ide-sidebar {
+  width: 44px;
+  background: #232429;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  padding-top: 16px;
+  color: #565962;
   font-size: 17px;
+}
+
+.ide-editor {
+  flex: 1;
+  padding: 16px 20px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.85;
+  color: #c9d1e0;
+  overflow: hidden;
+}
+
+.ide-editor .kw { color: #c586c0; }
+.ide-editor .fn { color: #dcdcaa; }
+.ide-editor .str { color: #ce9178; }
+.ide-editor .cm { color: #6a7280; }
+.ide-editor .ty { color: #4ec9b0; }
+
+.ide-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 14px;
+  background: #1c6fd6;
+  color: #eaf1ff;
+  font-size: 12px;
+  position: relative;
+}
+
+.ide-statusbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.ide-statusbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.ide-pill {
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 4px;
+  padding: 2px 8px;
   font-weight: 600;
   letter-spacing: 0.01em;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  cursor: default;
+}
+
+/* Real :hover state, driven by Playwright actually moving the mouse over
+   this element — not a scripted class toggle — so what the video shows is
+   what a real user would see. */
+.ide-tooltip {
+  position: absolute;
+  bottom: calc(100% + 14px);
+  right: 8px;
+  width: 340px;
+  background: #2b2d33;
+  color: #dfe3ea;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  text-align: left;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 200ms ease, transform 200ms ease;
+  z-index: 5;
+}
+
+.ide-tooltip-title {
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.ide-tooltip ul {
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.ide-tooltip li {
+  margin: 0 0 2px;
+}
+
+.ide-pill:hover + .ide-tooltip,
+.ide-tooltip.demo-force-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.ide-tooltip strong { color: #fff; }
+.ide-tooltip .ide-tooltip-foot {
+  margin-top: 8px;
+  color: #9aa0ac;
+  font-style: italic;
+  font-size: 11.5px;
+}
+
+/* Points at the status-bar pill before the pointer gets there, so the eye
+   already knows where to look when the cursor arrives. */
+.ide-arrow {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 4px;
+  width: 46px;
+  height: 46px;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.9);
+  transition: opacity 260ms ease, transform 260ms ease;
+  pointer-events: none;
+}
+
+.ide-arrow.demo-force-visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+/* Extensions-panel mock for the install beat: a search box record.mjs really
+   types the publisher name into, and the one result it turns up. */
+.ide-sidebar-active { color: #cfd4de; }
+
+.ext-panel {
+  flex: 1;
+  padding: 14px 16px;
+  overflow: hidden;
+}
+
+.ext-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #2b2d33;
+  border: 1px solid #3d4250;
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+
+.ext-search-icon { color: #7d828c; font-size: 14px; }
+
+.ext-search input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e4e8ef;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.ext-search input::placeholder { color: #6c717b; }
+
+.ext-results {
+  margin-top: 14px;
+  opacity: 0;
+  transition: opacity 260ms ease;
+}
+
+.ext-results.demo-force-visible { opacity: 1; }
+
+.ext-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #2a2c32;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* Same real icon as the intro/outro cards, at marketplace-listing size. */
+.ext-item-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.ext-item-body { flex: 1; min-width: 0; }
+.ext-item-title { color: #f0f3f8; font-size: 13.5px; font-weight: 600; }
+.ext-item-desc { color: #9aa0ac; font-size: 12px; margin-top: 2px; }
+.ext-item-meta { margin-top: 6px; font-size: 12px; }
+
+.ext-item-publisher {
+  color: #6ea8fe;
+  font-weight: 600;
+  background: rgba(110, 168, 254, 0.14);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.ext-install {
+  background: #1c6fd6;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+
+/* Marks the row record.mjs finds carrying a real .discount-tag badge, so the
+   discount beat has something for the eye (and the cursor) to land on. */
+.demo-row-highlight {
+  outline: 2px solid #6ea8fe;
+  outline-offset: -2px;
+  animation: demo-row-pulse 1100ms ease-in-out infinite;
+}
+
+@keyframes demo-row-pulse {
+  0%, 100% { background-color: rgba(110, 168, 254, 0.1); }
+  50% { background-color: rgba(110, 168, 254, 0.22); }
+}
+
+/* Subtitles. These carry the narration verbatim (chunked by script.mjs's
+   captionChunks), so unlike the old one-line summary they have to wrap —
+   hence a max-width and centered multi-line text rather than `nowrap`. */
+.demo-caption {
+  /* `inset: auto` / `margin: 0` / `overflow: visible` undo the UA stylesheet's
+     popover defaults (inset: 0, margin: auto, overflow: auto), which would
+     otherwise centre this in the viewport instead of pinning it to the bottom. */
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  overflow: visible;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  z-index: 1001;
+  max-width: min(1120px, 82vw);
+  background: rgba(11, 15, 25, 0.94);
+  color: #fff;
+  padding: 13px 28px;
+  border-radius: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 20px;
+  line-height: 1.42;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  text-align: center;
+  text-wrap: balance;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.08);
   opacity: 1;
-  transition: opacity 300ms ease;
-  white-space: nowrap;
+  transition: opacity 220ms ease;
 }

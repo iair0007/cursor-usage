@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cursor Usage Dashboard</title>
-<meta name="description" content="Track your remaining Cursor requests and spend, right inside Cursor. Status bar quota gauge, monthly budget burn-rate, cost dashboard, cache savings, model breakdown, cost simulator.">
+<meta name="description" content="Track your remaining Cursor requests and spend, right inside Cursor. Status bar quota gauge, monthly budget burn-rate, cost dashboard, cache savings, model breakdown, session comparisons, cost simulator.">
 <link rel="icon" href="../resources/icon.png">
 <style>
   :root {
@@ -181,7 +181,7 @@
   <header class="hero">
     <img class="icon" src="../resources/icon.png" alt="Cursor Usage Dashboard icon">
     <h1>Cursor Usage Dashboard</h1>
-    <p class="tagline">See exactly where your Cursor requests and tokens go — right inside Cursor. Request quota, monthly budget burn-rate, cache savings, model breakdown, and a cost simulator. No proxy, no login.</p>
+    <p class="tagline">See exactly where your Cursor requests and tokens go — right inside Cursor. Request quota, monthly budget burn-rate, cache savings, per-session comparisons, and a cost simulator. No proxy, no login.</p>
 
     <div class="badges">
       <img src="https://img.shields.io/open-vsx/v/iair0007/cursor-usage-dashboard?label=Open%20VSX" alt="Open VSX version">
@@ -238,7 +238,14 @@
         <img src="screenshot-analyze.png" alt="Analyze tab">
         <div class="body">
           <h3>Analyze</h3>
-          <p>Rule-based findings — which model dominates your spend, cache efficiency, spike requests — each with a concrete fix.</p>
+          <p>Rule-based findings — which model dominates your spend, cache efficiency, spike requests, measured promotions — each with a concrete fix.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <img src="screenshot-sessions.png" alt="Sessions comparison">
+        <div class="body">
+          <h3>Sessions</h3>
+          <p>Requests grouped by conversation. Pick up to four and compare cost, cache hit rate, and which models each one used.</p>
         </div>
       </div>
       <div class="feature-card">

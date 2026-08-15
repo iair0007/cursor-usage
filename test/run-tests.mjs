@@ -34,7 +34,9 @@ const {
   mergeCompareSelection,
   estimateTokenCost,
   cacheSavingsFor,
+  describeDiscountRun,
   detectDiscounts,
+  discountImpact,
   discountPeriods,
   resolveDiscount,
   manualDiscountFor,
@@ -42,6 +44,7 @@ const {
   modelsMissingDiscountInfo,
   normalizeDiscountEntry,
   detectedDiscountDays,
+  autoRouting,
   displayModel,
   normalize,
   summarize,
@@ -56,6 +59,12 @@ const {
   comparisonWindow,
   modelCostDeltas,
   shiftMonths,
+  sessionTotals,
+  sessionSummary,
+  sessionMetrics,
+  filterSessions,
+  sortSessions,
+  UNATTRIBUTED_SESSION,
 } = await loadTs('src/webview/logic.js', 'logic.mjs');
 
 let passed = 0;
@@ -247,6 +256,140 @@ test('estimateTokenCost combines all rates', () => {
   const cost = estimateTokenCost(rates, { input: 1_000_000, output: 100_000, cacheRead: 2_000_000, cacheWrite: 0 });
   assert.ok(Math.abs(cost - (3.0 + 1.5 + 0.6)) < 1e-9);
 });
+console.log('discountImpact (what the promotion did to the bill)');
+function impactEvent(i, model, list, billed, day = '2026-08-13') {
+  return {
+    timestampMs: new Date(`${day}T1${i % 9}:00:00`).getTime(),
+    modelRaw: model,
+    listTokenCost: list,
+    billedTokenCost: billed,
+    cost: billed,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  };
+}
+test('it measures the money the promotion actually took off', () => {
+  const events = [
+    impactEvent(0, 'cursor-grok-4.6-high', 0.86, 0.39),
+    impactEvent(1, 'cursor-grok-4.6-high', 0.52, 0.24),
+  ];
+  const detected = detectDiscounts(events, pricing);
+  const impact = discountImpact(events, detected);
+  assert.equal(impact.requests, 2);
+  assert.ok(Math.abs(impact.savedDollars - 0.75) < 1e-9, '(0.86-0.39) + (0.52-0.24)');
+  assert.equal(impact.models[0].label, 'cursor-grok-4.6-high');
+  assert.deepEqual(impact.days, ['2026-08-13']);
+});
+test('it counts what ran on other models the same days', () => {
+  const events = [
+    impactEvent(0, 'cursor-grok-4.6-high', 0.86, 0.39),
+    impactEvent(1, 'cursor-grok-4.6-high', 0.52, 0.24),
+    impactEvent(2, 'claude-sonnet-5', 0.5, 0.5),
+    // A different day entirely — not an alternative to that day's promotion.
+    impactEvent(3, 'claude-sonnet-5', 0.9, 0.9, '2026-08-20'),
+  ];
+  const impact = discountImpact(events, detectDiscounts(events, pricing));
+  assert.equal(impact.otherRequests, 1, 'only the same-day one');
+  assert.ok(Math.abs(impact.otherDollars - 0.5) < 1e-9);
+});
+test('no promotion means nothing to report, not a zero-dollar one', () => {
+  const events = [0, 1, 2].map((i) => impactEvent(i, 'cursor-grok-4.6-high', 0.5, 0.5));
+  const impact = discountImpact(events, detectDiscounts(events, pricing));
+  assert.deepEqual(impact.models, []);
+  assert.equal(impact.savedDollars, 0);
+  assert.equal(impact.otherDollars, 0, 'no discounted day, so nothing is an alternative to it');
+});
+test('a discounted request missing either figure still counts, without inventing dollars', () => {
+  const events = [
+    impactEvent(0, 'cursor-grok-4.6-high', 0.86, 0.39),
+    { ...impactEvent(1, 'cursor-grok-4.6-high', 0.52, 0.24), listTokenCost: null, billedTokenCost: null },
+  ];
+  // The second is measured off the first's model-day, so it is discounted too.
+  const impact = discountImpact(events, detectDiscounts([events[0]], pricing));
+  assert.equal(impact.requests, 2);
+  assert.ok(Math.abs(impact.savedDollars - 0.47) < 1e-9, 'only the request that carried both figures');
+});
+
+console.log('displayModel and Cursor Router routing');
+test('a routed row names the model and the mode it was billed under', () => {
+  // Balance and Intelligence bill at the routed model's rate, so which model
+  // it was is the difference between two very different prices.
+  assert.equal(displayModel('Cursor Grok 4.5 (Auto Balanced)'), 'Auto Balance → Grok 4.5');
+  assert.equal(displayModel('Cursor Claude Opus 5 (Auto Intelligence)'), 'Auto Intelligence → Claude Opus 5');
+  assert.equal(displayModel('Cursor Grok 4.5 (Auto Cost)'), 'Auto Cost → Grok 4.5');
+});
+test('bare Auto still reads as Auto — Cursor named nothing to show', () => {
+  assert.equal(displayModel('auto'), 'Auto');
+  assert.equal(displayModel('default'), 'Auto');
+  assert.equal(displayModel(''), 'Auto');
+});
+test('a plain model name is left exactly as Cursor billed it', () => {
+  assert.equal(displayModel('cursor-grok-4.6-high'), 'cursor-grok-4.6-high');
+  assert.equal(displayModel('claude-sonnet-5-thinking-medium'), 'claude-sonnet-5-thinking-medium');
+});
+test('autoRouting reports the parts, and nothing for a non-routed name', () => {
+  assert.deepEqual(autoRouting('Cursor Grok 4.5 (Auto Balanced)'), { model: 'Grok 4.5', mode: 'Balance' });
+  assert.equal(autoRouting('cursor-grok-4.6-high'), null);
+  assert.equal(autoRouting('auto'), null);
+});
+
+console.log('parsePricing: Auto published as a table row');
+// cursor.com moved Auto's bundled rate out of a "### Auto pricing" label list
+// and into an ordinary pricing table under "Auto modes".
+const AUTO_ROW_DOC = `
+## Models and pricing
+
+### Auto modes
+
+| Name | Input | Cache Write | Cache Read | Output |
+| :--- | :--- | :--- | :--- | :--- |
+| ![icon](https://cursor.com/i.svg) Auto Cost | $1.25 | $1.25 | $0.25 | $6 |
+
+### Model pricing
+
+| Model | Context | Input | Cache write | Cache read | Output |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Grok 4.5 | 200k | $2.00 | - | $0.50 | $6.00 |
+`;
+const autoRowPricing = parsePricing(AUTO_ROW_DOC);
+test('the Auto Cost row becomes the Auto rate', () => {
+  // Left unread, plain "auto"/"default" requests had no rates at all — and so
+  // no cache-savings figure, on the mode most requests actually run in.
+  assert.ok(!autoRowPricing.fallback, 'parsed from the page, not the bundled catalog');
+  assert.deepEqual(autoRowPricing.auto, { input: 1.25, cacheWrite: 1.25, cacheRead: 0.25, output: 6 });
+  assert.equal(matchPricing('default', autoRowPricing).label, 'Auto');
+  assert.equal(matchPricing('auto', autoRowPricing).cacheWritePublished, true);
+});
+test('the router modes still split correctly on the new page shape', () => {
+  assert.equal(matchPricing('Cursor Grok 4.5 (Auto Balanced)', autoRowPricing).label, 'Grok 4.5');
+  assert.equal(matchPricing('Cursor Grok 4.5 (Auto Cost)', autoRowPricing).label, 'Auto');
+});
+test('the older "### Auto pricing" list is still understood', () => {
+  assert.equal(pricing.auto.input, 1.25);
+  assert.equal(matchPricing('default', pricing).label, 'Auto');
+});
+
+console.log('matchPricing and Cursor Router modes');
+test('a Balance/Intelligence row prices at the model the router picked', () => {
+  // Those modes bill at the routed model's own rate — which is why Cursor
+  // names it in the row. Pricing it at Auto's bundled rate understates a
+  // routed Grok request by roughly half.
+  const r = matchPricing('Cursor Grok 4.5 (Auto Balanced)', pricing);
+  assert.equal(r.label, 'Grok 4.5');
+});
+test('a Cost-mode row keeps Auto\'s bundled rate even though a model is named', () => {
+  // Cost mode is the one that keeps bundled Auto pricing whatever it routes to.
+  const r = matchPricing('Cursor Grok 4.5 (Auto Cost)', pricing);
+  assert.equal(r.label, 'Auto');
+});
+test('bare Auto and default still price as Auto', () => {
+  assert.equal(matchPricing('auto', pricing).label, 'Auto');
+  assert.equal(matchPricing('default', pricing).label, 'Auto');
+});
+test('a Fast variant reaches the Fast row despite an interleaved word', () => {
+  // "grok-4-6-fast" is not a substring of "cursor-grok-4-6-high-fast".
+  assert.equal(matchPricing('cursor-grok-4.6-high-fast', pricing).label, 'Grok 4.6 (Fast)');
+  assert.equal(matchPricing('cursor-grok-4.6-high', pricing).label, 'Grok 4.6');
+});
 test('cacheSavingsFor uses input minus cache-read rate', () => {
   const rates = matchPricing('claude-4.5-sonnet', pricing);
   const savings = cacheSavingsFor({ cacheRead: 1_000_000 }, rates);
@@ -319,11 +462,179 @@ test('Auto is skipped — its billed value belongs to a model Cursor does not na
   const autos = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelRaw: 'auto' }));
   assert.deepEqual(detectDiscounts(autos, pricing).discounts, {});
 });
-test('an unpriced cache write is skipped rather than guessed at', () => {
-  // Grok has no published cache-write rate, so estimateTokenCost would fall
-  // back to the input rate and invent a gap.
-  const withWrites = [0, 1, 2, 3].map((i) => grokEvent(i, 0.5, '2026-08-13', { ...GROK_TOKENS, cacheWrite: 40_000 }));
-  assert.deepEqual(detectDiscounts(withWrites, pricing).discounts, {});
+// Grok publishes no cache-write rate, so a request carrying cache writes has
+// two defensible prices: writes at the input rate (what estimateTokenCost
+// substitutes) and writes free. These fixtures name the billed figure outright,
+// since LIST_COST only covers the other tokens.
+//   40k writes → $0.28 with writes substituted, $0.20 with writes free.
+const WRITE_TOKENS = { ...GROK_TOKENS, cacheWrite: 40_000 };
+//   400k writes swamp the rest → $0.82 substituted, $0.02 free.
+const WRITE_HEAVY_TOKENS = { input: 5_000, output: 1_000, cacheRead: 8_000, cacheWrite: 400_000 };
+function grokWriteEvent(i, billed, tokens, day = '2026-08-13') {
+  return { ...grokEvent(i, 1, day, tokens), modelTokenCost: billed };
+}
+
+test('an unpriced cache write is bounded, not skipped — Grok stays detectable', () => {
+  // Half of $0.28. Skipping these outright, as this once did, meant Grok and
+  // Composer could never reach minSamples: their requests always carry writes.
+  const withWrites = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.14, WRITE_TOKENS));
+  const { discounts } = detectDiscounts(withWrites, pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 50);
+});
+test('a free cache write is not mistaken for a promotion', () => {
+  // Billed $0.20: list price if writes are free, a 28.6% "gap" against the
+  // substitution. Pricing writes at zero closes the gap, so this is unprovable.
+  const freeWrites = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.2, WRITE_TOKENS));
+  const { discounts, observed } = detectDiscounts(freeWrites, pricing);
+  assert.deepEqual(discounts, {});
+  assert.equal(observed.size, 0, 'inconclusive is "unknown", not "no discount"');
+});
+test('the reported figure prices writes at the documented rate, not the floor', () => {
+  // $0.10 is half the free-writes price and 64% off the substituted one, so no
+  // cache-write rate explains it away and the floor lets it through. The number
+  // shown is the substituted one — the floor decides whether to claim a
+  // discount at all, it does not water down the discount that is claimed.
+  const events = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.1, WRITE_TOKENS));
+  assert.equal(detectDiscounts(events, pricing).discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 65);
+});
+test('writes too dominant to bound leave the day unknown', () => {
+  // Half of $0.82 — but with writes free the day was billed 20x list, so the
+  // gap could be the substitution alone. The Simulator should still offer to
+  // record this promotion by hand.
+  const events = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.41, WRITE_HEAVY_TOKENS));
+  const { discounts, observed } = detectDiscounts(events, pricing);
+  assert.deepEqual(discounts, {});
+  assert.equal(observed.size, 0);
+});
+test('an unpublished write premium reads as no discount, never as a fake one', () => {
+  // Writes billed at 1.25x input (OpenAI's post-GPT-5.6 shape) without a
+  // published column: $0.30 against a $0.28 estimate, so the error is a missed
+  // promotion rather than an invented one.
+  const events = [0, 1, 2, 3].map((i) => grokWriteEvent(i, 0.3, WRITE_TOKENS));
+  const { discounts, observed } = detectDiscounts(events, pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high|2026-08-13'), 'billed above list settles the question');
+});
+test('a published cache-write rate is used as-is — the floor only guards substitutions', () => {
+  const rates = matchPricing('claude-4.5-sonnet', pricing);
+  assert.ok(rates.cacheWritePublished, 'fixture publishes a cache-write rate for Sonnet');
+  const tokens = { input: 50_000, output: 10_000, cacheRead: 80_000, cacheWrite: 400_000 };
+  const list = estimateTokenCost(rates, tokens);
+  const events = [0, 1, 2, 3].map((i) => ({
+    ...grokWriteEvent(i, list * 0.5, tokens),
+    modelRaw: 'claude-4.5-sonnet',
+  }));
+  const { discounts } = detectDiscounts(events, pricing);
+  assert.equal(discounts['claude-4-5-sonnet']['2026-08-13'].pct, 50, 'writes dominate yet the rate is known');
+});
+// Cursor reports both figures for a request, so the discount is arithmetic
+// rather than inference. `list` is the value at list price, `billed` what was
+// actually taken.
+function exactEvent(i, list, billed, day = '2026-08-13', model = 'cursor-grok-4.6-high') {
+  return {
+    id: `x${i}`,
+    timestampMs: new Date(`${day}T1${i % 9}:00:00`).getTime(),
+    modelRaw: model,
+    listTokenCost: list,
+    billedTokenCost: billed,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  };
+}
+test('one measured request is enough — there is no estimate to average out', () => {
+  const { discounts, diagnostics } = detectDiscounts([exactEvent(0, 0.86, 0.39)], pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 55);
+  assert.equal(diagnostics.days[0].samples, 1);
+});
+test('a measured figure is reported as measured, not snapped to a round sale', () => {
+  // 53.5% is what this account paid against list. Snapping it to "55% off"
+  // asserts a promotion nobody announced, and 50% was the headline that week —
+  // so the nudge moved it away from the truth in both directions at once.
+  const { discounts } = detectDiscounts([exactEvent(0, 0.86, 0.4)], pricing);
+  const d = discounts['cursor-grok-4-6-high']['2026-08-13'];
+  assert.equal(d.pct, 53, 'the measurement, rounded to a whole point');
+  assert.equal(d.measured, true);
+});
+test('an inferred figure is still snapped — there the round number is the point', () => {
+  const inferred = [0, 1, 2, 3].map((i) => grokEvent(i, 0.512));
+  const d = detectDiscounts(inferred, pricing).discounts['cursor-grok-4-6-high']['2026-08-13'];
+  assert.equal(d.pct, 50, '48.8% off a noisy estimate is a 50% sale');
+  assert.equal(d.measured, false);
+});
+test('a request small enough for cent-rounding to matter still needs corroboration', () => {
+  // At 3c, half a cent is 17% — far more than the gap being claimed.
+  const { discounts } = detectDiscounts([exactEvent(0, 0.03, 0.014)], pricing);
+  assert.deepEqual(discounts, {}, 'one tiny request proves nothing');
+  const many = [0, 1, 2].map((i) => exactEvent(i, 0.03, 0.014));
+  assert.equal(many.length, 3);
+  assert.ok(detectDiscounts(many, pricing).discounts['cursor-grok-4-6-high'], 'three of them do');
+});
+test('paying exactly the list value is no discount', () => {
+  const { discounts, observed } = detectDiscounts([exactEvent(0, 0.86, 0.86)], pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high|2026-08-13'), 'measured, and the answer was no');
+});
+test('Auto is measurable this way — no rate row is needed', () => {
+  // The rate table can never price Auto, since Cursor does not say what it
+  // routed to. Its own two figures do not care.
+  const { discounts } = detectDiscounts([exactEvent(0, 0.5, 0.25, '2026-08-13', 'auto')], pricing);
+  assert.equal(discounts.auto['2026-08-13'].pct, 50);
+});
+test('the measured figure wins over anything the rate table would have said', () => {
+  // Rates here would price these tokens at nothing like $0.86, and it does not
+  // matter: the comparison never consults them.
+  const e = { ...exactEvent(0, 0.86, 0.39), inputTokens: 999_999, outputTokens: 999_999 };
+  assert.equal(detectDiscounts([e], pricing).discounts['cursor-grok-4-6-high']['2026-08-13'].pct, 55);
+});
+test('a promotion found on a billed variant reaches the catalog row', () => {
+  // Detection keys on what Cursor billed ("cursor-grok-4.6-high"); the
+  // Simulator asks by catalog row ("Grok 4.6"). Same model, one published
+  // rate — so the discount showed in the chips and on the request's own row,
+  // and was missing from the estimate for the very model it was found on.
+  const detected = detectDiscounts([exactEvent(0, 0.86, 0.39)], pricing);
+  assert.equal(detected.discounts['cursor-grok-4-6-high']['2026-08-13'].row, 'grok-4-6');
+  const ctx = { detected, manual: [] };
+  assert.equal(resolveDiscount('grok-4-6', '2026-08-13', ctx).pct, 55);
+  assert.equal(resolveDiscount('Grok 4.6', '2026-08-13', ctx).pct, 55);
+  assert.deepEqual(detectedDiscountDays(detected, 'grok-4-6'), ['2026-08-13']);
+});
+test('a variant on a different published row does not borrow the discount', () => {
+  // Fast is its own row at its own rate; a promotion on the standard model is
+  // not evidence of one on Fast.
+  const detected = detectDiscounts([exactEvent(0, 0.86, 0.39)], pricing);
+  const ctx = { detected, manual: [] };
+  assert.equal(resolveDiscount('grok-4-6-fast', '2026-08-13', ctx), null);
+  assert.deepEqual(detectedDiscountDays(detected, 'grok-4-6-fast'), []);
+});
+test('diagnostics name the reason a request could not be measured', () => {
+  const noValue = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelTokenCost: null }));
+  const { diagnostics } = detectDiscounts(noValue, pricing);
+  assert.equal(diagnostics.considered, 0);
+  assert.deepEqual(diagnostics.skipped, { 'no per-request token value (cursor-grok-4-6-high)': 4 });
+  const text = describeDiscountRun(detectDiscounts(noValue, pricing), noValue.length);
+  assert.match(text, /0 measurable/);
+  assert.match(text, /no per-request token value/);
+});
+test('diagnostics record the verdict for a day that was measured', () => {
+  const { diagnostics } = detectDiscounts(halfPriceDay, pricing);
+  assert.equal(diagnostics.considered, 4);
+  assert.deepEqual(diagnostics.days, [{
+    model: 'cursor-grok-4-6-high', day: '2026-08-13', samples: 4, pct: 50,
+    verdict: 'discount 50% (inferred from the rate table, snapped to the nearest round sale)',
+  }]);
+});
+test('diagnostics separate "no discount" from "too few to tell"', () => {
+  const listPrice = detectDiscounts([0, 1, 2, 3].map((i) => grokEvent(i, 1)), pricing);
+  assert.match(listPrice.diagnostics.days[0].verdict, /no discount/);
+  const tooFew = detectDiscounts([grokEvent(0, 0.5)], pricing);
+  assert.match(tooFew.diagnostics.days[0].verdict, /too few samples/);
+});
+test('the log line carries no ids, emails or prompt text — only models and counts', () => {
+  const withIds = halfPriceDay.map((e, i) => ({
+    ...e, conversationId: `conv_secret_${i}`, email: 'someone@example.com',
+  }));
+  const text = describeDiscountRun(detectDiscounts(withIds, pricing), withIds.length);
+  assert.ok(!text.includes('conv_secret'), 'no conversation ids');
+  assert.ok(!text.includes('@'), 'no email addresses');
 });
 test('discounts are tracked per day, so a promotion that ends is not backdated', () => {
   const events = [
@@ -476,6 +787,26 @@ test('token-based event uses chargedCents as primary cost', () => {
   assert.equal(e.requestCharge, null);
   assert.equal(e.totalTokens, 51200);
   assert.equal(e.timestampMs, 1750000000000);
+});
+test('list and billed token value are kept apart — their gap is the discount', () => {
+  // totalCents is what Cursor says the tokens are worth at list; chargedCents
+  // is what it took. Conflating them is what made a live promotion invisible:
+  // comparing the list figure against the list rate table always reads ~0%.
+  const e = normalize(tokenBasedRaw, pricing);
+  assert.equal(e.listTokenCost, 1.0, 'totalCents 100');
+  assert.equal(e.billedTokenCost, 1.2, 'chargedCents 123 less the 3c token fee');
+  assert.equal(e.modelTokenCost, 1.2, 'prefers what was actually charged');
+});
+test('billed token value is null where the charge is not about tokens', () => {
+  // A flat per-request fee has nothing to do with the tokens, so comparing it
+  // against a rate table would read as a near-total discount on every request.
+  assert.equal(normalize(usageBasedRaw, pricing).billedTokenCost, null);
+});
+test('list token value is null when Cursor omits it', () => {
+  const { totalCents, ...noTotal } = tokenBasedRaw.tokenUsage;
+  const e = normalize({ ...tokenBasedRaw, tokenUsage: noTotal }, pricing);
+  assert.equal(e.listTokenCost, null);
+  assert.equal(e.modelTokenCost, 1.2, 'still measurable against the rate table');
 });
 test('usage-based event separates flat fee from token cost', () => {
   const e = normalize(usageBasedRaw, pricing);
@@ -856,6 +1187,31 @@ test('the intro is shown once, not on every visit to the Simulator', () => {
 const authCore = await loadTs('src/authCore.ts', 'authCore.mjs');
 const api = await loadTs('src/api.ts', 'api.mjs');
 
+console.log('api.pickConversationId / toRawEvent');
+test('the conversation id is read under each spelling the endpoints use', () => {
+  assert.equal(api.pickConversationId({ conversationId: 'c1' }), 'c1');
+  assert.equal(api.pickConversationId({ conversation_id: 'c2' }), 'c2');
+  assert.equal(api.pickConversationId({ composerId: 'c3' }), 'c3');
+  assert.equal(api.pickConversationId({ threadId: 'c4' }), 'c4');
+  assert.equal(api.pickConversationId({ chatId: 'c5' }), 'c5');
+  assert.equal(api.pickConversationId({ conversationId: 42 }), '42');
+});
+test('an absent or blank conversation id is undefined, not a session key', () => {
+  // A blank id would otherwise gather every unattributed request into one
+  // conversation that does not exist.
+  assert.equal(api.pickConversationId({}), undefined);
+  assert.equal(api.pickConversationId({ conversationId: null }), undefined);
+  assert.equal(api.pickConversationId({ conversationId: '' }), undefined);
+  assert.equal(api.pickConversationId({ conversationId: '   ' }), undefined);
+  assert.equal(api.pickConversationId(undefined), undefined);
+});
+test('toRawEvent carries the conversation id through instead of dropping it', () => {
+  const withId = api.toRawEvent({ id: 'e1', timestamp: 1, model: 'auto', conversationId: 'c1' });
+  assert.equal(withId.conversationId, 'c1');
+  // Absent stays absent, so consumers can tell "no conversation" from "".
+  assert.equal(api.toRawEvent({ id: 'e2', timestamp: 1, model: 'auto' }).conversationId, undefined);
+});
+
 function fakeJwt(payload) {
   const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   return `${b64({ alg: 'none' })}.${b64(payload)}.sig`;
@@ -1076,6 +1432,26 @@ test('an in-window response is passed through untouched', () => {
   const end = Date.UTC(2026, 7, 12, 23, 59, 59, 999);
   const events = [{ id: 'a', timestamp: Date.UTC(2026, 7, 5) }];
   assert.deepEqual(service.eventsWithinRange(events, start, end), events);
+});
+
+console.log('service.describeBillingFieldCoverage (the log that explains a silent detector)');
+const coverageEvents = [
+  { model: 'cursor-grok-4.6-high', chargedCents: 30, isTokenBasedCall: true, tokenUsage: {} },
+  { model: 'cursor-grok-4.6-high', chargedCents: 39, isTokenBasedCall: true, tokenUsage: {} },
+  { model: 'Auto', chargedCents: 8, isTokenBasedCall: true, tokenUsage: { totalCents: 8 } },
+];
+test('it counts the field detection depends on, per model', () => {
+  const text = service.describeBillingFieldCoverage(coverageEvents);
+  assert.match(text, /tokenUsage\.totalCents on 1/);
+  assert.match(text, /cursor-grok-4\.6-high: 2 request\(s\), totalCents on 0/);
+});
+test('it calls out an account where the field is missing everywhere', () => {
+  const none = coverageEvents.map((e) => ({ ...e, tokenUsage: {} }));
+  assert.match(service.describeBillingFieldCoverage(none), /No row carries tokenUsage\.totalCents/);
+  assert.doesNotMatch(service.describeBillingFieldCoverage(coverageEvents), /No row carries/);
+});
+test('it says nothing rather than throwing on an empty range', () => {
+  assert.match(service.describeBillingFieldCoverage([]), /no events/);
 });
 
 test('panel and status bar report the same totals for the same events', () => {
@@ -1626,6 +2002,213 @@ console.log('comparisonWindow / shiftMonths / modelCostDeltas');
   });
 }
 
+console.log('sessionTotals / sessionSummary');
+{
+  const at = (d, h) => Date.UTC(2026, 7, d, h);
+  // Mirrors what the API gives us once conversationId survives toRawEvent:
+  // a couple of real conversations plus rows carrying no id at all.
+  const ev = (conversationId, cost, model, ts, extra = {}) =>
+    ({ conversationId, cost, model, timestampMs: ts, ...extra });
+
+  const events = [
+    ev('conv-a', 1.5, 'claude-4.5-sonnet', at(3, 9)),
+    ev('conv-a', 2.5, 'claude-4.5-sonnet', at(3, 11)),
+    ev('conv-a', 1.0, 'gpt-5.2', at(3, 14)),
+    ev('conv-b', 0.75, 'composer-2.5', at(4, 10)),
+    ev(null, 0.25, 'auto', at(4, 12)),
+    ev('', 0.1, 'auto', at(4, 13)), // blank id is absent, not its own session
+  ];
+
+  test('rolls requests up per conversation, most expensive first', () => {
+    const totals = sessionTotals(events);
+    assert.deepEqual(totals.map((t) => t.sessionId), ['conv-a', 'conv-b', UNATTRIBUTED_SESSION]);
+    assert.equal(totals[0].requests, 3);
+    assert.ok(Math.abs(totals[0].costDollars - 5.0) < 1e-9);
+    assert.equal(totals[0].firstMs, at(3, 9));
+    assert.equal(totals[0].lastMs, at(3, 14));
+  });
+
+  test('a session lists its models, most used first', () => {
+    assert.deepEqual(sessionTotals(events)[0].models, ['claude-4.5-sonnet', 'gpt-5.2']);
+  });
+
+  test('requests with no conversation id are collected, never dropped', () => {
+    const totals = sessionTotals(events);
+    const un = totals.find((t) => t.sessionId === UNATTRIBUTED_SESSION);
+    // Both the null and the blank id land here — a blank would otherwise become
+    // a session of its own, and the totals must still add up to the whole set.
+    assert.equal(un.requests, 2);
+    assert.equal(totals.reduce((n, t) => n + t.requests, 0), events.length);
+    assert.ok(Math.abs(totals.reduce((c, t) => c + t.costDollars, 0) - 6.1) < 1e-9);
+  });
+
+  test('errored rows keep their cost but do not count as requests', () => {
+    const withError = [...events, ev('conv-b', 0.4, 'composer-2.5', at(4, 15), { counted: false })];
+    const b = sessionTotals(withError).find((t) => t.sessionId === 'conv-b');
+    assert.equal(b.requests, 1);
+    assert.ok(Math.abs(b.costDollars - 1.15) < 1e-9);
+  });
+
+  test('sessionSummary reports per-session shape, excluding the unattributed bucket', () => {
+    const s = sessionSummary(sessionTotals(events));
+    assert.equal(s.sessions, 2);
+    assert.equal(s.unattributedRequests, 2);
+    assert.ok(Math.abs(s.costPerSession - (5.75 / 2)) < 1e-9);
+    assert.equal(s.requestsPerSession, 2);
+    assert.equal(s.topSession.sessionId, 'conv-a');
+  });
+
+  test('two periods can be compared on session shape', () => {
+    // The point of the session view: same spend, very different working style.
+    const spread = [
+      ev('s1', 1, 'auto', at(1, 9)), ev('s2', 1, 'auto', at(2, 9)),
+      ev('s3', 1, 'auto', at(3, 9)), ev('s4', 1, 'auto', at(4, 9)),
+    ];
+    const concentrated = [
+      ev('s9', 1, 'auto', at(1, 9)), ev('s9', 1, 'auto', at(1, 10)),
+      ev('s9', 1, 'auto', at(1, 11)), ev('s9', 1, 'auto', at(1, 12)),
+    ];
+    const a = sessionSummary(sessionTotals(spread));
+    const b = sessionSummary(sessionTotals(concentrated));
+    assert.equal(a.sessions, 4);
+    assert.equal(b.sessions, 1);
+    assert.equal(a.costPerSession, 1);
+    assert.equal(b.costPerSession, 4);
+    assert.equal(b.requestsPerSession, 4);
+  });
+
+  test('no events yields an empty summary rather than NaN', () => {
+    const s = sessionSummary(sessionTotals([]));
+    assert.equal(s.sessions, 0);
+    assert.equal(s.costPerSession, null);
+    assert.equal(s.requestsPerSession, null);
+    assert.equal(s.topSession, null);
+  });
+
+  test('a period with only unattributed requests reports no sessions', () => {
+    const s = sessionSummary(sessionTotals([ev(null, 2, 'auto', at(1, 9))]));
+    assert.equal(s.sessions, 0);
+    assert.equal(s.unattributedRequests, 1);
+    assert.equal(s.topSession, null);
+  });
+
+  test('sessionMetrics reports cost, span and pace', () => {
+    const [a] = sessionTotals(events); // conv-a: 3 requests, $5, 09:00 → 14:00
+    const m = sessionMetrics(a);
+    assert.equal(m.requests, 3);
+    assert.ok(Math.abs(m.costPerRequest - 5 / 3) < 1e-9);
+    assert.equal(m.durationMs, 5 * 60 * 60 * 1000);
+    assert.ok(Math.abs(m.requestsPerHour - 3 / 5) < 1e-9);
+    assert.ok(Math.abs(m.costPerHour - 1) < 1e-9);
+  });
+
+  test('a session too short to measure reports no rate', () => {
+    // One request, or a burst inside a minute: dividing by that span invents a
+    // "900 requests/hour" pace that describes the arithmetic, not the work.
+    const single = sessionTotals([ev('solo', 0.5, 'auto', at(1, 9))]);
+    const m = sessionMetrics(single[0]);
+    assert.equal(m.durationMs, 0);
+    assert.equal(m.requestsPerHour, null);
+    assert.equal(m.costPerHour, null);
+    // The per-request figure is still well defined and still worth showing.
+    assert.equal(m.costPerRequest, 0.5);
+  });
+
+  test('a session whose requests all errored has no per-request cost', () => {
+    const errored = sessionTotals([
+      ev('bad', 0.3, 'auto', at(1, 9), { counted: false }),
+      ev('bad', 0.2, 'auto', at(1, 11), { counted: false }),
+    ]);
+    const m = sessionMetrics(errored[0]);
+    assert.equal(m.requests, 0);
+    assert.equal(m.costPerRequest, null); // not 0, and not Infinity
+    assert.ok(Math.abs(m.costDollars - 0.5) < 1e-9);
+  });
+
+  test('token, savings and error figures roll up per session', () => {
+    const tok = (conversationId, extra) =>
+      ({ conversationId, cost: 1, model: 'auto', timestampMs: at(1, 9), ...extra });
+    const [row] = sessionTotals([
+      tok('t', { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 8000, cacheWriteTokens: 800, cacheSavings: 0.4 }),
+      tok('t', { inputTokens: 500, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, cacheSavings: null, cost: 3 }),
+      tok('t', { inputTokens: 10, outputTokens: 0, cost: 0.5, counted: false }),
+    ]);
+    assert.equal(row.inputTokens, 1510);
+    assert.equal(row.outputTokens, 300);
+    assert.equal(row.cacheReadTokens, 8000);
+    assert.ok(Math.abs(row.savingsDollars - 0.4) < 1e-9); // a null saving is 0, not NaN
+    assert.equal(row.erroredRequests, 1);
+    assert.equal(row.requests, 2);
+    // The dearest request is the one to open, and an errored row can be it.
+    assert.equal(row.maxCostDollars, 3);
+  });
+
+  test('cache hit rate is null when no tokens were reported, not 0%', () => {
+    const withTokens = sessionTotals([
+      { conversationId: 'c', cost: 1, timestampMs: at(1, 9), inputTokens: 1000, cacheReadTokens: 3000 },
+    ]);
+    assert.equal(sessionMetrics(withTokens[0]).cacheHitRate, 75);
+
+    // An account whose API reports no token counts has an unknown hit rate;
+    // "0%" would read as a session that cached nothing at all.
+    const noTokens = sessionTotals([{ conversationId: 'c', cost: 1, timestampMs: at(1, 9) }]);
+    assert.equal(sessionMetrics(noTokens[0]).cacheHitRate, null);
+    assert.equal(sessionMetrics(noTokens[0]).totalTokens, 0);
+  });
+
+  test('sortSessions orders by each column, both ways', () => {
+    const totals = sessionTotals(events); // conv-a $5.00/3req, conv-b $0.75/1req
+    const ids = (key, dir) => sortSessions(totals, key, dir).map((t) => t.sessionId);
+    assert.deepEqual(ids('cost', 'desc'), ['conv-a', 'conv-b', UNATTRIBUTED_SESSION]);
+    assert.deepEqual(ids('cost', 'asc'), [UNATTRIBUTED_SESSION, 'conv-b', 'conv-a']);
+    assert.deepEqual(ids('requests', 'desc')[0], 'conv-a');
+    // conv-a ran on the 3rd, conv-b and the unattributed rows on the 4th.
+    assert.equal(ids('started', 'asc')[0], 'conv-a');
+    assert.equal(ids('duration', 'desc')[0], 'conv-a');
+    assert.equal(sortSessions(totals, 'cost', 'desc').length, totals.length);
+  });
+
+  test('sorting by name uses the name where there is one, the id where there is not', () => {
+    // The list never shows the unattributed bucket, so neither does the sort.
+    const totals = sessionTotals(events).filter((t) => t.sessionId !== UNATTRIBUTED_SESSION);
+    const named = { 'conv-b': 'Aardvark refactor' };
+    const byName = sortSessions(totals, 'name', 'asc', (id) => named[id]).map((t) => t.sessionId);
+    // "Aardvark…" sorts ahead of "conv-a" — the named row is ordered by its
+    // name, not herded to one end of the list.
+    assert.deepEqual(byName, ['conv-b', 'conv-a']);
+    // And reversing it is a straight reversal, not "unnamed last" again.
+    assert.deepEqual(
+      sortSessions(totals, 'name', 'desc', (id) => named[id]).map((t) => t.sessionId),
+      ['conv-a', 'conv-b'],
+    );
+  });
+
+  test('sortSessions leaves the input untouched and ties break stably', () => {
+    const totals = sessionTotals(events);
+    const before = totals.map((t) => t.sessionId);
+    sortSessions(totals, 'name', 'asc');
+    assert.deepEqual(totals.map((t) => t.sessionId), before);
+
+    // Same request count, different cost: the cost tie-break decides, so the
+    // order doesn't shuffle between renders.
+    const tied = sessionTotals([
+      ev('cheap', 1, 'auto', at(1, 9)),
+      ev('dear', 5, 'auto', at(1, 9)),
+    ]);
+    assert.deepEqual(sortSessions(tied, 'requests', 'desc').map((t) => t.sessionId), ['dear', 'cheap']);
+    assert.deepEqual(sortSessions(tied, 'requests', 'asc').map((t) => t.sessionId), ['dear', 'cheap']);
+  });
+
+  test('filterSessions matches on id and on model', () => {
+    const totals = sessionTotals(events);
+    assert.deepEqual(filterSessions(totals, 'conv-b').map((t) => t.sessionId), ['conv-b']);
+    // Nobody types a uuid from memory, so the models are searchable too.
+    assert.deepEqual(filterSessions(totals, 'GPT-5').map((t) => t.sessionId), ['conv-a']);
+    assert.equal(filterSessions(totals, '   ').length, totals.length);
+    assert.equal(filterSessions(totals, 'nothing-matches').length, 0);
+  });
+}
+
 console.log('projectExhaustionDate (shared usageLogic via logic.js)');
 const DAY = 24 * 60 * 60 * 1000;
 for (const fn of [projectExhaustionDate]) {
@@ -1695,6 +2278,71 @@ if (sqliteAvailable) {
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+console.log('conversationTitles');
+{
+  const titles = await loadTs('src/shared/conversationTitles.ts', 'conversationTitles.mjs');
+
+  test('reads names out of the composer index', () => {
+    const map = titles.parseTitleIndex(new Map([
+      ['composer.composerData', JSON.stringify({
+        allComposers: [
+          { composerId: 'c1', name: 'Fix the budget gauge' },
+          { composerId: 'c2', name: '  Refactor  the\tstatus bar  ' },
+          { composerId: 'c3' }, // unnamed conversations are skipped, not blanked
+          { name: 'no id here' },
+        ],
+      })],
+    ]));
+    assert.equal(map.get('c1'), 'Fix the budget gauge');
+    // Whitespace is collapsed: a tab or newline in a name would break both the
+    // table layout and the line-oriented sqlite output it arrived through.
+    assert.equal(map.get('c2'), 'Refactor the status bar');
+    assert.equal(map.has('c3'), false);
+    assert.equal(map.size, 2);
+  });
+
+  test('reads names out of the older chat-tab index', () => {
+    const map = titles.parseTitleIndex(new Map([
+      ['workbench.panel.aichat.view.aichat.chatdata', JSON.stringify({
+        tabs: [{ tabId: 't1', chatTitle: 'Why is Auto so expensive' }],
+      })],
+    ]));
+    assert.equal(map.get('t1'), 'Why is Auto so expensive');
+  });
+
+  test('an unparseable or unexpected row yields no names rather than throwing', () => {
+    // These shapes are undocumented and change between Cursor versions, so the
+    // failure mode has to be "sessions keep their ids", never a broken tab.
+    assert.equal(titles.parseTitleIndex(new Map([['composer.composerData', 'not json']])).size, 0);
+    assert.equal(titles.parseTitleIndex(new Map([['composer.composerData', '{"allComposers":"nope"}']])).size, 0);
+    assert.equal(titles.parseTitleIndex(new Map([['composer.composerData', '']])).size, 0);
+    assert.equal(titles.parseTitleIndex([]).size, 0);
+  });
+
+  test('a name longer than the cap is truncated', () => {
+    const long = 'x'.repeat(500);
+    const map = titles.parseTitleIndex(new Map([
+      ['composer.composerData', JSON.stringify({ allComposers: [{ composerId: 'c', name: long }] })],
+    ]));
+    assert.equal(map.get('c').length, titles.MAX_TITLE_LENGTH);
+    assert.ok(map.get('c').endsWith('…'));
+  });
+
+  test('per-conversation rows are keyed back to their id', () => {
+    const map = titles.parseComposerNames([
+      { key: 'composerData:abc-123', name: 'Session comparison POC' },
+      { key: 'composerData:def', name: null }, // json_extract found no name
+      { key: 'somethingElse:xyz', name: 'not a conversation row' },
+    ]);
+    assert.equal(map.get('abc-123'), 'Session comparison POC');
+    assert.equal(map.size, 1);
+  });
+
+  test('composerRowKey builds the key the rows are stored under', () => {
+    assert.equal(titles.composerRowKey('abc'), 'composerData:abc');
+  });
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

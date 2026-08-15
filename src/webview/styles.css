@@ -645,7 +645,24 @@ tfoot td {
 /* Each column names the window it covers: two periods are on screen at once,
    so a number that doesn't say which one it belongs to is worse than none. */
 .compare-col-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-.compare-col-range { display: block; color: var(--fg); font-size: 13px; font-weight: 600; }
+/* A name or an id, so it keeps its own case — the global uppercase `th` styling
+   would print a conversation id that was never issued, and shout a title the
+   user wrote in ordinary prose. */
+.compare-col-range {
+  display: block;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+/* Only ids get the monospace treatment that makes their characters
+   distinguishable; a sentence is far more readable in the UI font. */
+.compare-col-range.is-id {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+}
 .compare-col-days { display: block; font-size: 11px; font-weight: 400; }
 /* Row separators span the whole row. The global rules put a bottom border on
    `td` but not on a row-header `th`, which draws a rule that starts at the
@@ -690,12 +707,269 @@ tfoot td {
 .delta-up { color: var(--amber); }
 .delta-down { color: var(--green-strong); }
 .delta-flat { color: var(--muted); font-weight: 400; }
+/* Two sessions have no better and worse direction — see deltaCell. */
+.delta-neutral { color: var(--fg); }
 
 @media (max-width: 720px) {
   .compare-head { flex-direction: column; }
   .compare-table { font-size: 12px; }
   .compare-table th, .compare-table td { padding: 6px 6px; }
 }
+
+/* --- Sessions ------------------------------------------------------------ */
+
+.sessions-search input {
+  min-width: 200px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--vscode-input-background, var(--panel));
+  color: var(--vscode-input-foreground, var(--fg));
+  font: inherit;
+  font-size: 12px;
+}
+.sessions-hint { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
+
+/* --- Selection tray ------------------------------------------------------ */
+
+/* Pinned to the viewport, not the panel: a row can be ticked anywhere down a
+   long list, and the feedback has to be somewhere it will actually be seen. */
+.sessions-tray {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--vscode-editorWidget-background, var(--panel));
+  box-shadow: 0 -4px 16px rgb(0 0 0 / 28%);
+}
+.tray-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tray-actions { display: flex; align-items: center; gap: 8px; }
+.tray-count { color: var(--muted); font-size: 12px; }
+.tray-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  padding: 4px 6px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+}
+.tray-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tray-chip-name.is-id { font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; }
+.tray-chip-cost { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tray-chip-drop {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tray-chip-drop:hover { color: var(--fg); }
+
+/* Nothing should end up hidden behind the tray. */
+.sessions-tray:not(.hidden) ~ * { margin-bottom: 0; }
+#analyzeSessions:has(.sessions-tray:not(.hidden)) { padding-bottom: 64px; }
+
+/* --- Pagination ---------------------------------------------------------- */
+
+.sessions-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.pager-nav { display: flex; align-items: center; gap: 8px; }
+.pager-size { display: flex; align-items: center; gap: 6px; }
+.pager-size select {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--vscode-input-background, var(--panel));
+  color: var(--vscode-input-foreground, var(--fg));
+  font: inherit;
+}
+.pager-count { font-variant-numeric: tabular-nums; }
+
+/* --- Comparison dialog --------------------------------------------------- */
+
+.sessions-dialog {
+  width: min(1280px, 94vw);
+  max-height: 86vh;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--vscode-editorWidget-background, var(--panel));
+  color: var(--fg);
+}
+.sessions-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.sessions-dialog-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.sessions-dialog-head h3 { margin: 0; }
+.sessions-dialog-controls { display: flex; align-items: center; gap: 12px; }
+.sessions-diff-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.sessions-dialog-body { padding: 6px 16px 18px; }
+/* The sole scroll container, in both directions. It used to be split across
+   this element and .sessions-dialog-body — but overflow-x and overflow-y
+   can't disagree on visible/not: setting one to auto silently promotes the
+   other from visible to auto too (that's the spec, not a bug), so the inner
+   wrapper became a second vertical scroller that happened to never actually
+   scroll (its content always matched its own height). A sticky header's
+   `top: 0` resolves against the *nearest* scroll container, so it locked onto
+   that inert one and never stuck to anything. One scroller removes the
+   ambiguity.
+*/
+.sessions-dialog-scroll { overflow: auto; max-height: calc(86vh - 84px); }
+/* Both tables are wide, and a long comparison runs past a screen's height —
+   the header staying in view is what keeps a figure three rows down legible
+   as "session B's cache hit rate" rather than a bare percentage. */
+.sessions-compare-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--vscode-editorWidget-background, var(--panel));
+}
+/* The row labels are what every figure is read against, so they stay put while
+   a wide comparison scrolls sideways. */
+.sessions-compare-table th[scope="row"] {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--vscode-editorWidget-background, var(--panel));
+}
+/* The one cell that is both this column's header and this row's label sits
+   above both sticky axes, or the header row scrolling past horizontally would
+   show through the corner as the table pans sideways. */
+.sessions-compare-table thead th:first-child {
+  left: 0;
+  z-index: 3;
+}
+/* Every table in the dialog shares this width for its row-label column, so a
+   metric row in the top table and a model row in the one below it line up —
+   two tables of different content would otherwise auto-size their columns
+   independently and drift out of register with each other. */
+.sessions-compare-table th:first-child { width: 180px; }
+.sessions-compare-table { table-layout: fixed; }
+.sessions-compare-table td { min-width: 96px; }
+/* Four named columns have to fit without the last one falling off the edge, so
+   a long conversation name is clipped here rather than setting the width. The
+   full name is on the row in the list, and in the title attribute. */
+.sessions-compare-table thead .compare-col-range {
+  display: block;
+  max-width: 220px;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.compare-col-base { border-bottom-color: var(--accent); }
+.compare-base-btn {
+  display: block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.compare-base-btn:hover { color: var(--fg); border-color: var(--accent); }
+.compare-base-btn.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+
+/* With more than two columns there is no single difference to report, so the
+   comparison is carried by the extremes of each row instead. */
+.cell-good { color: var(--green-strong); font-weight: 600; }
+.cell-bad { color: var(--amber); font-weight: 600; }
+.cell-absent { color: var(--muted); opacity: 0.6; }
+.sessions-table { margin-top: 18px; }
+/* The ▲/▼ indicator comes from the global th.sorted-* rules, so a sorted
+   sessions column looks exactly like a sorted request-log column. */
+.sessions-table th.session-sort { cursor: pointer; }
+.sessions-table th.session-sort:hover { color: var(--fg); }
+/* A real button so the header is reachable and operable from the keyboard;
+   everything visible about it comes from the th it sits in. */
+.session-sort-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.session-sort-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--accent));
+  outline-offset: 2px;
+}
+/* The pick column is a control, not a figure, so it doesn't get the tabular
+   right-alignment the rest of the table uses. */
+.sessions-table .session-pick {
+  width: 1%;
+  white-space: nowrap;
+  text-align: left;
+}
+.sessions-table tbody tr { cursor: pointer; }
+.sessions-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.session-row-picked { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Which of the two slots a picked row holds, so the A and B columns above can
+   be traced back to rows that may be far apart in a long list. */
+.session-slot {
+  display: inline-block;
+  margin-left: 4px;
+  min-width: 14px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--vscode-button-foreground, #fff);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+/* The id column is text, not a figure: its header has to sit over the ids
+   rather than over the right edge the numeric columns share. */
+.sessions-table thead th:nth-child(2) { text-align: left; }
+.sessions-table .session-name {
+  max-width: 320px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  /* A conversation name is a whole prompt's worth of text often enough that
+     wrapping it would give one row the height of three. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sessions-table .session-name.is-id {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+}
+.sessions-table .session-models { color: var(--muted); font-size: 11px; }
 
 .analytics-chart-main { margin-bottom: 10px; }
 .analytics-chart-row {
@@ -1232,3 +1506,21 @@ thead .tip:focus::after {
   .app { padding: 10px 12px 32px; }
   .cache-stat-grid { grid-template-columns: 1fr; }
 }
+
+/* A pinned left column detaches this panel from the toolbar, so it says so
+   plainly and carries its own way back — the column header's date button is
+   not drawn in every state this can appear in. */
+.compare-pin-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--vscode-editorWidget-border, #454545);
+  border-left: 3px solid var(--warn, #cca700);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--panel));
+  font-size: 12px;
+}
+.compare-pin-note span { color: var(--vscode-descriptionForeground, #9d9d9d); }

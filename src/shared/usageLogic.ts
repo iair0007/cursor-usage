@@ -142,6 +142,61 @@ export function eventsWithinRange<T extends { timestamp?: number | string }>(
   });
 }
 
+/**
+ * How well the API's rows carry the billing fields this extension derives from,
+ * per model.
+ *
+ * `tokenUsage.totalCents` is the model's own token value, and the only thing
+ * discount detection can measure against the published rates. Cursor does not
+ * always send it, and when it is missing the dashboard still shows costs (they
+ * come from `chargedCents`) while detection silently has nothing to work with —
+ * so an account can look completely healthy and still never report a promotion.
+ * Counting it per model is what tells those two apart from a log.
+ *
+ * Counts and model names only. These lines are written to a channel people
+ * paste into bug reports, so nothing identifying goes in: no conversation ids,
+ * no email, nothing derived from a prompt.
+ */
+export function describeBillingFieldCoverage(
+  events: { model?: string; chargedCents?: unknown; isTokenBasedCall?: unknown;
+    cursorTokenFee?: unknown; tokenUsage?: { totalCents?: unknown } | null }[],
+): string {
+  if (!events.length) return 'Billing fields: no events to describe.';
+  const has = (v: unknown) => v != null;
+  const per = new Map<string, { n: number; totalCents: number; charged: number; tokenBased: number }>();
+  for (const e of events) {
+    const key = e.model || 'unknown';
+    const row = per.get(key) || { n: 0, totalCents: 0, charged: 0, tokenBased: 0 };
+    row.n++;
+    if (has(e.tokenUsage?.totalCents)) row.totalCents++;
+    if (has(e.chargedCents)) row.charged++;
+    if (e.isTokenBasedCall) row.tokenBased++;
+    per.set(key, row);
+  }
+  const totals = [...per.values()].reduce(
+    (a, r) => ({
+      n: a.n + r.n,
+      totalCents: a.totalCents + r.totalCents,
+      charged: a.charged + r.charged,
+      tokenBased: a.tokenBased + r.tokenBased,
+    }),
+    { n: 0, totalCents: 0, charged: 0, tokenBased: 0 },
+  );
+  const lines = [
+    `Billing fields on ${totals.n} event(s): tokenUsage.totalCents on ${totals.totalCents}`
+    + `, chargedCents on ${totals.charged}, isTokenBasedCall on ${totals.tokenBased}.`,
+  ];
+  if (!totals.totalCents) {
+    lines.push('  No row carries tokenUsage.totalCents — the model token value is'
+      + ' reconstructed from chargedCents less the token fee, and discount detection'
+      + ' depends on that reconstruction being right.');
+  }
+  for (const [model, r] of [...per].sort((a, b) => b[1].n - a[1].n).slice(0, 15)) {
+    lines.push(`  ${model}: ${r.n} request(s), totalCents on ${r.totalCents}, chargedCents on ${r.charged}`);
+  }
+  return lines.join('\n');
+}
+
 /** Earliest/latest usable event timestamp in ms, or null when none have one. */
 export function eventTimestampSpan<T extends { timestamp?: number | string }>(
   events: T[],
@@ -619,6 +674,265 @@ export function modelCostDeltas(
       return { model, current: c, baseline: b, delta: c - b };
     })
     .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.current - a.current);
+}
+
+export interface SessionTotal {
+  sessionId: string;
+  requests: number;
+  costDollars: number;
+  firstMs: number;
+  lastMs: number;
+  /** Distinct models used, most-used first. */
+  models: string[];
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Dollars the cache kept off this session's bill. */
+  savingsDollars: number;
+  /** Requests that errored or aborted: charged for, but not counted as work. */
+  erroredRequests: number;
+  /** The single dearest request in the session. */
+  maxCostDollars: number;
+}
+
+/** Requests with no conversation id are grouped under this, never dropped. */
+export const UNATTRIBUTED_SESSION = '(unattributed)';
+
+/**
+ * Rolls usage up per IDE conversation, most expensive first.
+ *
+ * Requests the API reports no conversation for are collected under
+ * `UNATTRIBUTED_SESSION` rather than discarded: dropping them would make the
+ * session totals disagree with every other figure on the dashboard, and an
+ * unexplained gap is worse than an explicit "we don't know" row.
+ */
+export function sessionTotals(
+  events: {
+    conversationId?: string | null;
+    cost?: number | null;
+    model?: string;
+    timestampMs?: number;
+    counted?: boolean;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    cacheSavings?: number | null;
+  }[],
+): SessionTotal[] {
+  const bySession = new Map<string, SessionTotal & { modelCounts: Map<string, number> }>();
+
+  for (const e of events) {
+    const sessionId = e.conversationId || UNATTRIBUTED_SESSION;
+    let row = bySession.get(sessionId);
+    if (!row) {
+      row = {
+        sessionId,
+        requests: 0,
+        costDollars: 0,
+        firstMs: Infinity,
+        lastMs: -Infinity,
+        models: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        savingsDollars: 0,
+        erroredRequests: 0,
+        maxCostDollars: 0,
+        modelCounts: new Map(),
+      };
+      bySession.set(sessionId, row);
+    }
+    // Errored and aborted rows still cost tokens, so they keep their spend but
+    // don't inflate the request count — the same rule the rest of the dashboard
+    // applies through `counted`. They are counted separately instead, because
+    // "this session cost more and a third of it errored" is the explanation.
+    if (e.counted !== false) row.requests += 1;
+    else row.erroredRequests += 1;
+    const cost = e.cost ?? 0;
+    row.costDollars += cost;
+    row.maxCostDollars = Math.max(row.maxCostDollars, cost);
+    row.inputTokens += e.inputTokens ?? 0;
+    row.outputTokens += e.outputTokens ?? 0;
+    row.cacheReadTokens += e.cacheReadTokens ?? 0;
+    row.cacheWriteTokens += e.cacheWriteTokens ?? 0;
+    row.savingsDollars += e.cacheSavings ?? 0;
+    const ts = e.timestampMs ?? 0;
+    if (ts > 0) {
+      row.firstMs = Math.min(row.firstMs, ts);
+      row.lastMs = Math.max(row.lastMs, ts);
+    }
+    if (e.model) row.modelCounts.set(e.model, (row.modelCounts.get(e.model) ?? 0) + 1);
+  }
+
+  return [...bySession.values()]
+    .map(({ modelCounts, ...row }) => ({
+      ...row,
+      firstMs: Number.isFinite(row.firstMs) ? row.firstMs : 0,
+      lastMs: Number.isFinite(row.lastMs) ? row.lastMs : 0,
+      models: [...modelCounts.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m),
+    }))
+    .sort((a, b) => b.costDollars - a.costDollars || b.requests - a.requests);
+}
+
+export interface SessionSummary {
+  /** Conversations seen, excluding the unattributed bucket. */
+  sessions: number;
+  /** Requests that carried no conversation id. */
+  unattributedRequests: number;
+  costPerSession: number | null;
+  requestsPerSession: number | null;
+  /** The single most expensive conversation, or null when there are none. */
+  topSession: SessionTotal | null;
+}
+
+/**
+ * Period-level session figures, for comparing one period against another.
+ *
+ * Deliberately aggregate rather than per-conversation. Conversations are
+ * short-lived, so the same id almost never appears in both periods — a
+ * session-by-session diff of the kind `modelCostDeltas` does for models would
+ * be two disjoint lists side by side, every row reading "new" or "stopped".
+ * What actually differs between two periods is how work was shaped: how many
+ * conversations, how much each cost, how many requests each took.
+ */
+export function sessionSummary(totals: SessionTotal[]): SessionSummary {
+  const attributed = totals.filter((t) => t.sessionId !== UNATTRIBUTED_SESSION);
+  const unattributed = totals.find((t) => t.sessionId === UNATTRIBUTED_SESSION);
+  const sessions = attributed.length;
+  const cost = attributed.reduce((s, t) => s + t.costDollars, 0);
+  const requests = attributed.reduce((s, t) => s + t.requests, 0);
+  return {
+    sessions,
+    unattributedRequests: unattributed?.requests ?? 0,
+    costPerSession: sessions ? cost / sessions : null,
+    requestsPerSession: sessions ? requests / sessions : null,
+    // totals is cost-sorted, so the first attributed row is the priciest.
+    topSession: attributed[0] ?? null,
+  };
+}
+
+/**
+ * Rates are only reported for sessions that ran longer than this. Two requests
+ * eight seconds apart are a 900/hour pace on paper, which says nothing about
+ * how the session was worked — it's an artefact of dividing by a tiny number.
+ */
+export const SESSION_RATE_MIN_MS = 60 * 1000;
+
+export interface SessionMetrics {
+  requests: number;
+  costDollars: number;
+  /** Null when the session has no counted requests (all errored or aborted). */
+  costPerRequest: number | null;
+  /** First to last request. Zero for a single-request session. */
+  durationMs: number;
+  /** Null for sessions too short to divide by — see SESSION_RATE_MIN_MS. */
+  requestsPerHour: number | null;
+  costPerHour: number | null;
+  /** Share of tokens served from cache. Null when the session moved no tokens. */
+  cacheHitRate: number | null;
+  totalTokens: number;
+}
+
+/**
+ * One session's shape: what it cost, how long it ran, how hard it was worked.
+ *
+ * Duration is first-to-last request, so it measures the span the conversation
+ * was active rather than how long it was open — an idle tab costs nothing and
+ * shouldn't dilute the rate.
+ */
+export function sessionMetrics(total: SessionTotal): SessionMetrics {
+  const durationMs = total.lastMs > total.firstMs ? total.lastMs - total.firstMs : 0;
+  const hours = durationMs / (60 * 60 * 1000);
+  const ratesMeaningful = durationMs >= SESSION_RATE_MIN_MS;
+  const totalTokens = total.inputTokens + total.outputTokens
+    + total.cacheReadTokens + total.cacheWriteTokens;
+  return {
+    requests: total.requests,
+    costDollars: total.costDollars,
+    costPerRequest: total.requests > 0 ? total.costDollars / total.requests : null,
+    durationMs,
+    requestsPerHour: ratesMeaningful ? total.requests / hours : null,
+    costPerHour: ratesMeaningful ? total.costDollars / hours : null,
+    // Null, not 0%: a session the API reported no token counts for has an
+    // unknown hit rate, and "0%" would read as a session that cached nothing.
+    cacheHitRate: totalTokens > 0 ? (total.cacheReadTokens / totalTokens) * 100 : null,
+    totalTokens,
+  };
+}
+
+/**
+ * Substring match over a session's name, its id and the models it used.
+ *
+ * All three because all three are things someone might remember about a
+ * conversation. Nobody types a uuid from memory, so an id-only filter would be
+ * useless on the sessions that have no name — matching the models keeps "show
+ * me the Opus sessions" working there.
+ *
+ * `titleOf` is passed in rather than read from the totals: names come from a
+ * local database lookup that resolves after the rows are already on screen,
+ * and this module has no business knowing where they came from.
+ */
+export function filterSessions(
+  totals: SessionTotal[],
+  query: string,
+  titleOf: (sessionId: string) => string | null | undefined = () => null,
+): SessionTotal[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return totals;
+  return totals.filter(
+    (t) => t.sessionId.toLowerCase().includes(q)
+      || (titleOf(t.sessionId) || '').toLowerCase().includes(q)
+      || t.models.some((m) => m.toLowerCase().includes(q)),
+  );
+}
+
+export type SessionSortKey = 'name' | 'started' | 'duration' | 'requests' | 'cost';
+
+/** The direction a column sorts on its first click: biggest-first for figures. */
+export const SESSION_SORT_DEFAULT_DIR: Record<SessionSortKey, 'asc' | 'desc'> = {
+  name: 'asc',
+  started: 'desc',
+  duration: 'desc',
+  requests: 'desc',
+  cost: 'desc',
+};
+
+/**
+ * Sorts sessions by one column, cost-descending by default.
+ *
+ * Sorting is by what's on screen: the name column orders by the name where a
+ * session has one, and unnamed sessions sort among them by their id rather
+ * than being herded to one end — the list is a mix and a sort that reshuffles
+ * which rows are named would be a worse handle than the one it replaced.
+ *
+ * Ties break on cost so the order is stable across renders. Without it a group
+ * of same-length sessions would swap places on every re-render, which reads as
+ * the table flickering.
+ */
+export function sortSessions(
+  totals: SessionTotal[],
+  key: SessionSortKey,
+  dir: 'asc' | 'desc',
+  titleOf: (sessionId: string) => string | null | undefined = () => null,
+): SessionTotal[] {
+  const sign = dir === 'asc' ? 1 : -1;
+  const label = (t: SessionTotal) => (titleOf(t.sessionId) || t.sessionId).toLowerCase();
+  const duration = (t: SessionTotal) => Math.max(0, t.lastMs - t.firstMs);
+
+  const compare = (a: SessionTotal, b: SessionTotal): number => {
+    switch (key) {
+      case 'name': return label(a).localeCompare(label(b));
+      case 'started': return a.firstMs - b.firstMs;
+      case 'duration': return duration(a) - duration(b);
+      case 'requests': return a.requests - b.requests;
+      default: return a.costDollars - b.costDollars;
+    }
+  };
+
+  return [...totals].sort((a, b) => sign * compare(a, b) || b.costDollars - a.costDollars);
 }
 
 /**

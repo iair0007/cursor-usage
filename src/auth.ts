@@ -127,11 +127,15 @@ function readValuesViaSqlJs(dbFile: Buffer, wasmDir: string, keys: string[]): Pr
 }
 
 /**
- * Try the sqlite3 CLI first (fast, streams, unbounded file size), fall back
- * to sql.js only when we couldn't shell out AND the DB is small enough that
- * loading it into WebAssembly is safe. Returns null if neither works.
+ * Read keys from `ItemTable`, trying the sqlite3 CLI first (fast, streams,
+ * unbounded file size) and falling back to sql.js only when we couldn't shell
+ * out AND the DB is small enough that loading it into WebAssembly is safe.
+ * Returns null if neither works.
+ *
+ * Shared with the conversation-name lookup, so a machine without the sqlite3
+ * CLI keeps both the stored auth token and the session names.
  */
-async function readAuthValues(
+export async function readItemTableValues(
   dbPath: string,
   wasmDir: string,
   keys: string[],
@@ -183,7 +187,7 @@ export async function resolveSession(
   const wasmDir = path.join(context.extensionUri.fsPath, 'media');
 
   for (const dbPath of candidateStateDbPaths(context)) {
-    const values = await readAuthValues(
+    const values = await readItemTableValues(
       dbPath,
       wasmDir,
       ['cursorAuth/accessToken', 'cursorAuth/cachedEmail'],

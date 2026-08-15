@@ -3,6 +3,227 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## 0.7.0 — 2026-08-14
+
+- **Fixed discounts never being detected on the models Cursor discounts most.**
+  Grok and Composer are Cursor's own hosted models, priced in a table that
+  publishes no cache-write rate — and a request carrying cache-write tokens
+  used to be discarded rather than priced against a substituted rate. Since
+  agent requests essentially always carry them, every sample was thrown away
+  and the count never reached the threshold, so a promotion on those models was
+  undetectable at any volume. The unknown is now bounded instead of avoided:
+  the true rate can't be below zero or above the input rate it stands in for,
+  so the day is priced both ways and a discount has to hold at the stingy end
+  too. Cache writes that are really free, read against a substitution, are the
+  false positive the old behaviour guarded against — the floor still rejects
+  those, and a day it can't settle stays offered for manual entry rather than
+  being recorded as "no promotion". Models with a published cache-write rate
+  are unaffected.
+- **Fixed the "Current plan" chip only appearing when the selected date range
+  happened to contain the evidence.** An account that switched plans on the 3rd
+  stayed invisible on "Today" or "7 days" for the rest of the month, even though
+  those are exactly when someone would reach for it. This calendar month's own
+  events are now checked as well as the selected range — once per month, cached
+  for the session, not on every load. The two windows answer different
+  questions and both still count: the month keeps the chip independent of what
+  is on screen, while the loaded range is the only thing that can still see a
+  change from an earlier month. A boundary already known is only forgotten by a
+  range that straddles it and finds nothing, since a range sitting wholly on one
+  side never held the proof to begin with — which also keeps the warning about
+  a range spanning two pricing systems on screen where it belongs.
+- **Fixed the session comparison's two tables drifting out of alignment.**
+  The model breakdown reused the period comparison's table markup, which
+  auto-sizes its own columns; put a few rows below a table with different
+  content, that produced two different column widths for the same sessions.
+  Both tables now share a fixed layout and a matching row-label column.
+- **The session comparison's header now stays in view while scrolling.** A
+  four-session table runs well past one screen, and a figure with no header
+  above it doesn't say which session it's for. Fixed a nested scroll
+  container that silently absorbed the sticky positioning meant for the outer
+  one — a spec quirk, not a typo: setting `overflow-x` on an element quietly
+  promotes its own `overflow-y` from `visible` to `auto` even when written
+  explicitly, which is what created the extra scroller in the first place.
+- **Fixed a failed lookup being cached.** The quota, plan and spend-cap cache
+  stored the fallback that a failed request resolved to, so one dropped
+  connection meant up to ten minutes with no plan name or spend cap even though
+  the next request would have succeeded. Only successes are cached now.
+- **Fixed a pinned comparison quietly taking over the dashboard.** Pinning
+  Compare periods' left column to fixed dates was stored and restored, so
+  opening the dashboard days later gave a comparison that ignored every date in
+  the toolbar — and, because the Overview's trend badge has no honest delta
+  while a pin is in force, that card silently lost its badge and its link to
+  the comparison too. The only control that undid it was the column header's
+  date button, which the panel doesn't draw when the baseline comes back empty:
+  pin a single day, and there was no way back at all. The pin now lasts only as
+  long as the dashboard is open, announces itself wherever it applies, carries
+  its own "Follow the filter bar" button in every state, and the Overview says
+  the trend is unavailable because of it rather than showing nothing.
+- **Discounts are now measured from Cursor's own figures instead of inferred
+  from the rate table.** Cursor reports two numbers for a request: what the
+  tokens are worth at list, and what it actually charged. On a promotion those
+  diverge, and the gap between them is the discount — exactly, with no
+  published rates involved. Detection had been comparing the *list* figure
+  against the *list* rate table, which by construction reads as no discount, so
+  a live promotion was invisible no matter how much you used the model.
+  Measuring the two against each other also removes every weakness of the old
+  route at once: a stale or restructured pricing page, a model too new to be in
+  it, an unpublished cache-write rate, and Auto — which the rate table can never
+  price, because Cursor doesn't say which model it routed to.
+- **A measured discount is reported as measured, not rounded to a sale.** The
+  figure used to snap to the nearest 5%, which is right when recovering the
+  round number a promotion probably was from a noisy estimate, and wrong once
+  the number is measured: 53.5% became "55% off", asserting a rate nobody
+  announced, and further from the 50% headline than the measurement it
+  replaced. Badges now read "−53% vs list" rather than "−53% off", because what
+  is known is the saving against Cursor's published price — an announced sale
+  can land a few points either side of that once its own terms and cent
+  rounding are through with it. A figure still inferred from the rate table is
+  still snapped, since there the round number is the whole point.
+- **Promotions now surface as tips, on Overview and in Analyze.** A promotion
+  is only useful while it is running, and Cursor announces them nowhere this
+  dashboard can read — so once one is measured it is worth saying so. Two
+  findings: what the discounts actually took off the bill, measured the same way
+  they were found, and — when a meaningful share of the period ran on other
+  models on the same days — that a discounted model was available while it did.
+  The second carries a deadline, so it takes the Overview card ahead of an
+  equally urgent finding about a spending pattern, which will still be there
+  next week. Both stay quiet below a floor in dollars and in share, so a small
+  range and an account already using the discounted model say nothing.
+- **Auto now shows which model the router picked.** Balance and Intelligence
+  bill at the routed model's own rate, and Cursor names that model in the row
+  when the team leaves the underlying model on display — so a request that cost
+  Grok 4.5's rate and one that cost Auto's bundled rate no longer both read as a
+  flat "Auto". Rows read "Auto Balance → Grok 4.5" throughout: the request log,
+  the session lists, the comparison tables, the model filter and the export.
+  Bare Auto, where Cursor names nothing, is unchanged.
+- **Discount badges no longer print a percentage.** What is measured is the gap
+  between Cursor's list value and what it charged, and that lands a few points
+  off whatever sale was announced — 53% against a 50% promotion. On a badge that
+  read as a precise claim about the promotion's terms when it is only ever
+  precise about your bill. Badges say "Discounted"; the measured figure is one
+  hover away, and the discount editor still lists every entry you added with
+  its exact percentage, since that is where the number is acted on.
+- **Updated the Model column's tooltip** to explain the two things "Auto" can
+  now mean since routed rows started naming their model: plain "Auto" is Cursor
+  picking a model and not saying which (billed and priced at Auto's bundled
+  rate), while "Auto Balance → Grok 4.5" is Balance/Intelligence mode, billed
+  and priced at that model's own rate. The actual charge shown is always
+  Cursor's real number either way — only the estimates depend on which rate
+  applies.
+- **Fixed Auto losing its rates entirely.** cursor.com now publishes Auto's
+  bundled price as an ordinary row in a pricing table ("Auto Cost", under Auto
+  modes) rather than as the label-and-value list the old "Auto pricing" heading
+  carried. The parser only understood the old shape, so Auto came back with no
+  rates at all — no cache-savings figure on an Auto request, and nothing to
+  price a plain "auto"/"default" row against, on the mode most requests run in.
+  Both shapes are read now.
+- **Fixed two models being priced against the wrong row.** A request billed at
+  a Fast rate matched the standard row — "cursor-grok-4.6-high-fast" doesn't
+  contain "grok-4-6-fast" as a substring, since "high" sits in the middle — so
+  its estimates were about half what it really cost. And a row Cursor names for
+  the model Auto settled on, like "Cursor Grok 4.5 (Auto Balanced)", was priced
+  at Auto's rate purely because the word "auto" appeared in it. Auto is billed
+  two different ways and the row was naming which: Cost mode keeps Auto's
+  bundled flat rate whatever it routes to, while Balance and Intelligence bill
+  at the routed model's own rate — which is precisely why Cursor names the
+  model in those rows. Routed requests were priced at roughly half what they
+  cost. Rows are matched word-wise now, most specific first; the bundled rate
+  is kept for bare Auto and for Cost mode, and a named Balance/Intelligence row
+  prices against the model beside it.
+- **Fixed a discount being missing from the estimates for the model it was
+  found on.** Detection keys on the name Cursor bills under
+  ("cursor-grok-4.6-high"), while the Simulator asks by catalog row ("Grok
+  4.6") — the same model at a different reasoning effort, on one published
+  rate. The promotion showed in the chips and on its own request's row, and
+  every "what would this have cost on Grok 4.6" estimate below it was still
+  priced at full price, with the asterisk saying so. Detected discounts now
+  carry the published row they belong to and resolve through it. A variant on a
+  genuinely different row — Fast, at its own rate — still doesn't borrow it.
+- **A measured discount no longer needs three requests to confirm it.** The
+  three-request rule guarded against a noisy *estimate*; where both figures come
+  from Cursor there is no estimate, only the half-cent each was rounded to. One
+  request is now enough whenever it is large enough that rounding can't move the
+  result by more than a point — which is most of them. Requests small enough for
+  cent-rounding to swamp the gap still need the corroboration, and anything
+  falling back to the rate table keeps the old rule.
+- **The Simulator now distinguishes "checked and found nothing" from "couldn't
+  measure".** Both used to read "None found in this date range", and only one of
+  them means the estimates below can be trusted.
+- **Fixed the fifth session appearing to be selected.** Ticking past the
+  four-session limit left the box ticked for a row that was never added: it got
+  no slot letter and was missing from the comparison, and the alert explaining
+  why is at the top of the page, out of sight from the bottom of a long list.
+- **The model breakdown tells "didn't use it" from "used it for nothing".** A
+  model was listed by cost, so a session that used one on included or unpriced
+  requests — Auto, on a plan that bundles them — showed a dash meaning it had
+  never touched it, or dropped out of the table entirely. Rows are built from
+  the requests themselves now, and each figure carries its request count.
+- **The log now explains why a discount was or wasn't found.** Every load writes
+  which billing fields the API actually returned, per model, and what discount
+  detection concluded for each model-day — measured, too few requests to tell,
+  scattered, or a real gap. "No discount found" had several very different
+  causes and none of them were visible from outside, which is what let a live
+  promotion pass for a range that had been checked. Counts and model names only:
+  no conversation ids, no email, nothing derived from a prompt, since this is
+  the channel people paste into bug reports.
+- **Refresh now picks up renamed chats.** Cursor names a conversation once it
+  has a subject, and the index those names come from is cached for five minutes
+  to keep a multi-gigabyte file off the scroll path. Refresh drops it, rather
+  than showing the old name until the cache expires on its own. A name lookup
+  that fails outright is also no longer remembered as "this conversation has no
+  name", which left raw ids on screen until the dashboard was reopened.
+- **Fixed the Overview trend badge comparing two unrelated periods.** Once the
+  comparison's left column is pinned, its baseline belongs to that pinned
+  window, not to the range the Overview card is showing. The badge is now
+  hidden while a pin is in force; Compare periods keeps its own paired figures.
+- **Sessions**, a new sub-tab on Analyze. The requests in your selected period,
+  grouped by the conversation they came from: how many sessions, what each
+  cost, its share of the period, how long it ran and which models it reached
+  for. Pick any two to line them up side by side — cost, requests, priciest
+  request, tokens in/out/cached, cache hit rate and savings, cold starts,
+  errored requests, and a model-by-model breakdown. Pick the dates in the
+  toolbar first and the list follows — there is no second date control to keep
+  in sync. The model filter scopes it too, and the note under the list says so
+  when one is set, since a session that reached for several models is then
+  counted for one model's requests alone. Search matches names as well as ids
+  and models, across the whole period rather than the page you are looking at.
+- **The session comparison moved into its own dialog, opened from a selection
+  tray.** Ticking rows used to draw a table at the top of the panel, so picking
+  two sessions from the bottom of a long list looked like nothing had happened.
+  Selected sessions now appear as removable chips in a bar pinned to the bottom
+  of the view, with a Compare button that opens the comparison over the list
+  instead of under the scroll position. Escape or the backdrop closes it.
+- **Up to four sessions can be compared at once.** With two, the Difference
+  column stays and reads A against B. With three or four it gives way to the
+  best and worst figure in each row being highlighted, and every column saying
+  how it differs from the base — any session can be made the base.
+- **"Only rows that differ"** hides the figures the selected sessions agree on,
+  judged at the precision on screen.
+- The session list is paged — 20 at a time, or 50 or 100 — instead of showing
+  25 with a "show all". Sorting and filtering apply across the whole list, not
+  just the visible page.
+- The session list sorts by any of its columns — name, start, how long it ran,
+  requests or cost — from the column headers, the same way the request log
+  does. Sorting happens before the list is capped, so ordering by duration
+  reaches past the first 25 rather than reshuffling them. The choice is
+  remembered between sessions.
+- **Sessions are named, not numbered.** The conversation names Cursor shows in
+  its own chat list are read from its local database on your machine and joined
+  to the usage rows there — nothing from that database is sent anywhere, and
+  only names are read from it, never prompts, messages or code. The filter box
+  searches names too. Conversations that can't be named keep their id, which is
+  also what happens if the lookup isn't possible at all.
+- Differences between two sessions are coloured only where a direction exists:
+  cheaper, better-cached and fewer cold starts are wins whichever session they
+  belong to, while requests, tokens and pace stay neutral. Two conversations
+  aren't a before and an after, so a longer one having more requests isn't a
+  regression to paint amber.
+- Requests now carry the conversation id the API reports. It was being read and
+  then dropped before it reached the dashboard, so nothing could be grouped by
+  conversation. Where an account's requests carry no id — Cursor only reports
+  one on some plans and API versions — the tab says so plainly instead of
+  showing an empty list.
+
 ## 0.6.3 — 2026-08-13
 
 - **The Simulator now offers models cursor.com's pricing page doesn't name.**

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { UsageService } from './service';
 import { UsageStatusBar } from './statusBar';
 import { getDashboardHtml } from './html';
+import { readConversationTitles } from './conversations';
 
 /** globalState key holding the webview's persisted UI preferences. */
 const PREFS_KEY = 'cursorUsage.webviewPrefs';
@@ -99,6 +100,14 @@ export class DashboardPanel {
       }
       case 'pricing':
         return { markdown: await this.service.getPricingMarkdown() };
+      // Names for the conversations behind the usage rows. Read from Cursor's
+      // own local database and joined to the API's ids here, in the extension
+      // host — nothing from that database goes back out over the network.
+      case 'sessionTitles': {
+        const ids = Array.isArray(params.ids) ? params.ids.map((id: any) => String(id)) : [];
+        const titles = await readConversationTitles(this.context, ids, this.log);
+        return { titles: Object.fromEntries(titles) };
+      }
       // The webview's own vscode.setState survives being hidden but dies with
       // the panel, so anything stored only there silently reset every time the
       // dashboard was closed and reopened. globalState is the durable home.
@@ -111,6 +120,14 @@ export class DashboardPanel {
         if (params.value == null) delete prefs[key];
         else prefs[key] = String(params.value);
         await this.context.globalState.update(PREFS_KEY, prefs);
+        return { ok: true };
+      }
+      // The webview holds the pricing table and every derived figure, so the
+      // reasoning worth reading in a bug report only exists there. Capped
+      // rather than trusted: this writes into the channel people paste from.
+      case 'log': {
+        const text = String(params.text ?? '').slice(0, 4000);
+        if (text) for (const line of text.split('\n')) this.log(line);
         return { ok: true };
       }
       case 'copyText':

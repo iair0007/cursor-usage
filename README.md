@@ -8,7 +8,7 @@
 
 **Website:** [iair0007.github.io/cursor-usage](https://iair0007.github.io/cursor-usage/)
 
-Costs, cache savings, model breakdowns, budget burn-rate, rule-based insights, and a cost simulator — with zero setup. No proxy server, no login: it reuses the session Cursor created when you signed in.
+Costs, cache savings, model breakdowns, per-session comparisons, budget burn-rate, rule-based insights, and a cost simulator — with zero setup. No proxy server, no login: it reuses the session Cursor created when you signed in.
 
 ![Overview tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-overview.png)
 
@@ -68,11 +68,11 @@ Date presets are **Today / 7 days / 30 days / Month to date / Custom**. If your 
 
 ### Analyze
 
-Two sub-tabs, both answering "why does my bill look like this" — **Findings** from one period, **Compare periods** from two.
+Three sub-tabs, all answering "why does my bill look like this" — **Findings** from one period, **Compare periods** from two, **Sessions** from your individual conversations.
 
 ![Analyze tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analyze.png)
 
-**Findings** are rule-based with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, spike requests — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick, copies it, and focuses Cursor's chat so you just paste and send.
+**Findings** are rule-based with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, spike requests, a measured promotion and what it's worth switching to it for — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick, copies it, and focuses Cursor's chat so you just paste and send.
 
 #### Compare periods
 
@@ -80,9 +80,21 @@ Puts your selected period next to another one and shows **which models account f
 
 ![Comparing two periods](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-compare.png)
 
-**Click either period's dates to change it** — the ranges under "This period" and "Compared with" are both editable, so "this sprint vs the last one" is two clicks rather than a filter change. Pinning the left column detaches the comparison from the filter bar, and the panel says so. The **Previous period** and **Same dates last month** shortcuts move the baseline for the common cases.
+**Click either period's dates to change it** — the ranges under "This period" and "Compared with" are both editable, so "this sprint vs the last one" is two clicks rather than a filter change. Pinning the left column detaches the comparison from the filter bar, and the panel says so, with a one-click way back — the pin itself doesn't outlive the session. The **Previous period** and **Same dates last month** shortcuts move the baseline for the common cases.
 
 Alongside cost it shows requests, avg per request, per-day rates and cache hit rate, and the model table carries request counts and per-request averages — enough to tell "I used it more" apart from "each call got dearer". The panel also warns when the two windows aren't the same length, or when your period includes today, which isn't over yet.
+
+#### Sessions
+
+Groups the requests in your selected period by the Cursor conversation they came from, so "one chat" reads as one row instead of scattered log lines. Each session shows its cost, span, requests, and the models it reached for; names come from Cursor's own local chat index when it has one, otherwise the conversation id.
+
+![Sessions list](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-sessions.png)
+
+Tick up to four sessions and a selection tray pins to the bottom of the view with a **Compare** button — picking rows at the bottom of a long list gives you feedback right there instead of a table you have to scroll up to find. With two sessions the comparison shows a plain difference column; with three or four it highlights the best and worst figure in each row against a base you can re-pick, plus a model-by-model cost breakdown for the same sessions.
+
+![Comparing sessions](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-sessions-compare.png)
+
+Sessions carry no code or prompt content — Cursor's local database is only ever asked for a conversation's title, and that title never leaves your machine over the network. Requests with no conversation id (some plans and API versions don't send one) are called out rather than silently dropped from the total.
 
 ### Simulator
 
@@ -90,7 +102,9 @@ Alongside cost it shows requests, avg per request, per-day rates and cache hit r
 
 Replay any real request's token profile against other models' published rates — *"what would this request have cost on Haiku?"* — or price a custom token profile from scratch.
 
-**Promotions.** Cursor runs limited-time discounts ("Grok is half price this week") that it announces in prose and never publishes as a machine-readable rate. Your own requests are unaffected — they always show what Cursor actually charged — but an estimate for a model you *didn't* use has only the list price to go on. So the Simulator does both: where you have run a model, it infers the discount by comparing what you were billed against the published rates (several requests in a day have to agree before it will claim one), and where you haven't, it offers to let you record the promotion yourself and remembers it for future sessions. Discounted models are badged wherever they appear, and a measured discount is always shown as distinct from one you entered.
+**Promotions.** Cursor runs limited-time discounts ("Grok is half price this week") that it announces in prose and never publishes as a machine-readable rate — but it does report two figures for every token-billed request: what those tokens are worth at list, and what it actually charged. On a promotion those diverge, and the gap between two of Cursor's own numbers *is* the discount — measured, not estimated from a scraped rate table. Auto is included: Cursor Router's Balance and Intelligence modes bill at the routed model's own rate and name that model in the request, so a promotion on the model Auto picked is caught the same way. Where you haven't run a model, there's nothing to measure, so the Simulator offers to let you record the promotion yourself and remembers it for future sessions.
+
+Discounted requests are badged **"Discounted"** wherever they appear — the request log, Analyze, the comparison tables — with the measured percentage one hover away rather than printed on the badge, since it's a saving against list, not a guarantee of matching whatever headline rate a sale advertised. A measured discount is always shown as distinct from one you entered by hand. When a promotion is found, Analyze's **Findings** point it out directly: what it saved you, and — if a meaningful share of the period ran on other models while it was active — that it's worth pricing a real request against it in the Simulator before moving routine work over.
 
 ## Commands
 
@@ -140,9 +154,10 @@ Secrets are stored in VS Code SecretStorage (your OS keychain), never in setting
 ## Good to know
 
 - The personal-usage endpoints (`cursor.com/api/dashboard/*`) are **unofficial** — Cursor can change them at any time. Each data source degrades gracefully; the Admin API path uses the documented official API.
+- On a team with **Cursor Router** enabled, a request routed by Auto's Balance or Intelligence mode is shown as `Auto Balance → Grok 4.5` rather than a flat `Auto` — it's billed at the routed model's own rate, so knowing which model matters. This only appears when your team leaves "Underlying model" on display in Router settings; Auto's Cost mode and bare Auto (no model named) still read as `Auto`, since they're billed at Auto's own bundled rate regardless of what ran.
 - Cache savings are **estimates**: cache-read tokens × (input rate − cache-read rate) at published per-model pricing. Simulator numbers are directional (same tokens, different rates), not quotes.
 - If cursor.com's pricing page can't be reached, the dashboard falls back to a small bundled rate table (clearly flagged) instead of breaking cost estimates.
-- Detected promotions are **inferred**, not published. Billing is rounded to the cent and can carry surcharges the rate table doesn't break out, so the detector is deliberately cautious — it wants several requests in a day priced consistently below list before it will call it a discount, and it will miss small or short ones. It never adjusts what you were actually charged; it only affects the estimates for other models.
+- Detected promotions are **measured against your own bill**, from Cursor's own list-vs-charged figures where it reports both — not scraped or guessed at. Where that comparison isn't available (a per-request-priced plan, sub-cent requests), it falls back to comparing your bill against the published rate table instead, which is why it's more cautious there: it wants several requests in a day priced consistently below list before it will call it a discount, and can still miss small or short ones. Either way it never adjusts what you were actually charged; it only affects the estimates for other models.
 
 ## Contributing
 

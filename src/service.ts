@@ -21,6 +21,7 @@ import {
 } from './api';
 import {
   billingCycleWindow,
+  describeBillingFieldCoverage,
   eventKindTotals,
   eventTimestampSpan,
   eventsWithinRange,
@@ -36,6 +37,7 @@ export {
   billingCycleWindow,
   clampPeriodDays,
   countRequests,
+  describeBillingFieldCoverage,
   eventBillingRegime,
   eventCostDollars,
   eventKindTotals,
@@ -130,6 +132,11 @@ export class UsageService {
    *
    * Concurrent callers join the in-flight promise rather than starting their
    * own, which is what collapses the burst that happens on open.
+   *
+   * Only successes are cached. `fn` must reject on failure rather than
+   * resolving to a fallback, or one dropped connection would pin an empty
+   * result for the whole TTL — ten minutes without a plan name because a single
+   * request timed out.
    */
   private async cachedLookup<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
     const hit = this.lookupCache.get(key);
@@ -153,27 +160,27 @@ export class UsageService {
   }
 
   private quota(session: CursorSession): Promise<PlanQuota | null | undefined> {
-    return this.cachedLookup(`quota:${session.userId}`, QUOTA_CACHE_TTL_MS, () =>
-      fetchPlanQuota(session).catch((e) => {
+    return this.cachedLookup(`quota:${session.userId}`, QUOTA_CACHE_TTL_MS, () => fetchPlanQuota(session))
+      .catch((e) => {
         this.log(`Quota lookup failed (non-fatal): ${e?.message || e}`);
         return undefined;
-      }));
+      });
   }
 
   private plan(session: CursorSession): Promise<PlanInfo | undefined> {
-    return this.cachedLookup(`plan:${session.userId}`, PROFILE_CACHE_TTL_MS, () =>
-      fetchStripeProfile(session).catch((e) => {
+    return this.cachedLookup(`plan:${session.userId}`, PROFILE_CACHE_TTL_MS, () => fetchStripeProfile(session))
+      .catch((e) => {
         this.log(`Plan lookup failed (non-fatal): ${e?.message || e}`);
         return undefined;
-      }));
+      });
   }
 
   private hardLimit(session: CursorSession): Promise<number | null | undefined> {
-    return this.cachedLookup(`hardLimit:${session.userId}`, PROFILE_CACHE_TTL_MS, () =>
-      fetchHardLimit(session).catch((e) => {
+    return this.cachedLookup(`hardLimit:${session.userId}`, PROFILE_CACHE_TTL_MS, () => fetchHardLimit(session))
+      .catch((e) => {
         this.log(`Hard-limit lookup failed (non-fatal): ${e?.message || e}`);
         return undefined;
-      }));
+      });
   }
 
   async getSession(): Promise<CursorSession | null> {
@@ -292,6 +299,8 @@ export class UsageService {
       `Usage window ${iso(startMs)} → ${iso(endMs)}: API returned ${events.length} event(s)`
       + (span ? ` spanning ${iso(span.min)} → ${iso(span.max)}` : ' (none carry a usable timestamp)'),
     );
+
+    if (events.length) for (const line of describeBillingFieldCoverage(events).split('\n')) this.log(line);
 
     const kept = eventsWithinRange(events, startMs, endMs);
     if (kept.length !== events.length) {

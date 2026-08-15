@@ -9,17 +9,24 @@ import {
   countRequests,
   eventBillingRegime,
   eventTimestampMs,
+  filterSessions,
   isCountedRequest,
   modelCostDeltas,
   planMeteredDollars,
   projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
+  sessionMetrics,
+  SESSION_SORT_DEFAULT_DIR,
+  sessionSummary,
+  sessionTotals,
   shiftMonths,
+  sortSessions,
   statusBarText,
   sumBilledCostDollars,
   sumPlanMeteredDollars,
   sumTokenCostDollars,
+  UNATTRIBUTED_SESSION,
 } from '../shared/usageLogic.ts';
 
 export {
@@ -28,17 +35,24 @@ export {
   countRequests,
   eventBillingRegime,
   eventTimestampMs,
+  filterSessions,
   isCountedRequest,
   modelCostDeltas,
   planMeteredDollars,
   projectBudgetRunway,
   projectExhaustionDate,
   quotaPercentUsed,
+  sessionMetrics,
+  SESSION_SORT_DEFAULT_DIR,
+  sessionSummary,
+  sessionTotals,
   shiftMonths,
+  sortSessions,
   statusBarText,
   sumBilledCostDollars,
   sumPlanMeteredDollars,
   sumTokenCostDollars,
+  UNATTRIBUTED_SESSION,
 };
 
 export const MODEL_ALIASES = {
@@ -186,6 +200,23 @@ export function parsePricing(md) {
     i = j - 1;
   }
 
+  // cursor.com publishes Auto's bundled rate as an ordinary row in a pricing
+  // table now ("Auto Cost", under "Auto modes"), rather than as the
+  // label-and-value list the "### Auto pricing" heading used to carry. The
+  // table scan above already reads it, so adopt it as the Auto rate instead of
+  // leaving Auto unpriced — which cost every plain "auto"/"default" request its
+  // rates entirely, and with them its cache-savings figure.
+  if (auto.input == null) {
+    const autoRow = models.find((m) => m.name.includes('auto') && m.name.includes('cost'))
+      || models.find((m) => m.name === 'auto');
+    if (autoRow?.input != null) {
+      auto.input = autoRow.input;
+      auto.cacheWrite = autoRow.cacheWrite ?? autoRow.input;
+      auto.cacheRead = autoRow.cacheRead;
+      auto.output = autoRow.output;
+    }
+  }
+
   // Scrape found nothing usable (empty/unreachable doc, or page restructured) — fall back.
   if (auto.input == null && models.length === 0) {
     const fallbackModels = FALLBACK_PRICING.models.map((m) => ({ ...m, name: normModel(m.display) }));
@@ -208,17 +239,30 @@ export function parsePricing(md) {
  */
 export function matchPricing(model, pricing) {
   const n = normModel(model);
-  if (n.includes('auto') || n === 'default') {
-    if (pricing.auto.input != null) {
-      return {
-        input: pricing.auto.input,
-        cacheWrite: pricing.auto.cacheWrite ?? pricing.auto.input,
-        cacheWritePublished: pricing.auto.cacheWrite != null,
-        cacheRead: pricing.auto.cacheRead,
-        output: pricing.auto.output,
-        label: 'Auto',
-      };
-    }
+  const autoRates = () => (pricing.auto.input != null ? {
+    input: pricing.auto.input,
+    cacheWrite: pricing.auto.cacheWrite ?? pricing.auto.input,
+    cacheWritePublished: pricing.auto.cacheWrite != null,
+    cacheRead: pricing.auto.cacheRead,
+    output: pricing.auto.output,
+    label: 'Auto',
+  } : null);
+  // Auto is billed one of two ways, and which one depends on the router mode.
+  // Cost mode keeps Auto's bundled flat rate whatever it routes to. Balance and
+  // Intelligence bill at the routed model's own rate — "if your request is
+  // routed to Opus 5, you are billed at Opus 5 pricing" — which is exactly why
+  // Cursor names the model in those rows ("Cursor Grok 4.5 (Auto Balanced)").
+  //
+  // So the bundled rate is right for bare Auto and for Cost mode, and wrong for
+  // a named Balance/Intelligence row, where the model beside it is the answer.
+  // Matching on the word "auto" anywhere used to price every one of them at the
+  // bundled rate — roughly half what a routed Grok request really costs.
+  const autoRouted = n.includes('auto');
+  const bundledAuto = n === 'auto' || n === 'default' || n === 'cursor-auto'
+    || (autoRouted && n.includes('cost'));
+  if (bundledAuto) {
+    const rates = autoRates();
+    if (rates) return rates;
   }
   const key = pricing.aliasIndex[n];
   if (key) {
@@ -234,15 +278,29 @@ export function matchPricing(model, pricing) {
       };
     }
   }
-  // Longest-name match wins, not first-found: a billed variant string can
-  // contain more than one candidate substring (e.g. "cursor-grok-4.6-fast-high"
-  // contains both "grok-4-6" and the more specific "grok-4-6-fast"), and the
-  // more specific catalog row is the one whose rate actually applies.
-  let partial = null;
+  // Most specific catalog row wins, scored on how much of its name the billed
+  // string accounts for. Matching on substrings alone missed the row that
+  // actually applies whenever the variant interleaves its words:
+  // "cursor-grok-4.6-high-fast" does not contain "grok-4-6-fast" as a
+  // substring — "high" sits in the middle — so a request billed at the Fast
+  // rate was priced against the standard one, roughly half what it cost.
+  const parts = new Set(n.split('-').filter(Boolean));
+  let best = null;
   for (const m of pricing.models) {
-    if (!m.name) continue;
-    if (n.includes(m.name) || m.name.includes(n)) {
-      if (!partial || m.name.length > partial.name.length) partial = m;
+    if (!m.name || m.input == null) continue;
+    const want = m.name.split('-').filter(Boolean);
+    if (!want.length || !want.every((w) => parts.has(w))) continue;
+    if (!best || want.length > best.score) best = { m, score: want.length };
+  }
+  // Anything the word-wise pass can't place falls back to the old substring
+  // rule, so a name it doesn't understand is no worse off than before.
+  let partial = best?.m || null;
+  if (!partial) {
+    for (const m of pricing.models) {
+      if (!m.name) continue;
+      if (n.includes(m.name) || m.name.includes(n)) {
+        if (!partial || m.name.length > partial.name.length) partial = m;
+      }
     }
   }
   if (partial?.input != null) {
@@ -255,6 +313,8 @@ export function matchPricing(model, pricing) {
       label: partial.display,
     };
   }
+  // Auto-routed traffic whose model the table cannot name any better.
+  if (autoRouted) return autoRates();
   return null;
 }
 
@@ -411,6 +471,13 @@ export const DISCOUNT_DETECTION = {
   /** Promotions are round numbers, so snap to the nearest step when close. */
   snapStep: 5,
   snapWithin: 2.5,
+  /**
+   * How far cent-rounding may move an exactly-measured ratio before that one
+   * request stops being evidence on its own. minSamples is a defence against a
+   * noisy *estimate*; where both figures come from Cursor there is no estimate,
+   * only the half-cent each was rounded to.
+   */
+  exactSlackPct: 1,
 };
 
 function median(sorted) {
@@ -439,65 +506,232 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
   const cfg = { ...DISCOUNT_DETECTION, ...opts };
   const discounts = {};
   const observed = new Set();
-  if (!pricing) return { discounts, observed };
+  // Why requests were left out, and how each model-day came out. Every skip
+  // here is silent by design — one unusable request is not worth a word — but
+  // when nothing is found at all, "we measured and there was no promotion" and
+  // "we could not measure anything" look identical from outside, and only one
+  // of them means the estimates on screen are trustworthy.
+  const diagnostics = { considered: 0, skipped: {}, days: [] };
+  const skip = (reason, model) => {
+    const key = model ? `${reason} (${model})` : reason;
+    diagnostics.skipped[key] = (diagnostics.skipped[key] || 0) + 1;
+  };
+  if (!pricing) {
+    skip('no pricing table');
+    return { discounts, observed, diagnostics };
+  }
 
   const buckets = new Map();
   for (const e of events || []) {
-    if (!e || !e.timestampMs) continue;
+    if (!e || !e.timestampMs) {
+      skip('no timestamp');
+      continue;
+    }
     const n = normModel(e.modelRaw);
+    const day = dayKey(e.timestampMs);
+    if (!day) {
+      skip('no timestamp');
+      continue;
+    }
+
+    // The exact path. Cursor reports both what the tokens are worth at list
+    // (tokenUsage.totalCents) and what it actually took (chargedCents); on a
+    // promotion those diverge, and the gap between two of its own figures for
+    // the same request is the discount. No rate table, so nothing here can be
+    // thrown by a stale scrape, a model the table has never heard of, or an
+    // unpublished cache-write rate — and Auto works, which the rate table can
+    // never price because Cursor does not say what it routed to.
+    const list = e.listTokenCost;
+    const billed = e.billedTokenCost;
+    if (list != null && billed != null && list >= cfg.minExpectedCost) {
+      diagnostics.considered++;
+      const bucketKey = `${n}|${day}`;
+      if (!buckets.has(bucketKey)) {
+        // A label only if the table happens to name this model — for display,
+        // never for the arithmetic, so an unknown model still measures fine.
+        buckets.set(bucketKey, {
+          n, day, ratios: [], floorRatios: [], measured: 0, standalone: 0,
+          label: matchPricing(e.modelRaw, pricing)?.label || null,
+        });
+      }
+      const bucket = buckets.get(bucketKey);
+      bucket.ratios.push(billed / list);
+      bucket.floorRatios.push(billed / list);
+      // Cent rounding can move a ratio by half a cent either way. On a request
+      // worth enough that this is under a point, one is all the evidence there
+      // is to have — the three-sample rule exists to average out an estimate,
+      // and there is no estimate here.
+      bucket.measured++;
+      if (100 * 0.5 / (list * 100) <= cfg.exactSlackPct) bucket.standalone++;
+      continue;
+    }
+
     // Auto routes to a model Cursor does not name, so its billed value cannot
-    // be checked against any single rate row.
-    if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) continue;
+    // be checked against any single rate row. Only the fallback below needs one.
+    if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) {
+      skip('Auto or unnamed model, and no list value to compare against');
+      continue;
+    }
 
     // The billed value of the tokens alone. `tokenCost` folds in the Cursor
     // token fee, which is charged on top of the model rate and would read as a
     // surcharge — comparing it against the rate table understates every promo.
     const actual = e.modelTokenCost;
-    if (actual == null || !(actual > 0)) continue;
+    if (actual == null || !(actual > 0)) {
+      skip('no per-request token value', n);
+      continue;
+    }
 
     const rates = matchPricing(e.modelRaw, pricing);
-    if (!rates) continue;
-    // With no published cache-write rate, estimateTokenCost falls back to the
-    // input rate — a guess, and one that would masquerade as a discount.
-    if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) continue;
+    if (!rates) {
+      skip('no published rate row', n);
+      continue;
+    }
 
-    const expected = estimateTokenCost(rates, {
+    const tokens = {
       input: e.inputTokens,
       output: e.outputTokens,
       cacheRead: e.cacheReadTokens,
       cacheWrite: e.cacheWriteTokens,
-    });
-    if (expected == null || expected < cfg.minExpectedCost) continue;
+    };
+    const expected = estimateTokenCost(rates, tokens);
+    if (expected == null || expected < cfg.minExpectedCost) {
+      skip('below the sub-cent floor', n);
+      continue;
+    }
 
-    const day = dayKey(e.timestampMs);
-    if (!day) continue;
+    // Where the table publishes no cache-write rate, estimateTokenCost bills
+    // those tokens at the input rate. That is not a wild guess — Anthropic is
+    // the outlier in charging a write premium, and the pools with no such
+    // column (xAI's, and OpenAI's before GPT-5.6) genuinely have no separate
+    // write fee — but it is still an assumption, and Cursor's own hosted
+    // models are exactly the ones it runs promotions on.
+    //
+    // Discarding the request instead, as this once did, made Grok and Composer
+    // permanently undetectable: their requests always carry cache-write tokens,
+    // so every sample was thrown away and the count never reached minSamples no
+    // matter how much the user ran them. So bound the unknown rather than duck
+    // it. The true rate cannot be below zero, nor above the input rate it was
+    // substituted from, so price the same tokens at the stingy end too and
+    // require the discount to survive there as well. Cache writes that are
+    // really free, read against a substitution, are precisely the false
+    // positive the old skip existed to prevent — and the floor still rejects
+    // that, while allowing the gaps too large for the substitution to explain.
+    let floorExpected = expected;
+    if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) {
+      floorExpected = estimateTokenCost({ ...rates, cacheWrite: 0 }, tokens);
+      if (floorExpected == null || !(floorExpected > 0)) {
+        skip('cache-write rate unbounded', n);
+        continue;
+      }
+    }
+
+    diagnostics.considered++;
     const bucketKey = `${n}|${day}`;
-    if (!buckets.has(bucketKey)) buckets.set(bucketKey, { n, day, ratios: [], label: rates.label });
-    buckets.get(bucketKey).ratios.push(actual / expected);
+    if (!buckets.has(bucketKey)) {
+      buckets.set(bucketKey, { n, day, ratios: [], floorRatios: [], measured: 0, standalone: 0, label: rates.label });
+    }
+    const bucket = buckets.get(bucketKey);
+    bucket.label = bucket.label || rates.label;
+    bucket.ratios.push(actual / expected);
+    bucket.floorRatios.push(actual / floorExpected);
   }
 
-  for (const { n, day, ratios, label } of buckets.values()) {
-    if (ratios.length < cfg.minSamples) continue;
-    observed.add(`${n}|${day}`);
+  const outcome = (n, day, samples, pct, verdict) => {
+    diagnostics.days.push({ model: n, day, samples, pct: Math.round(pct * 10) / 10, verdict });
+  };
 
+  for (const { n, day, ratios, floorRatios, measured, standalone, label } of buckets.values()) {
     const sorted = [...ratios].sort((a, b) => a - b);
     const rawPct = (1 - median(sorted)) * 100;
-    if (rawPct < cfg.minPct || rawPct > cfg.maxPct) continue;
+    // A measured request needs no corroboration; an inferred one does.
+    if (ratios.length < cfg.minSamples && !standalone) {
+      outcome(n, day, ratios.length, rawPct, `too few samples (needs ${cfg.minSamples} when inferred from the rate table)`);
+      continue;
+    }
+    // The same day priced with cache writes free. Equal to rawPct unless a
+    // substitution was involved, so this only ever bites where one was.
+    const floorPct = (1 - median([...floorRatios].sort((a, b) => a - b))) * 100;
+
+    // A gap the substitution alone could account for. That is inconclusive, not
+    // answered, so it is deliberately left out of `observed`: the Simulator
+    // keeps offering to record the promotion by hand, which is the right
+    // fallback for a day we cannot measure.
+    if (rawPct >= cfg.minPct && floorPct < cfg.minPct) {
+      outcome(n, day, ratios.length, rawPct, `unprovable — free cache writes would explain it (floor ${floorPct.toFixed(1)}%)`);
+      continue;
+    }
+
+    observed.add(`${n}|${day}`);
+    if (rawPct < cfg.minPct || rawPct > cfg.maxPct) {
+      outcome(n, day, ratios.length, rawPct, rawPct < cfg.minPct
+        ? `no discount (gap under the ${cfg.minPct}% floor)`
+        : `rejected (gap over ${cfg.maxPct}% — something is wrong with the comparison)`);
+      continue;
+    }
 
     // A real promotion prices every request the same way. Wide scatter means
     // the gap is coming from surcharges or model routing, not a rate change.
     const agreeing = ratios.filter((r) => Math.abs((1 - r) * 100 - rawPct) <= cfg.tolerancePct).length;
-    if (agreeing / ratios.length < cfg.minAgreement) continue;
+    if (agreeing / ratios.length < cfg.minAgreement) {
+      outcome(n, day, ratios.length, rawPct, `scattered — only ${agreeing}/${ratios.length} requests agree`);
+      continue;
+    }
+    const wasMeasured = measured === ratios.length;
+    outcome(n, day, ratios.length, rawPct,
+      `discount ${wasMeasured ? Math.round(rawPct) : snapDiscountPct(rawPct, cfg)}% (${wasMeasured
+        ? "measured from Cursor's own list vs charged figures"
+        : 'inferred from the rate table, snapped to the nearest round sale'})`);
 
     if (!discounts[n]) discounts[n] = {};
     discounts[n][day] = {
-      pct: snapDiscountPct(rawPct, cfg),
+      // Snapping exists to recover the round number a promotion probably was
+      // from a noisy estimate. A measured figure is neither noisy nor the
+      // promotion's headline rate: it is what this account actually paid
+      // against list, and nudging 53.5% up to "55% off" asserts a promotion
+      // that was never announced. Report the measurement; snap only the guess.
+      pct: wasMeasured ? Math.round(rawPct) : snapDiscountPct(rawPct, cfg),
+      measured: wasMeasured,
       samples: ratios.length,
       label,
+      // The published row these requests price against. Detection keys on the
+      // billed variant ("cursor-grok-4-6-high"), but the Simulator asks by
+      // catalog row ("grok-4-6") — the same model at a different reasoning
+      // effort, on one published rate. Without this the promotion showed in the
+      // chips and on the request's own row, and was missing from every
+      // estimate for the very model it was found on.
+      row: label ? normModel(label) : null,
     };
   }
 
-  return { discounts, observed };
+  return { discounts, observed, diagnostics };
+}
+
+/**
+ * One-paragraph account of what discount detection just did, for the log.
+ *
+ * Deliberately shape-and-count only: model names and tallies, never a
+ * conversation id, an email or anything from a prompt — this is written to a
+ * channel people paste into bug reports.
+ */
+export function describeDiscountRun(detected, eventCount) {
+  const d = detected?.diagnostics;
+  if (!d) return 'Discount detection: no diagnostics available.';
+  const lines = [
+    `Discount detection over ${eventCount} event(s): ${d.considered} measurable, `
+    + `${d.days.length} model-day bucket(s).`,
+  ];
+  const skips = Object.entries(d.skipped).sort((a, b) => b[1] - a[1]);
+  if (skips.length) {
+    lines.push(`  Not measurable: ${skips.map(([reason, n]) => `${n} × ${reason}`).join('; ')}`);
+  }
+  for (const day of d.days.sort((a, b) => (a.day < b.day ? 1 : -1)).slice(0, 20)) {
+    lines.push(`  ${day.day} ${day.model}: ${day.samples} request(s), ${day.pct}% below list → ${day.verdict}`);
+  }
+  if (!d.days.length) {
+    lines.push('  No model reached a full day of comparable requests, so nothing could be concluded.');
+  }
+  return lines.join('\n');
 }
 
 /** Contiguous day ranges per model, for describing a promotion as a period. */
@@ -574,19 +808,114 @@ export function manualDiscountFor(entries, modelRaw, day) {
  * of an announcement. Manual entries therefore fill the gap for models with no
  * usage to measure, rather than overriding the evidence.
  */
+/**
+ * Detected entries for a model on a day: the one stored under its own name,
+ * plus any stored under a billed variant that prices against the same row.
+ */
+function detectedEntriesFor(detected, modelRaw, day) {
+  const n = normModel(modelRaw);
+  const out = [];
+  const own = detected?.discounts?.[n]?.[day];
+  if (own) out.push(own);
+  for (const [key, byDay] of Object.entries(detected?.discounts || {})) {
+    if (key === n) continue;
+    const hit = byDay?.[day];
+    if (hit?.row && hit.row === n) out.push(hit);
+  }
+  return out;
+}
+
 export function resolveDiscount(modelRaw, day, { detected, manual } = {}) {
   const n = normModel(modelRaw);
-  const det = detected?.discounts?.[n]?.[day];
-  if (det) return { pct: det.pct, source: 'detected', samples: det.samples };
+  // Most evidence wins, then the larger figure, so the answer does not depend
+  // on object key order when two variants of a model both saw the promotion.
+  const [det] = detectedEntriesFor(detected, modelRaw, day)
+    .sort((a, b) => (b.samples - a.samples) || (b.pct - a.pct));
+  if (det) return { pct: det.pct, source: 'detected', samples: det.samples, measured: det.measured };
   const entry = manualDiscountFor(manual, modelRaw, day);
   if (entry) return { pct: entry.pct, source: 'manual', entryId: entry.id };
   return null;
 }
 
+/**
+ * What the promotions in this range did to the bill, and what ran alongside
+ * them.
+ *
+ * `saved` counts only requests whose model and day carry a detected discount,
+ * and measures each one the same way the discount itself was found: Cursor's
+ * list value for those tokens against what it charged. So it is the money the
+ * promotion actually took off, not an estimate of it.
+ *
+ * `other` is what was spent on everything else on those same days — the part
+ * worth a second look, since a promotion is only useful if you were reaching
+ * for the model while it was running.
+ */
+export function discountImpact(events = [], detected = null) {
+  const ctx = { detected, manual: [] };
+  const byModel = new Map();
+  const days = new Set();
+  let savedDollars = 0;
+  let requests = 0;
+
+  for (const e of events || []) {
+    const day = dayKey(e?.timestampMs);
+    if (!day) continue;
+    if (resolveDiscount(e.modelRaw, day, ctx)?.source !== 'detected') continue;
+    const hit = resolveDiscount(e.modelRaw, day, ctx);
+    days.add(day);
+    requests++;
+    // Absent either figure the request still counts as discounted — it is on a
+    // model-day the promotion was measured on — but contributes no dollars,
+    // rather than a guess at them.
+    const saved = e.listTokenCost != null && e.billedTokenCost != null
+      ? Math.max(0, e.listTokenCost - e.billedTokenCost)
+      : 0;
+    savedDollars += saved;
+
+    const key = normModel(e.modelRaw);
+    const row = byModel.get(key)
+      || { model: key, label: displayModel(e.modelRaw), savedDollars: 0, requests: 0, pct: 0, days: new Set() };
+    row.savedDollars += saved;
+    row.requests++;
+    row.pct = Math.max(row.pct, hit.pct);
+    row.days.add(day);
+    byModel.set(key, row);
+  }
+
+  let otherDollars = 0;
+  let otherRequests = 0;
+  for (const e of events || []) {
+    const day = dayKey(e?.timestampMs);
+    if (!day || !days.has(day)) continue;
+    if (resolveDiscount(e.modelRaw, day, ctx)?.source === 'detected') continue;
+    otherDollars += e.cost ?? 0;
+    otherRequests++;
+  }
+
+  return {
+    savedDollars,
+    requests,
+    days: [...days].sort(),
+    otherDollars,
+    otherRequests,
+    models: [...byModel.values()]
+      .map((m) => ({ ...m, days: [...m.days].sort() }))
+      .sort((a, b) => b.savedDollars - a.savedDollars || b.requests - a.requests),
+  };
+}
+
 /** Any day in the loaded range on which this model was detected as discounted. */
 export function detectedDiscountDays(detected, modelRaw) {
-  const byDay = detected?.discounts?.[normModel(modelRaw)];
-  return byDay ? Object.keys(byDay).sort() : [];
+  const n = normModel(modelRaw);
+  const days = new Set(Object.keys(detected?.discounts?.[n] || {}));
+  // Variants of the same published row count too — see detectedEntriesFor.
+  for (const [key, byDay] of Object.entries(detected?.discounts || {})) {
+    if (key === n) continue;
+    for (const [day, hit] of Object.entries(byDay || {})) {
+      if (hit?.row === n) days.add(day);
+    }
+  }
+  return [...days].sort();
 }
 
 export function applyDiscountToRates(rates, pct) {
@@ -643,9 +972,39 @@ export function normalizeDiscountEntry(raw) {
   };
 }
 
+const AUTO_MODE_NAMES = {
+  cost: 'Cost',
+  balance: 'Balance',
+  balanced: 'Balance',
+  intelligence: 'Intelligence',
+};
+
+/**
+ * The model Cursor Router picked, when it says so.
+ *
+ * Balance and Intelligence bill at the routed model's own rate, so Cursor names
+ * it — "Cursor Grok 4.5 (Auto Balanced)" — provided the team has left the
+ * underlying model on display. That name is the difference between a request
+ * that cost Auto's bundled rate and one that cost Grok's, so it is worth
+ * keeping rather than flattening every such row to "Auto".
+ *
+ * Returns null for bare Auto, where Cursor names nothing and there is nothing
+ * to show beyond "Auto".
+ */
+export function autoRouting(raw) {
+  const m = String(raw || '').match(/^\s*(?:cursor\s+)?(.+?)\s*\(\s*auto\s+([a-z]+)\s*\)\s*$/i);
+  if (!m) return null;
+  const model = m[1].trim();
+  if (!model) return null;
+  return { model, mode: AUTO_MODE_NAMES[m[2].toLowerCase()] || null };
+}
+
 export function displayModel(raw) {
   const n = normModel(raw);
-  if (!raw || n === 'default' || n.includes('auto')) return 'Auto';
+  if (!raw || n === 'default' || n === 'auto' || n === 'cursor-auto') return 'Auto';
+  const routed = autoRouting(raw);
+  if (routed) return `Auto ${routed.mode || ''} → ${routed.model}`.replace(/\s+/g, ' ').trim();
+  if (n.includes('auto')) return 'Auto';
   return raw;
 }
 
@@ -681,7 +1040,27 @@ export function normalize(raw, pricing, opts = {}) {
   // The same figure without the Cursor token fee, which is charged on top of
   // the model's own rate. Discount detection compares this against the rate
   // table, and folding the fee in would read as a surcharge on every model.
-  const modelTokenCost = modelCents != null ? modelCents / 100 : null;
+  //
+  // Cursor does not always break the model's own value out as
+  // tokenUsage.totalCents. Where it doesn't, a token-billed request still
+  // carries it: the charge is that value plus the token fee. Without this,
+  // detection had nothing to measure on such an account and reported "no
+  // discount found" for every model, which is indistinguishable from having
+  // checked. Per-request billing is a flat fee unrelated to the tokens, so it
+  // is deliberately left out rather than compared against a rate table.
+  //
+  // These are two different figures and the difference is the whole point.
+  // `tokenUsage.totalCents` is what Cursor says the tokens are worth at list;
+  // `chargedCents` is what it actually took. On a promotion they diverge, and
+  // since both come from Cursor for the same request, the gap between them is
+  // the discount — measured, not inferred from a scraped rate table.
+  const listTokenCost = modelCents != null ? modelCents / 100 : null;
+  const billedTokenCost = isTokenBased && chargedCents != null
+    ? Math.max(0, chargedCents - feeCents) / 100
+    : null;
+  // Best available figure for what these tokens cost you, preferring the one
+  // actually charged. Only the rate-table fallback in detectDiscounts reads it.
+  const modelTokenCost = billedTokenCost ?? listTokenCost;
   // requestCharge = flat usage-based fee ($0.04/request on some plans) — NOT token cost
   const requestCharge = !isTokenBased && chargedCents != null ? chargedCents / 100 : null;
   // Primary cost: token-based plans use chargedCents; others use tokenCost
@@ -717,12 +1096,15 @@ export function normalize(raw, pricing, opts = {}) {
     modelRaw,
     model: displayModel(modelRaw),
     kind: raw.kind || null,
+    conversationId: raw.conversationId || null,
     counted: isCountedRequest(raw.kind, totalTokens, chargedCents),
     cost,
     valueCost: cost,
     billedCost,
     tokenCost,
     modelTokenCost,
+    listTokenCost,
+    billedTokenCost,
     requestCharge,
     isTokenBased,
     billingRegime,

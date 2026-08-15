@@ -213,7 +213,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             <thead>
               <tr>
                 <th scope="col" tabindex="0" data-sort="timestampMs">Time</th>
-                <th scope="col" tabindex="0" data-sort="model">Model <span class="tip" tabindex="0" data-tip="Auto = Cursor picks the model automatically. Cache savings use Auto pricing from Cursor docs. Named models use their own rates.">ⓘ</span></th>
+                <th scope="col" tabindex="0" data-sort="model">Model <span class="tip" tabindex="0" data-tip="Auto = Cursor picked the model and didn't say which. When it does say — &quot;Auto Balance → Grok 4.5&quot; — that's Balance/Intelligence mode, billed and priced at that model's own rate; plain Auto is priced at Auto's bundled rate. Token cost itself is always Cursor's real charge either way.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="cost"><span id="colCostLabelText">Token cost</span> <span class="tip" tabindex="0" data-tip="Model/API charge from token usage — the number that reflects how expensive the request actually was. Follows the Costs toggle: What-if shows the API-equivalent value of the tokens, Billed shows what your plan charged.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="requestCharge" id="colUsageFee" class="hidden">Usage fee <span class="tip" tabindex="0" data-tip="Extra flat per-request charge on usage-based plans (e.g. $0.04). Not part of token cost above.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="cacheSavings">Cache saved <span class="tip" tabindex="0" data-tip="Per request: cache-read tokens × (input rate − cache-read rate) using that request's model pricing. Hover a cell to see which rate was used.">ⓘ</span></th>
@@ -276,6 +276,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
       <div class="view-toggle hidden" role="tablist" aria-label="Analyze views" id="analyzeTabs">
         <button type="button" class="view-tab active" data-analyze-panel="findings" role="tab" aria-selected="true">Findings</button>
         <button type="button" class="view-tab" data-analyze-panel="compare" role="tab" aria-selected="false">Compare periods</button>
+        <button type="button" class="view-tab" data-analyze-panel="sessions" role="tab" aria-selected="false">Sessions</button>
       </div>
 
       <div id="analyzeCompare" class="hidden" role="tabpanel">
@@ -331,6 +332,75 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         </article>
 
       </div>
+
+      <!--
+        Sessions groups the same requests by the conversation they came from.
+        It deliberately has no date control of its own: the filter bar above
+        already answers "which dates", so picking a range there and coming here
+        is the whole flow. A third window picker on this tab would compete with
+        the toolbar for the same question.
+      -->
+      <div id="analyzeSessions" class="hidden" role="tabpanel">
+        <article class="panel compare-panel" id="sessionsPanel">
+          <div class="compare-head">
+            <div>
+              <h3>Sessions</h3>
+              <p class="panel-desc">Your selected period, grouped by conversation. Names are read from Cursor on this machine; sessions it can't name keep their id. Pick two to compare them side by side.</p>
+            </div>
+            <div class="compare-controls">
+              <label class="sessions-search">
+                <span class="sr-only">Filter sessions</span>
+                <input type="search" id="sessionSearch" placeholder="Filter by name, id or model" />
+              </label>
+            </div>
+          </div>
+
+          <p class="compare-status hidden" id="sessionsStatus"></p>
+          <div id="sessionsSummary"></div>
+          <div id="sessionsList"></div>
+          <div id="sessionsPager"></div>
+          <p class="compare-note hidden" id="sessionsNote"></p>
+        </article>
+
+        <!--
+          The selection tray. Ticking a row used to draw a comparison table at
+          the top of the panel, which meant selecting two sessions from the
+          bottom of a long list looked like nothing had happened at all. A tray
+          pinned to the bottom of the view puts the feedback where the clicking
+          is, and makes opening the comparison a deliberate act rather than
+          something that happens under the scroll position.
+        -->
+        <div class="sessions-tray hidden" id="sessionsTray" role="region" aria-label="Selected sessions">
+          <div class="tray-chips" id="trayChips"></div>
+          <div class="tray-actions">
+            <span class="tray-count" id="trayCount"></span>
+            <button type="button" class="btn" id="trayClear">Clear</button>
+            <button type="button" class="btn primary" id="trayCompare">Compare</button>
+          </div>
+        </div>
+      </div>
+
+      <!--
+        The comparison itself is a focused view rather than another block in an
+        already long page: a dialog gets it out of the list's way, keeps the
+        row labels next to the figures, and closes on Escape.
+      -->
+      <dialog id="sessionsDialog" class="sessions-dialog">
+        <header class="sessions-dialog-head">
+          <div>
+            <h3 id="sessionsDialogTitle">Compare sessions</h3>
+            <p class="panel-desc" id="sessionsDialogDesc"></p>
+          </div>
+          <div class="sessions-dialog-controls">
+            <label class="sessions-diff-toggle">
+              <input type="checkbox" id="sessionsDiffOnly" />
+              <span>Only rows that differ</span>
+            </label>
+            <button type="button" class="btn" id="sessionsDialogClose">Close</button>
+          </div>
+        </header>
+        <div class="sessions-dialog-body" id="sessionsDialogBody"></div>
+      </dialog>
 
       <div id="analyzeContent" class="analyze-layout hidden">
         <div class="analyze-main">

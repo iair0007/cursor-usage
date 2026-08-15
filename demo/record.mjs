@@ -33,8 +33,13 @@ const voiceDir = path.join(outDir, 'voice');
 fs.mkdirSync(voiceDir, { recursive: true });
 
 const VIEWPORT = { width: 1600, height: 900 };
+// DEMO_CHROMIUM, else this sandbox's known Playwright browser path if it
+// happens to exist, else undefined — which tells Playwright to resolve its
+// own normally-installed browser (e.g. after `npx playwright install
+// chromium`), the right default anywhere outside this specific sandbox.
+const SANDBOX_CHROMIUM = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const CHROMIUM_PATH = process.env.DEMO_CHROMIUM
-  || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+  || (fs.existsSync(SANDBOX_CHROMIUM) ? SANDBOX_CHROMIUM : undefined);
 
 const manifestPath = path.join(voiceDir, 'manifest.json');
 const voiceManifest = fs.existsSync(manifestPath)
@@ -52,7 +57,7 @@ async function main() {
     : 'No voiceover manifest found — using caption-only fallback timing. '
       + 'Run demo/generate-voiceover.mjs first for a narrated cut.');
 
-  const browser = await chromium.launch({ executablePath: CHROMIUM_PATH });
+  const browser = await chromium.launch(CHROMIUM_PATH ? { executablePath: CHROMIUM_PATH } : {});
   const context = await browser.newContext({
     viewport: VIEWPORT,
     recordVideo: { dir: outDir, size: VIEWPORT },

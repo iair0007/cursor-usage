@@ -3,6 +3,19 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## 0.7.1 — 2026-08-15
+
+- **Fixed the date pickers looking unusable in a dark theme.** The calendar
+  icon on the From/To fields — and the popup it opens — is drawn by the
+  browser itself rather than by this extension's CSS, and without being told
+  which palette to use it defaulted to a light-mode icon rendered dark-on-dark
+  against the dark input: invisible, and impossible to click to change the
+  date. Now keyed off the `vscode-dark`/`vscode-light`/`vscode-high-contrast`
+  classes VS Code itself stamps on `<body>` to match the active theme, so the
+  native chrome follows suit. Scoped to those classes specifically — a host
+  that doesn't set one (unlikely, but the failure mode this branch used to be
+  in) leaves rendering exactly as it was before, rather than guessing.
+
 ## 0.7.0 — 2026-08-14
 
 - **Fixed discounts never being detected on the models Cursor discounts most.**

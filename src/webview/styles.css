@@ -37,6 +37,21 @@ body {
   line-height: 1.5;
 }
 
+/* VS Code stamps vscode-light/vscode-dark/vscode-high-contrast on <body> to
+   match the active theme. Native form controls — the date-input calendar
+   icon and its popup, in particular — are drawn by the browser engine's own
+   light/dark palette rather than our CSS variables, so without this a dark
+   theme leaves the calendar icon and its popup rendering dark-on-dark
+   against the dark input, effectively invisible and unusable. */
+body.vscode-dark,
+body.vscode-high-contrast:not(.vscode-high-contrast-light) {
+  color-scheme: dark;
+}
+body.vscode-light,
+body.vscode-high-contrast-light {
+  color-scheme: light;
+}
+
 .app {
   max-width: 1280px;
   margin: 0 auto;

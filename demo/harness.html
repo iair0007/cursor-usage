@@ -186,6 +186,7 @@
               <tr>
                 <th scope="col" tabindex="0" data-sort="timestampMs">Time</th>
                 <th scope="col" tabindex="0" data-sort="model">Model <span class="tip" tabindex="0" data-tip="Auto = Cursor picked the model and didn't say which. When it does say — &quot;Auto Balance → Grok 4.5&quot; — that's Balance/Intelligence mode, billed and priced at that model's own rate; plain Auto is priced at Auto's bundled rate. Token cost itself is always Cursor's real charge either way.">ⓘ</span></th>
+                <th scope="col">Session <span class="tip" tabindex="0" data-tip="The Cursor conversation this request belongs to. Names are read from Cursor on this machine; requests the API reports no conversation for show a dash. Click one to open that session's breakdown.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="cost"><span id="colCostLabelText">Token cost</span> <span class="tip" tabindex="0" data-tip="Model/API charge from token usage — the number that reflects how expensive the request actually was. Follows the Costs toggle: What-if shows the API-equivalent value of the tokens, Billed shows what your plan charged.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="requestCharge" id="colUsageFee" class="hidden">Usage fee <span class="tip" tabindex="0" data-tip="Extra flat per-request charge on usage-based plans (e.g. $0.04). Not part of token cost above.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="cacheSavings">Cache saved <span class="tip" tabindex="0" data-tip="Per request: cache-read tokens × (input rate − cache-read rate) using that request's model pricing. Hover a cell to see which rate was used.">ⓘ</span></th>
@@ -364,6 +365,26 @@
         </aside>
       </div>
     </section>
+
+    <dialog id="sessionDetailDialog" class="sessions-dialog session-detail">
+        <header class="sessions-dialog-head">
+          <div>
+            <h3 id="sessionDetailTitle">Session</h3>
+            <p class="panel-desc" id="sessionDetailMeta"></p>
+          </div>
+          <button type="button" class="btn" id="sessionDetailClose">Close</button>
+        </header>
+        <div class="session-detail-body">
+          <div id="sessionDetailSpend"></div>
+          <div id="sessionDetailFindings"></div>
+          <section class="session-timeline-wrap">
+            <h4>Cost per request</h4>
+            <p class="panel-desc">Each bar is one request, in order. The shaded part is context handling —
+              re-reading and re-caching the conversation — as opposed to the answer itself.</p>
+            <div id="sessionDetailTimeline" class="session-timeline"></div>
+          </section>
+        </div>
+      </dialog>
 
     <section id="simulatorView" class="hidden">
       <div class="simulator panel">

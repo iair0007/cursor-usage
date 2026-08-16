@@ -3,6 +3,47 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## 0.9.0 — 2026-08-16
+
+- **Findings now point at the request they're about, and follow you around.**
+  Each one carries what the pattern cost and a link through to the request or
+  the session, and the same finding shows up wherever you're looking — on the
+  Overview, on the session it belongs to, and as a marker on the row itself.
+- **Every request can now show what its cost was made of.** Click a row in the
+  request log to split it into cache read, cache write, output and input. On a
+  long agent turn this is usually the whole story: the answer is a few cents and
+  the rest is re-reading context. The parts always add up to the cost shown
+  beside them, discounts included.
+- **The request log names the conversation each request came from**, and links
+  to it — so an expensive row no longer means going hunting for which chat it
+  belonged to.
+- **New per-session view.** Opens from the session list, a request row, or a
+  finding. Shows where that session's money went by token bucket, the findings
+  anchored to it, and a bar per request in the order you asked them, with the
+  context share shaded — so a session that got expensive as it went looks
+  expensive.
+- **New detectors**, all derived from token counts and timestamps only:
+  - *Stale resume* — coming back to a thread after hours means the prompt cache
+    has expired, and the whole accumulated context is re-written at full price
+    before any work happens. Reports what that re-caching cost.
+  - *Context blowup* — a request whose cache reads are far above the rest of its
+    session, and which is almost entirely re-read context.
+  - *Summarising worked* / *the context grew back* — Cursor compacting a
+    conversation is now recognised, and judged on what happened next: cache
+    reads that stayed down, or a thread that re-inflated anyway.
+  - *Spend concentration* — when a handful of requests are most of the period.
+  - *What every new chat costs before you type* — measured from your cold
+    starts. That baseline is your system prompt, rules files and the tool
+    definitions of every connected MCP server.
+- **Fixed: conversation compactions were being counted as cold starts.** They
+  read no cache, so the old test caught them — which inflated the cold-start
+  count and produced backwards advice, since summarising a thread is the
+  opposite of starting one. They're told apart on cache writes now.
+- **Cache findings no longer argue against themselves.** "Keep long agent
+  threads open" is good advice until the threads are what ran the bill up; on a
+  period whose dearest requests are mostly re-read context, that tip now says so
+  instead.
+
 ## 0.8.0 — 2026-08-16
 
 - **Added "Open in Browser."** A new "Open in browser ↗" link in the dashboard

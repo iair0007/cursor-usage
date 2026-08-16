@@ -1539,3 +1539,162 @@ thead .tip:focus::after {
   font-size: 12px;
 }
 .compare-pin-note span { color: var(--vscode-descriptionForeground, #9d9d9d); }
+
+/* ---------------------------------------------------------------------------
+   Insights: cost breakdowns, finding badges, and the per-session view
+   --------------------------------------------------------------------------- */
+
+/* The four token buckets keep one set of colours everywhere they appear — the
+   row breakdown, the session breakdown and the timeline — so the band the user
+   learns to recognise as "context" reads the same in all three. */
+:root {
+  --bucket-cache-read: #d97706;
+  --bucket-cache-write: #f59e0b;
+  --bucket-output: var(--accent);
+  --bucket-input: #94a3b8;
+}
+
+.finding-impact {
+  float: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--red);
+  font-weight: 600;
+}
+.severity-positive .finding-impact { color: var(--green-strong); }
+.finding-links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.finding-links .btn-link { font-size: 11px; }
+.ov-insight-more { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+
+.insight-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 6px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  vertical-align: middle;
+  cursor: help;
+}
+.insight-high { background: var(--red); }
+.insight-medium { background: var(--amber); }
+.insight-positive { background: var(--green-strong); }
+
+/* Cost breakdown ---------------------------------------------------------- */
+
+.breakdown { display: flex; flex-direction: column; gap: 8px; }
+.bd-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--border);
+}
+.bd-seg { display: block; height: 100%; }
+.bd-cacheRead { background: var(--bucket-cache-read); }
+.bd-cacheWrite { background: var(--bucket-cache-write); }
+.bd-output { background: var(--bucket-output); }
+.bd-input { background: var(--bucket-input); }
+.bd-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.bd-list li {
+  display: grid;
+  grid-template-columns: 1fr auto 52px;
+  gap: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.bd-key { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.bd-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.bd-pct { text-align: right; color: var(--muted); }
+.bd-note, .bd-empty { margin: 0; color: var(--muted); font-size: 11px; }
+
+/* Request log row detail --------------------------------------------------- */
+
+.row-toggle {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 6px 0 0;
+  font-size: 10px;
+}
+.time-cell { white-space: nowrap; }
+.session-cell { max-width: 190px; }
+.session-link {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.session-none { color: var(--muted); }
+tr.row-open > td { border-bottom-color: transparent; }
+.row-detail > td { padding: 4px 12px 14px; background: var(--panel); }
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(240px, 1.4fr);
+  gap: 18px;
+  align-items: start;
+}
+.detail-grid h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+@media (max-width: 820px) { .detail-grid { grid-template-columns: 1fr; } }
+
+@keyframes rowFlash {
+  from { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  to { background: transparent; }
+}
+.row-flash > td { animation: rowFlash 1.6s ease-out; }
+
+/* Session detail ---------------------------------------------------------- */
+
+.session-detail { max-width: 860px; }
+.session-detail-body { padding: 6px 16px 18px; display: flex; flex-direction: column; gap: 18px; overflow: auto; max-height: calc(86vh - 84px); }
+.session-detail-body h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+.session-spend-lead { margin: 0 0 10px; font-size: 12px; }
+.session-timeline-wrap h4 { margin-bottom: 4px; }
+.session-timeline { margin-top: 10px; }
+.tl-plot {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 130px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+/* Each bar is one request: full height is its cost, and the darker foot is the
+   share that went on moving context around rather than on the answer. */
+.tl-bar {
+  flex: 1 0 10px;
+  min-width: 10px;
+  height: var(--bar-h, 4%);
+  padding: 0;
+  border: 0;
+  border-radius: 2px 2px 0 0;
+  background: var(--bucket-output);
+  display: flex;
+  align-items: flex-end;
+  cursor: pointer;
+}
+.tl-bar:hover { outline: 1px solid var(--accent); }
+.tl-context {
+  display: block;
+  width: 100%;
+  height: var(--ctx-h, 0%);
+  background: var(--bucket-cache-read);
+  border-radius: 0 0 2px 2px;
+}
+.tl-flagged { box-shadow: 0 -3px 0 0 var(--red); }
+.tl-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--muted);
+}

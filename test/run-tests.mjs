@@ -2345,5 +2345,182 @@ console.log('conversationTitles');
   });
 }
 
+console.log('insights (advice derived from token counts alone)');
+{
+  const ins = await loadTs('src/webview/insights.js', 'insights.mjs');
+  const RATES = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Sonnet' };
+  const ratesFor = () => RATES;
+  const HOUR = 60 * 60 * 1000;
+
+  // Shapes taken from a real export: a long agent session whose cost is almost
+  // entirely re-read context, a five-hour gap before the dearest request, and
+  // Cursor's own compaction calls.
+  const ev = (o) => ({
+    id: o.id,
+    timestampMs: o.t,
+    modelRaw: 'claude-sonnet-5-thinking-high',
+    conversationId: o.s,
+    cost: o.cost,
+    inputTokens: o.in ?? 0,
+    outputTokens: o.out ?? 0,
+    cacheReadTokens: o.cr ?? 0,
+    cacheWriteTokens: o.cw ?? 0,
+    totalTokens: (o.in ?? 0) + (o.out ?? 0) + (o.cr ?? 0) + (o.cw ?? 0),
+  });
+
+  test('costBreakdown splits a request into what it was actually made of', () => {
+    const b = ins.costBreakdown(ev({ id: 'a', t: 0, s: 's', cost: 3.55, in: 17761, out: 21016, cr: 7379479, cw: 259267 }), RATES);
+    // Cache read dominates; output — the answer itself — is a rounding error.
+    assert.ok(b.cacheRead > b.cacheWrite && b.cacheWrite > b.output && b.output > b.input);
+    assert.ok(Math.abs(b.cacheRead / b.total - 0.62) < 0.02);
+    assert.ok(ins.contextShare(b) > 0.85);
+  });
+
+  test('the parts always add up to the cost shown beside them', () => {
+    // A discounted request costs less than list rates predict; the breakdown
+    // rescales rather than printing parts that sum to the wrong total.
+    const e = ev({ id: 'a', t: 0, s: 's', cost: 1.0, in: 10000, out: 10000, cr: 1000000, cw: 100000 });
+    const b = ins.costBreakdown(e, RATES);
+    assert.ok(Math.abs((b.input + b.output + b.cacheRead + b.cacheWrite) - 1.0) < 1e-9);
+    assert.equal(b.scaled, true);
+  });
+
+  test('a compaction is not a cold start', () => {
+    // Cursor summarising the thread: everything in, a summary out, nothing cached.
+    const compaction = ev({ id: 'c', t: 0, s: 's', cost: 0.077, in: 165817, out: 2786 });
+    assert.equal(ins.classifyRequest(compaction), 'compaction');
+    // A real cold start caches the prefix it just established.
+    const cold = ev({ id: 'k', t: 0, s: 's', cost: 0.1, in: 35000, out: 500, cw: 35000 });
+    assert.equal(ins.classifyRequest(cold), 'coldStart');
+    assert.equal(ins.classifyRequest(ev({ id: 'n', t: 0, s: 's', cost: 0.1, cr: 500000 })), 'cached');
+  });
+
+  const blowupSession = [
+    ...[0, 1, 2, 3, 4].map((i) => ev({ id: `s1-${i}`, t: i * 60000, s: 's1', cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000 })),
+    ev({ id: 's1-big', t: 5 * HOUR, s: 's1', cost: 6.81, in: 110696, out: 62425, cr: 12940878, cw: 844618 }),
+  ];
+
+  test('a long idle gap followed by a big re-cache is flagged as a stale resume', () => {
+    const found = ins.buildInsights({ events: blowupSession, ratesFor });
+    const stale = found.find((f) => f.rule === 'stale-resume');
+    assert.ok(stale, 'expected a stale-resume finding');
+    assert.equal(stale.anchor.requestId, 's1-big');
+    assert.equal(stale.anchor.sessionId, 's1');
+    // Impact is the re-caching specifically, not the whole request.
+    assert.ok(stale.impact > 0 && stale.impact < 6.81);
+    assert.match(stale.title, /re-caching/);
+  });
+
+  test('a context blowup is measured against the session it happened in', () => {
+    const found = ins.buildInsights({ events: blowupSession, ratesFor });
+    const blowup = found.find((f) => f.rule === 'context-blowup');
+    assert.ok(blowup, 'expected a context-blowup finding');
+    assert.equal(blowup.anchor.requestId, 's1-big');
+    assert.ok(blowup.evidence.cacheShare > 0.9);
+    // Only the reads above this session's own normal level are attributed.
+    const whole = ins.costBreakdown(blowupSession[5], RATES);
+    assert.ok(blowup.impact < whole.cacheRead);
+  });
+
+  test('a session that never idles or blows out produces neither finding', () => {
+    const steady = [0, 1, 2, 3, 4, 5].map((i) => ev({
+      id: `q-${i}`, t: i * 60000, s: 'q', cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000,
+    }));
+    const found = ins.buildInsights({ events: steady, ratesFor });
+    assert.equal(found.filter((f) => f.rule === 'stale-resume' || f.rule === 'context-blowup').length, 0);
+  });
+
+  test('a compaction that holds is reported as working', () => {
+    const events = [
+      ev({ id: 'b1', t: 0, s: 'c1', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'b2', t: 60000, s: 'c1', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'sum', t: 120000, s: 'c1', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'a1', t: 180000, s: 'c1', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'a2', t: 240000, s: 'c1', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+    ];
+    const found = ins.buildInsights({ events, ratesFor });
+    const worked = found.find((f) => f.rule === 'compaction-worked');
+    assert.ok(worked, 'expected compaction-worked');
+    assert.equal(worked.severity, 'positive');
+    assert.equal(worked.anchor.requestId, 'sum');
+  });
+
+  test('a compaction the thread grows back out of points at the regrowth, not the summary', () => {
+    const events = [
+      ev({ id: 'b1', t: 0, s: 'c2', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'b2', t: 60000, s: 'c2', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'sum', t: 120000, s: 'c2', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'a1', t: 180000, s: 'c2', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'a2', t: 240000, s: 'c2', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'regrow', t: 34 * 60000, s: 'c2', cost: 4.21, in: 11069, out: 45131, cr: 9306929, cw: 237065 }),
+    ];
+    const found = ins.buildInsights({ events, ratesFor });
+    assert.ok(!found.some((f) => f.rule === 'compaction-worked'));
+    const undone = found.find((f) => f.rule === 'compaction-undone');
+    assert.ok(undone, 'expected compaction-undone');
+    // It anchors to the expensive request the regrowth caused, which is what
+    // the user would click through to.
+    assert.equal(undone.anchor.requestId, 'regrow');
+    assert.ok(undone.impact > 1);
+  });
+
+  test('spend concentration reports the outliers and points at the dearest', () => {
+    const many = [
+      ...Array.from({ length: 12 }, (_, i) => ev({ id: `m${i}`, t: i * 60000, s: 'm', cost: 0.05, in: 2000, out: 1000, cr: 100000, cw: 5000 })),
+      ev({ id: 'big', t: 20 * 60000, s: 'm', cost: 6.81, in: 110696, out: 62425, cr: 12940878, cw: 844618 }),
+    ];
+    const found = ins.buildInsights({ events: many, ratesFor });
+    const conc = found.find((f) => f.rule === 'spend-concentration');
+    assert.ok(conc, 'expected spend-concentration');
+    assert.equal(conc.scope, 'period');
+    assert.equal(conc.anchor.requestId, 'big');
+  });
+
+  test('new-chat overhead measures the floor across cold starts', () => {
+    const colds = [
+      ev({ id: 'k1', t: 0, s: 'k1', cost: 0.2, in: 35000, out: 500, cw: 35000 }),
+      ev({ id: 'k2', t: HOUR, s: 'k2', cost: 0.2, in: 41000, out: 500, cw: 41000 }),
+      ev({ id: 'k3', t: 2 * HOUR, s: 'k3', cost: 0.2, in: 38000, out: 500, cw: 38000 }),
+    ];
+    const found = ins.buildInsights({ events: colds, ratesFor });
+    const overhead = found.find((f) => f.rule === 'new-chat-overhead');
+    assert.ok(overhead, 'expected new-chat-overhead');
+    assert.equal(overhead.evidence.floorTokens, 35000);
+    assert.equal(overhead.evidence.coldStarts, 3);
+    // Compactions must not be counted here — that was the old cold-start bug.
+    const withCompaction = ins.buildInsights({
+      events: [...colds, ev({ id: 'sum', t: 3 * HOUR, s: 'k4', cost: 0.077, in: 165817, out: 2786 })],
+      ratesFor,
+    });
+    assert.equal(withCompaction.find((f) => f.rule === 'new-chat-overhead').evidence.coldStarts, 3);
+  });
+
+  test('findings rank by dollars, with positives last', () => {
+    const found = ins.buildInsights({ events: blowupSession, ratesFor });
+    const impacts = found.filter((f) => f.severity !== 'positive').map((f) => f.impact);
+    assert.deepEqual(impacts, [...impacts].sort((a, b) => b - a));
+    if (found.some((f) => f.severity === 'positive')) {
+      assert.equal(found[found.length - 1].severity, 'positive');
+    }
+  });
+
+  test('unattributed requests get period findings but not per-session ones', () => {
+    // Requests with no conversation id are unrelated to each other, so gaps
+    // and medians across them would compare different conversations.
+    const orphans = [
+      ev({ id: 'o1', t: 0, s: null, cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000 }),
+      ev({ id: 'o2', t: 5 * HOUR, s: null, cost: 6.81, in: 110696, out: 62425, cr: 12940878, cw: 844618 }),
+    ];
+    const found = ins.buildInsights({ events: orphans, ratesFor });
+    assert.equal(found.filter((f) => f.scope === 'request').length, 0);
+  });
+
+  test('requests with no cost at all yield nothing rather than throwing', () => {
+    assert.deepEqual(ins.buildInsights({ events: [], ratesFor }), []);
+    assert.deepEqual(ins.buildInsights({ events: [ev({ id: 'x', t: 0, s: 's', cost: null })], ratesFor }), []);
+    assert.equal(ins.costBreakdown(ev({ id: 'x', t: 0, s: 's', cost: 1 }), null), null);
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

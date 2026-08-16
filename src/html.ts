@@ -29,7 +29,43 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
   <link rel="stylesheet" href="${styles}" />
 </head>
 <body>
-  <div class="app">
+${dashboardBody()}
+  <script nonce="${n}" src="${script}"></script>
+</body>
+</html>`;
+}
+
+/**
+ * Standalone page served by the local browser server (see browserServer.ts)
+ * so the dashboard can be opened in a real browser tab instead of the VS
+ * Code webview. Same body markup and bundled main.js/styles.css; the token
+ * lets the client's fetch-based RPC bridge authenticate its calls back to
+ * the extension host.
+ */
+export function getBrowserDashboardHtml(token: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self';" />
+  <title>Cursor Usage Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+${dashboardBody()}
+  <script>
+    window.__CURSOR_USAGE_TOKEN__ = ${JSON.stringify(token)};
+    if (location.search) history.replaceState(null, '', location.pathname);
+  </script>
+  <script src="/main.js"></script>
+</body>
+</html>`;
+}
+
+function dashboardBody(): string {
+  return `  <div class="app">
     <header class="header">
       <div class="header-top">
         <div class="brand">
@@ -39,6 +75,8 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             <a href="https://cursor.com/dashboard/usage">Official usage dashboard ↗</a>
             <span>·</span>
             <a href="https://cursor.com/docs/models-and-pricing">Model pricing ↗</a>
+            <span id="openInBrowserSep" class="hidden">·</span>
+            <button type="button" class="btn-link-inline hidden" id="openInBrowserBtn">Open in browser ↗</button>
           </p>
         </div>
         <nav class="app-nav" aria-label="Main">
@@ -581,8 +619,5 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <button type="button" class="btn-primary" id="simIntroAdd">Add a discount</button>
       </div>
     </div>
-  </div>
-  <script nonce="${n}" src="${script}"></script>
-</body>
-</html>`;
+  </div>`;
 }

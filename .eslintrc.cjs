@@ -31,11 +31,5 @@ module.exports = {
         '@typescript-eslint/no-unused-vars': 'off',
       },
     },
-    {
-      files: ['src/panel.ts'],
-      rules: {
-        '@typescript-eslint/no-require-imports': 'off',
-      },
-    },
   ],
 };

@@ -4,6 +4,13 @@
 // Differences from the web app: data arrives over a postMessage RPC bridge to
 // the extension host (no HTTP server), Chart.js is bundled locally, prefs use
 // the webview state API, and CSV export / clipboard go through VS Code.
+//
+// This same bundle is also served as a plain static file by the local
+// browser server (browserServer.ts) so the dashboard can be opened in a real
+// browser tab. `inVsCode` below is the only branch point: outside VS Code
+// there's no `acquireVsCodeApi`, so the RPC bridge falls back to fetching
+// `/api/rpc` on the same origin, and persisted UI prefs fall back to
+// localStorage instead of the webview state API.
 
 import Chart from 'chart.js/auto';
 import {
@@ -47,7 +54,9 @@ import {
   UNATTRIBUTED_SESSION,
 } from './logic.js';
 
-const vscode = acquireVsCodeApi();
+const inVsCode = typeof acquireVsCodeApi === 'function';
+const vscode = inVsCode ? acquireVsCodeApi() : null;
+const browserToken = inVsCode ? null : (window.__CURSOR_USAGE_TOKEN__ || '');
 
 // ---------------------------------------------------------------------------
 // RPC bridge to the extension host
@@ -61,8 +70,16 @@ let rpcSeq = 0;
  * posts back an rpc-result (a bug on that side, or a message that got lost),
  * this rejects after `timeoutMs` instead of leaving callers (and the loading
  * spinner) hanging forever with no explanation.
+ *
+ * In VS Code this goes over the webview's postMessage bridge; in a plain
+ * browser tab (opened via "Open in Browser") it POSTs to `/api/rpc` on the
+ * same origin instead, since there's no extension host on the other end of
+ * a postMessage to talk to.
  */
 function rpc(method, params, timeoutMs = 25000) {
+  if (!inVsCode) {
+    return rpcOverHttp(method, params, timeoutMs);
+  }
   return new Promise((resolve, reject) => {
     const id = ++rpcSeq;
     const timer = setTimeout(() => {
@@ -77,26 +94,55 @@ function rpc(method, params, timeoutMs = 25000) {
   });
 }
 
-window.addEventListener('message', (ev) => {
-  const msg = ev.data;
-  if (msg?.type === 'rpc-result') {
-    const p = rpcPending.get(msg.id);
-    if (!p) return;
-    rpcPending.delete(msg.id);
-    if (msg.error) {
-      const err = new Error(msg.error);
-      err.authError = Boolean(msg.authError);
-      p.reject(err);
-    } else {
-      p.resolve(msg.result);
-    }
-  } else if (msg?.type === 'refresh') {
-    load();
+async function rpcOverHttp(method, params, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch('/api/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Cursor-Usage-Token': browserToken },
+      body: JSON.stringify({ method, params }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    throw new Error(e?.name === 'AbortError'
+      ? `"${method}" timed out waiting for a response from the extension.`
+      : `"${method}" failed: ${e?.message || e}`);
+  } finally {
+    clearTimeout(timer);
   }
-});
+  const msg = await res.json();
+  if (msg.error) {
+    const err = new Error(msg.error);
+    err.authError = Boolean(msg.authError);
+    throw err;
+  }
+  return msg.result;
+}
+
+if (inVsCode) {
+  window.addEventListener('message', (ev) => {
+    const msg = ev.data;
+    if (msg?.type === 'rpc-result') {
+      const p = rpcPending.get(msg.id);
+      if (!p) return;
+      rpcPending.delete(msg.id);
+      if (msg.error) {
+        const err = new Error(msg.error);
+        err.authError = Boolean(msg.authError);
+        p.reject(err);
+      } else {
+        p.resolve(msg.result);
+      }
+    } else if (msg?.type === 'refresh') {
+      load();
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
-// Persistence — webview state instead of localStorage
+// Persistence — webview state (or localStorage in a browser tab)
 // ---------------------------------------------------------------------------
 
 /**
@@ -104,19 +150,38 @@ window.addEventListener('message', (ev) => {
  * the panel being hidden (and is synchronous, which every caller here relies
  * on), but it dies with the panel — so preferences stored only there reset
  * every time the dashboard was closed and reopened. The extension host's
- * globalState is the durable copy; setState is the fast local mirror.
+ * globalState is the durable copy; setState (or, in a browser tab,
+ * localStorage) is the fast local mirror.
  *
  * Reads stay synchronous: hydratePrefs() pulls the durable copy in before
  * init() touches any of it.
  */
-const persisted = vscode.getState() || {};
+const localState = {
+  getState() {
+    try {
+      return JSON.parse(localStorage.getItem('cursorUsageDashboardState') || 'null');
+    } catch {
+      return null;
+    }
+  },
+  setState(value) {
+    try {
+      localStorage.setItem('cursorUsageDashboardState', JSON.stringify(value));
+    } catch {
+      // Private browsing / storage disabled — the durable copy in globalState
+      // (via prefsSet below) still keeps preferences across reloads.
+    }
+  },
+};
+const stateApi = inVsCode ? vscode : localState;
+const persisted = stateApi.getState() || {};
 const storage = {
   getItem(key) {
     return Object.prototype.hasOwnProperty.call(persisted, key) ? persisted[key] : null;
   },
   setItem(key, value) {
     persisted[key] = String(value);
-    vscode.setState(persisted);
+    stateApi.setState(persisted);
     // Per key rather than whole-object, so a slow write can't clobber a
     // different preference saved while it was in flight. Best-effort: losing a
     // preference write is not worth failing a user action over.
@@ -4650,6 +4715,19 @@ async function init() {
 
   $('refreshBtn').addEventListener('click', load);
   $('exportBtn').addEventListener('click', exportCsv);
+
+  // Only meaningful inside the VS Code webview — a tab opened this way is
+  // already a browser tab, so the button stays hidden there (default state).
+  if (inVsCode) {
+    $('openInBrowserSep')?.classList.remove('hidden');
+    const openInBrowserBtn = $('openInBrowserBtn');
+    if (openInBrowserBtn) {
+      openInBrowserBtn.classList.remove('hidden');
+      openInBrowserBtn.addEventListener('click', () => {
+        rpc('openInBrowser', {}).catch(() => {});
+      });
+    }
+  }
 
   document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
     btn.addEventListener('click', () => onPresetClick(btn.dataset.preset));

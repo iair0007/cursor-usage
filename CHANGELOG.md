@@ -3,6 +3,16 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## 0.8.0 — 2026-08-16
+
+- **Added "Open in Browser."** A new "Open in browser ↗" link in the dashboard
+  header (and a matching `Cursor Usage: Open in Browser` command) opens the
+  same dashboard in your default browser instead of the IDE panel. It's
+  served by a small local HTTP server on `127.0.0.1` — same local data
+  access as the webview, same extension host underneath, just reachable from
+  a real browser tab. Gated by a random per-launch token and bound to
+  loopback only, so nothing else on the machine (or network) can reach it.
+
 ## 0.7.2 — 2026-08-15
 
 - **Added a narrated walkthrough video** to the README and the website: a

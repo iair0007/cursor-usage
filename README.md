@@ -122,6 +122,7 @@ Discounted requests are badged **"Discounted"** wherever they appear — the req
 | Command | Description |
 | --- | --- |
 | `Cursor Usage: Open Dashboard` | Open the dashboard panel |
+| `Cursor Usage: Open in Browser` | Open the same dashboard in your default browser instead of the IDE panel |
 | `Cursor Usage: Refresh` | Reload usage data (dashboard + status bar) |
 | `Cursor Usage: Set Session Token Manually` | Fallback auth via pasted cookie |
 | `Cursor Usage: Set Team Admin API Key` | Team usage via the Admin API |
@@ -145,6 +146,10 @@ Discounted requests are badged **"Discounted"** wherever they appear — the req
 | `cursorUsage.statusBar.criticalAtPercent` | `95` | % of the allowance at which the status bar turns red |
 
 "Allowance" means included requests on plans that have them, and your monthly budget on plans metered in dollars — the quota settings cover both.
+
+## Opening the dashboard in a browser
+
+Prefer a real browser tab over the IDE panel? Click **"Open in browser ↗"** next to the header links, or run *"Cursor Usage: Open in Browser"* from the command palette. This starts a small local server on `127.0.0.1` (a random free port, never exposed beyond your machine) and opens your default browser to it. It's the same dashboard and the same local data access as the IDE panel — nothing is sent anywhere new — just served over HTTP instead of a VS Code webview. Each launch uses a fresh random access token embedded in the URL, so nothing else on your machine can read your usage data through that port. The server shuts down when the IDE window closes.
 
 ## Authentication & privacy
 

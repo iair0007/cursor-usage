@@ -115,6 +115,10 @@ Groups the requests in your selected period by the Cursor conversation they came
 
 **Click a session name** to open its breakdown: where that session's money went by token bucket, the findings anchored to it, and one bar per request in the order you asked them, with the context share shaded. A session that got more expensive as it went looks expensive — the shaded band swells while the solid part stays flat.
 
+**Ask Cursor Chat about it.** The breakdown has an **Ask Cursor Chat** button that builds a brief about *this* session — or about one request out of it — and copies it for you to paste. It's engineered small on purpose, because the analysis costs tokens too: instead of listing every request, it reports the session's spending as six equal slices, so a 300-request session costs the same to describe as a 12-request one and the growth curve, the step down at a compaction and the spike all still show. Anything a finding already explains isn't repeated. The dialog tells you the brief's size in tokens and roughly what it'll cost to send *before* you send it, and the "include every request" option prices itself so you can see what it would add. Pick a question — *should I have split this session?*, *what did this cost that it didn't have to?*, *how do I run the next one like this?* — or write your own.
+
+The brief carries the conversation's name, its token counts, timings and costs, and nothing else. Nothing you typed is in it, because the extension never read it.
+
 Tick up to four sessions and a selection tray pins to the bottom of the view with a **Compare** button — picking rows at the bottom of a long list gives you feedback right there instead of a table you have to scroll up to find. With two sessions the comparison shows a plain difference column; with three or four it highlights the best and worst figure in each row against a base you can re-pick, plus a model-by-model cost breakdown for the same sessions.
 
 ![Comparing sessions](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-sessions-compare.png)

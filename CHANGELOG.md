@@ -3,6 +3,39 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## 0.10.0 — 2026-08-17
+
+- **You can now ask Cursor Chat about one session, or one request.** The
+  per-session breakdown has an **Ask Cursor Chat** button that builds a brief
+  about that conversation and copies it for you to paste, the same way the
+  period-wide panel in Analyze already did. Pick *should I have split this
+  session?*, *what did this cost that it didn't have to?*, *how do I run the next
+  one like this?*, or write your own question. Switch the scope to a single
+  request and it briefs that one instead.
+- **The brief is built to be small, because the analysis costs tokens too.** It
+  never lists your requests one per line. Instead it reports the session's
+  spending as six equal slices — so a 300-request session costs the same to
+  describe as a 12-request one, while the growth curve, the step down at a
+  compaction and the spike all survive. Anything a finding already explains
+  isn't said a second time, which also stops the same dollars being counted
+  twice. A 47-request session comes out around 900 tokens.
+- **It tells you what it will cost before you send it.** The dialog shows the
+  brief's size in tokens and roughly what that's worth as input on the model you
+  actually used. The "include every request" escape hatch prices itself too —
+  measured off the real brief, not estimated — so ticking it is a decision rather
+  than a surprise.
+- **The brief teaches the model Cursor's cache economics up front**, which is
+  what gets a useful answer in one round trip instead of three. Without it a
+  model reads "68% of your spend was cache reads" as good news. It's also told
+  not to ask what you were working on, since the extension never reads that and
+  nobody can tell it.
+- A request brief looks one request back and three forward. The state a request
+  starts in is already covered by the idle gap and the session's median; what
+  nothing else can tell you is whether a huge re-cache was earned back over the
+  turns that followed or thrown away when the thread was abandoned.
+- Briefs carry token counts, timings, costs and the conversation's name. Nothing
+  you wrote is in them, because none of it is ever read.
+
 ## 0.9.0 — 2026-08-16
 
 - **Findings now point at the request they're about, and follow you around.**

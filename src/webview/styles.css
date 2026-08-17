@@ -1698,3 +1698,60 @@ tr.row-open > td { border-bottom-color: transparent; }
   font-size: 10px;
   color: var(--muted);
 }
+
+/* --- Ask Cursor Chat ------------------------------------------------------ */
+
+/* Narrower than the comparison dialog it borrows its chrome from: this one is a
+   column of controls, not a wide table, and full width would strand the buttons
+   a screen away from the labels they belong to. */
+.ask-dialog { width: min(640px, 94vw); }
+/* The title carries the session's name, which can be a sentence. Left to the
+   shared header rules it wraps and shoves Close onto a line of its own, hard
+   against the left edge — so here the text block is allowed to shrink and the
+   button is not. */
+.ask-dialog .sessions-dialog-head { flex-wrap: nowrap; }
+.ask-dialog .sessions-dialog-head > div { min-width: 0; }
+.ask-dialog .sessions-dialog-head > .btn { flex: 0 0 auto; }
+.ask-dialog h3 { overflow-wrap: anywhere; }
+.ask-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 18px;
+  overflow: auto;
+  max-height: calc(86vh - 84px);
+}
+
+.ask-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0;
+}
+.ask-scope legend { font-size: 11px; color: var(--muted); padding: 0 4px; }
+.ask-scope label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.ask-request { flex: 1 1 220px; min-width: 0; }
+
+.ask-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.ask-field .optional { color: var(--muted); font-weight: 400; font-size: 11px; }
+.ask-field textarea { resize: vertical; }
+.ask-field select { width: 100%; }
+
+.ask-detail { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+
+.ask-preview summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.ask-preview textarea {
+  width: 100%;
+  margin-top: 6px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  resize: vertical;
+}
+
+/* The reason this dialog exists is spending fewer tokens on the analysis, so
+   what it's about to cost is stated rather than left to be discovered. */
+.ask-size { margin: 0; font-size: 12px; color: var(--muted); }

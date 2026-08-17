@@ -493,7 +493,10 @@ function dashboardBody(): string {
           <h3 id="sessionDetailTitle">Session</h3>
           <p class="panel-desc" id="sessionDetailMeta"></p>
         </div>
-        <button type="button" class="btn" id="sessionDetailClose">Close</button>
+        <div class="sessions-dialog-controls">
+          <button type="button" class="btn primary" id="sessionAskBtn">Ask Cursor Chat</button>
+          <button type="button" class="btn" id="sessionDetailClose">Close</button>
+        </div>
       </header>
       <div class="session-detail-body">
         <div id="sessionDetailSpend"></div>
@@ -504,6 +507,52 @@ function dashboardBody(): string {
             re-reading and re-caching the conversation — as opposed to the answer itself.</p>
           <div id="sessionDetailTimeline" class="session-timeline"></div>
         </section>
+      </div>
+    </dialog>
+
+      <!--
+      Handing one session — or one request out of it — to Cursor's own chat.
+      Outside every view section on purpose: a <dialog> inside a display:none
+      ancestor opens at zero size, and this one is reached from the session
+      dialog, which can be open from anywhere.
+    -->
+    <dialog id="askCursorDialog" class="sessions-dialog ask-dialog">
+      <header class="sessions-dialog-head">
+        <div>
+          <h3 id="askTitle">Ask Cursor Chat</h3>
+          <p class="panel-desc">Copy a compact brief and paste it into Cursor Chat. Token counts,
+            timings and costs only — never anything you wrote.</p>
+        </div>
+        <button type="button" class="btn" id="askClose">Close</button>
+      </header>
+      <div class="ask-body">
+        <fieldset class="ask-scope">
+          <legend>What to ask about</legend>
+          <label><input type="radio" name="askScope" value="session" checked /> The whole session</label>
+          <label><input type="radio" name="askScope" value="request" /> One request</label>
+          <select id="askRequest" class="ask-request" aria-label="Which request"></select>
+        </fieldset>
+        <label class="ask-field">
+          <span>Question</span>
+          <select id="askTemplate"></select>
+        </label>
+        <label class="ask-field">
+          <span>Your own question <span class="optional">optional — replaces the one above</span></span>
+          <textarea id="askCustomQ" rows="2" placeholder="e.g. was the 3-hour gap what made this expensive?"></textarea>
+        </label>
+        <label class="ask-detail">
+          <input type="checkbox" id="askDetail" />
+          <span id="askDetailLabel">Include every request</span>
+        </label>
+        <details class="ask-preview">
+          <summary>Preview brief</summary>
+          <textarea id="askPreview" readonly rows="14"></textarea>
+        </details>
+        <p class="ask-size" id="askSize" aria-live="polite"></p>
+        <div class="analyze-actions">
+          <button type="button" id="askCopy" class="btn primary">Copy for Cursor Chat</button>
+          <span id="askStatus" class="copy-status" aria-live="polite"></span>
+        </div>
       </div>
     </dialog>
 

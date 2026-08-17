@@ -61,6 +61,13 @@ import {
   findingsForSession,
   badgeSeverity,
 } from './insights.js';
+import {
+  BRIEF_NOTES,
+  BRIEF_TEMPLATES,
+  buildSessionBrief,
+  buildRequestBrief,
+  estimateBriefSize,
+} from './brief.js';
 
 const inVsCode = typeof acquireVsCodeApi === 'function';
 const vscode = inVsCode ? acquireVsCodeApi() : null;
@@ -286,6 +293,20 @@ const state = {
   /** What to hand focus back to when the Simulator intro dialog closes. */
   simIntroReturnFocus: null,
   analyzeTemplateId: 'overview',
+  /**
+   * What the "Ask Cursor Chat" dialog is currently pointed at.
+   *
+   * `scope` is 'session' or 'request'; `requestId` is only read in request scope,
+   * and defaults to the session's dearest request because that is the one anybody
+   * opening this dialog came to ask about.
+   */
+  ask: {
+    scope: 'session',
+    sessionId: null,
+    requestId: null,
+    templateId: null,
+    detail: false,
+  },
   charts: {},
   chartsReady: false,
   datePreset: '30d',
@@ -2871,6 +2892,165 @@ function openSessionDetail(sessionId) {
     : '';
 
   $('sessionDetailTimeline').innerHTML = renderSessionTimeline(events);
+  state.ask.sessionId = sessionId;
+  if (!dialog.open) dialog.showModal();
+}
+
+// ---------------------------------------------------------------------------
+// Ask Cursor Chat about one session, or one request out of it
+// ---------------------------------------------------------------------------
+
+/**
+ * Which pile of dollars the brief is quoting.
+ *
+ * Without this the same brief means two different things depending on a toggle
+ * the reader can't see, and every recommendation that follows is calibrated
+ * against the wrong number.
+ */
+function briefCostBasis() {
+  return state.costMode === 'billed'
+    ? 'billed by the plan'
+    : 'in token value (what-if: the API-equivalent value of the tokens, not necessarily charged)';
+}
+
+function askTemplates(scope) {
+  return BRIEF_TEMPLATES.filter((t) => t.scope === scope);
+}
+
+function currentAskTemplate() {
+  const offered = askTemplates(state.ask.scope);
+  return offered.find((t) => t.id === state.ask.templateId) || offered[0];
+}
+
+/** Everything the pure brief builders need from the dashboard, in one place. */
+function askContext() {
+  return {
+    breakdownOf: breakdownForEvent,
+    classify: (e) => classifyRequest(e, state.analyzeThresholds),
+    ratesOf: (e) => ratesForEvent(e.modelRaw, e),
+    formatTime: (ms) => fmt.date(ms),
+  };
+}
+
+function buildAskBrief(overrides = {}) {
+  const { sessionId, scope, requestId, detail } = { ...state.ask, ...overrides };
+  if (!sessionId) return '';
+  const events = sessionEventsInOrder(sessionId);
+  if (!events.length) return '';
+  const session = {
+    id: sessionId,
+    name: sessionId === UNATTRIBUTED_SESSION
+      ? 'requests the API reported no conversation for'
+      : state.sessions.titles.get(sessionId) || sessionId,
+    costBasis: briefCostBasis(),
+  };
+  const question = $('askCustomQ')?.value || '';
+  const template = currentAskTemplate();
+
+  if (scope === 'request') {
+    const event = events.find((e) => e.id === requestId) || events[0];
+    return buildRequestBrief({
+      event,
+      sessionEvents: events,
+      session,
+      findings: findingsForRequest(state.insights, event.id),
+      template,
+      question,
+      ...askContext(),
+    });
+  }
+  return buildSessionBrief({
+    session,
+    events,
+    findings: findingsForSession(state.insights, sessionId),
+    template,
+    question,
+    detail,
+    ...askContext(),
+  });
+}
+
+/**
+ * What the brief will cost to send, before it is sent.
+ *
+ * The whole point of scoping an ask down to one session is spending fewer tokens
+ * on the analysis, and a saving nobody can see isn't one. Priced against the
+ * session's own dominant model, since that's the rate card the user recognises.
+ */
+function renderAskSize(text) {
+  const el = $('askSize');
+  if (!el) return;
+  const { chars, tokens } = estimateBriefSize(text);
+  if (!chars) { el.textContent = ''; return; }
+  const events = state.ask.sessionId ? sessionEventsInOrder(state.ask.sessionId) : [];
+  const rates = events.length ? ratesForEvent(events[0].modelRaw, events[0]) : null;
+  const dollars = rates?.input != null ? (tokens * rates.input) / 1_000_000 : null;
+  el.textContent = `≈ ${fmt.num(tokens)} tokens (${fmt.num(chars)} characters)`
+    + (dollars != null ? ` — about ${moneyFine(dollars)} to send as input on ${rates.label}.` : '.');
+}
+
+function renderAskDialog() {
+  const { sessionId, scope } = state.ask;
+  if (!sessionId) return;
+  const events = sessionEventsInOrder(sessionId);
+  const name = sessionId === UNATTRIBUTED_SESSION
+    ? 'Requests with no conversation'
+    : sessionLabel(sessionId).text;
+  $('askTitle').textContent = `Ask Cursor Chat about "${name}"`;
+
+  document.querySelectorAll('#askCursorDialog input[name="askScope"]').forEach((el) => {
+    el.checked = el.value === scope;
+  });
+
+  const picker = $('askRequest');
+  picker.classList.toggle('hidden', scope !== 'request');
+  picker.innerHTML = events.map((e, i) =>
+    `<option value="${esc(e.id)}"${e.id === state.ask.requestId ? ' selected' : ''}>#${i + 1} · ${esc(fmt.date(e.timestampMs))} · ${esc(fmt.money(e.cost))}</option>`,
+  ).join('');
+
+  const offered = askTemplates(scope);
+  const chosen = currentAskTemplate();
+  $('askTemplate').innerHTML = offered.map((t) =>
+    `<option value="${esc(t.id)}"${t.id === chosen.id ? ' selected' : ''}>${esc(t.title)} — ${esc(t.desc)}</option>`,
+  ).join('');
+
+  // The detailed timeline is the one control here that can multiply the brief's
+  // size, so it prices itself rather than making the user copy it to find out.
+  // Measured off the two real briefs rather than estimated per row: a guess that
+  // is 60% out is worse than no figure, since this one is offered as a reason to
+  // leave the box unticked.
+  const detailRow = $('askDetail').closest('label');
+  detailRow.classList.toggle('hidden', scope !== 'session');
+  $('askDetail').checked = state.ask.detail;
+  if (scope === 'session') {
+    const extra = estimateBriefSize(buildAskBrief({ detail: true })).tokens
+      - estimateBriefSize(buildAskBrief({ detail: false })).tokens;
+    $('askDetailLabel').textContent = `Include every request (${fmt.num(events.length)}, `
+      + `+${fmt.num(Math.max(0, extra))} tokens)`;
+  }
+
+  updateAskPreview();
+}
+
+function updateAskPreview() {
+  const text = buildAskBrief();
+  const preview = $('askPreview');
+  if (preview) preview.value = text;
+  renderAskSize(text);
+}
+
+/** Opens the ask dialog over whatever the user was already looking at. */
+function openAskDialog(sessionId) {
+  const dialog = $('askCursorDialog');
+  if (!dialog) return;
+  const events = sessionEventsInOrder(sessionId);
+  if (!events.length) return;
+  state.ask.sessionId = sessionId;
+  // The dearest request is the one anybody opening this came to ask about, so
+  // it's what request scope starts on.
+  const dearest = events.reduce((best, e) => ((e.cost ?? 0) > (best.cost ?? 0) ? e : best));
+  if (!events.some((e) => e.id === state.ask.requestId)) state.ask.requestId = dearest.id;
+  renderAskDialog();
   if (!dialog.open) dialog.showModal();
 }
 
@@ -4091,13 +4271,9 @@ function buildCursorBrief() {
     parts.push('## Dashboard findings (rule-based)', buildBriefSectionFindings(data.findings), '');
   }
 
-  parts.push(
-    '---',
-    'Notes for the model:',
-    '- Auto optimizes for task success and uses the Auto+Composer pool — not always the cheapest rate card.',
-    '- Cheaper models in comparisons assume the same token counts; real usage may differ.',
-    '- Token cost excludes flat per-request usage fees unless noted in summary.',
-  );
+  // Shared with the session and request briefs so the three can't drift into
+  // giving the reader different caveats about the same numbers.
+  parts.push('---', 'Notes for the model:', ...BRIEF_NOTES);
 
   return parts.join('\n');
 }
@@ -4150,30 +4326,45 @@ function renderAnalyze() {
   updateBriefPreview();
 }
 
+/**
+ * Puts a brief on the clipboard and opens Cursor's chat next to it.
+ *
+ * Shared by the period panel and the per-session dialog so the two can't drift
+ * into saying different things about the same operation. Never populates or
+ * submits the prompt itself — there's no reliable way to do that across Cursor
+ * versions, and doing it wrong could fire an unreviewed prompt on the user's
+ * behalf — so this only opens the panel, and says "paste it yourself" when even
+ * that isn't supported here.
+ *
+ * Returns false when the copy failed, so callers can fall back to showing the
+ * text somewhere the user can select it by hand.
+ */
+async function copyBriefText(text, statusEl) {
+  if (!text) return false;
+  try {
+    await rpc('copyText', { text });
+  } catch {
+    return false;
+  }
+  let opened = false;
+  try {
+    opened = Boolean((await rpc('focusCursorChat')).opened);
+  } catch {
+    opened = false;
+  }
+  if (statusEl) {
+    statusEl.textContent = opened
+      ? 'Copied — Cursor Chat is open, press ⌘/Ctrl+V then Enter'
+      : 'Copied — paste in Cursor Chat';
+    setTimeout(() => { statusEl.textContent = ''; }, 4000);
+  }
+  return true;
+}
+
 async function copyCursorBrief() {
   const text = buildCursorBrief();
   if (!text) return;
-  try {
-    await rpc('copyText', { text });
-    // Best-effort: also try to bring Cursor's chat panel into focus so
-    // there's less to hunt for. Never populates or sends the prompt itself —
-    // there's no reliable way to do that across Cursor versions, and doing
-    // it wrong could submit an unreviewed prompt on the user's behalf. Falls
-    // back to the plain "paste it yourself" message if unsupported here.
-    let opened = false;
-    try {
-      opened = Boolean((await rpc('focusCursorChat')).opened);
-    } catch {
-      opened = false;
-    }
-    const status = $('copyBriefStatus');
-    if (status) {
-      status.textContent = opened
-        ? 'Copied — Cursor Chat is open, press ⌘/Ctrl+V then Enter'
-        : 'Copied — paste in Cursor Chat';
-      setTimeout(() => { status.textContent = ''; }, 4000);
-    }
-  } catch {
+  if (!await copyBriefText(text, $('copyBriefStatus'))) {
     $('analyzeBriefPreview').value = text;
     $('analyzeBriefPreview').closest('details')?.setAttribute('open', 'open');
     showAlert('info', 'Could not copy automatically — select the preview text and copy manually.');
@@ -5309,6 +5500,29 @@ async function init() {
   });
 
   $('sessionDetailClose')?.addEventListener('click', () => $('sessionDetailDialog').close());
+
+  // Stacks on top of the session dialog rather than replacing it, so closing the
+  // ask puts the user back on the breakdown they were reading.
+  $('sessionAskBtn')?.addEventListener('click', () => openAskDialog(state.ask.sessionId));
+  $('askClose')?.addEventListener('click', () => $('askCursorDialog').close());
+  $('askCursorDialog')?.addEventListener('change', (ev) => {
+    const target = ev.target;
+    if (target.name === 'askScope') state.ask.scope = target.value;
+    else if (target.id === 'askRequest') state.ask.requestId = target.value;
+    else if (target.id === 'askTemplate') state.ask.templateId = target.value;
+    else if (target.id === 'askDetail') state.ask.detail = target.checked;
+    else return;
+    renderAskDialog();
+  });
+  $('askCustomQ')?.addEventListener('input', updateAskPreview);
+  $('askCopy')?.addEventListener('click', async () => {
+    const text = buildAskBrief();
+    if (!text) return;
+    if (!await copyBriefText(text, $('askStatus'))) {
+      $('askPreview').closest('details')?.setAttribute('open', 'open');
+      showAlert('info', 'Could not copy automatically — select the preview text and copy manually.');
+    }
+  });
 
   $('analyzeExpensivePanel')?.addEventListener('click', (ev) => {
     const btn = ev.target.closest('.btn-compare');

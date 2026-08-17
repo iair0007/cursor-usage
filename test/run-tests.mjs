@@ -2522,5 +2522,330 @@ console.log('insights (advice derived from token counts alone)');
   });
 }
 
+console.log('brief (handing one session or request to Cursor Chat)');
+{
+  const brf = await loadTs('src/webview/brief.js', 'brief.mjs');
+  const ins = await loadTs('src/webview/insights.js', 'insights2.mjs');
+  const RATES = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Sonnet' };
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+
+  const ev = (o) => ({
+    id: o.id,
+    timestampMs: o.t,
+    modelRaw: 'claude-sonnet-5-thinking-high',
+    model: o.model ?? 'Sonnet 5 Thinking',
+    conversationId: o.s ?? 'sess',
+    counted: o.counted !== false,
+    cost: o.cost,
+    cacheSavings: o.savings ?? 0,
+    inputTokens: o.in ?? 0,
+    outputTokens: o.out ?? 0,
+    cacheReadTokens: o.cr ?? 0,
+    cacheWriteTokens: o.cw ?? 0,
+    totalTokens: (o.in ?? 0) + (o.out ?? 0) + (o.cr ?? 0) + (o.cw ?? 0),
+  });
+
+  const ctx = {
+    breakdownOf: (e) => ins.costBreakdown(e, RATES),
+    classify: (e) => ins.classifyRequest(e),
+    ratesOf: () => RATES,
+    // Fixed rather than locale-dependent, so the assertions below mean the same
+    // thing on every machine that runs them.
+    formatTime: (ms) => new Date(ms).toISOString().slice(11, 16),
+  };
+
+  /** A plain session: n ordinary cached turns, one per minute. */
+  const plain = (n, s = 'sess') => Array.from({ length: n }, (_, i) =>
+    ev({ id: `${s}-${i}`, t: i * MIN, s, cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000 }));
+
+  test('the cost curve is the same size whatever the session is', () => {
+    // The whole reason it exists: a 300-request session must not cost 25x more
+    // to describe than a 12-request one.
+    assert.equal(brf.costCurve(plain(47)).length, 6);
+    assert.equal(brf.costCurve(plain(300)).length, 6);
+    assert.equal(brf.costCurve(plain(12)).length, 6);
+    // Fewer requests than slices collapses rather than emitting empty buckets.
+    assert.equal(brf.costCurve(plain(3)).length, 3);
+    assert.deepEqual(brf.costCurve([]), []);
+  });
+
+  test('the curve covers every request exactly once', () => {
+    const curve = brf.costCurve(plain(47));
+    assert.equal(curve.reduce((s, c) => s + c.count, 0), 47);
+    assert.equal(curve[0].from, 0);
+    assert.equal(curve[curve.length - 1].to, 47);
+  });
+
+  test('the curve keeps the step a compaction puts in the session', () => {
+    // Heavy reads, then a compaction, then light reads. Downsampling to
+    // "representative rows" is what loses this; slice medians keep it.
+    const heavy = Array.from({ length: 24 }, (_, i) =>
+      ev({ id: `h${i}`, t: i * MIN, s: 'z', cost: 0.5, cr: 900000 }));
+    const light = Array.from({ length: 24 }, (_, i) =>
+      ev({ id: `l${i}`, t: (25 + i) * MIN, s: 'z', cost: 0.1, cr: 90000 }));
+    const curve = brf.costCurve([...heavy, ...light]);
+    assert.ok(curve[0].medianRead > 500000, 'early slices should be heavy');
+    assert.ok(curve[5].medianRead < 200000, 'late slices should be light');
+  });
+
+  test('a spike moves the median far less than it moves a mean', () => {
+    // Reported once, in the events list, rather than also inflating a slice and
+    // reading as sustained growth.
+    const flat = Array.from({ length: 23 }, (_, i) =>
+      ev({ id: `f${i}`, t: i * MIN, s: 'z', cost: 0.1, cr: 100000 }));
+    flat.push(ev({ id: 'spike', t: 24 * MIN, s: 'z', cost: 5, cr: 12000000 }));
+    const curve = brf.costCurve(flat);
+    const last = curve[curve.length - 1];
+    assert.equal(last.medianRead, 100000, 'the spike does not drag the slice up with it');
+    // It is still visible where it belongs: in the slice's total cost.
+    assert.ok(last.cost > curve[0].cost * 5);
+  });
+
+  const gapSession = [
+    ...plain(4, 'g'),
+    ev({ id: 'g-resume', t: 5 * HOUR, s: 'g', cost: 6.81, in: 110696, out: 62425, cr: 0, cw: 844618 }),
+    ...Array.from({ length: 4 }, (_, i) =>
+      ev({ id: `g-after${i}`, t: 5 * HOUR + (i + 1) * MIN, s: 'g', cost: 0.3, cr: 850000 })),
+  ];
+
+  test('an event a finding already narrates is not narrated twice', () => {
+    const findings = [{ anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', title: 't', body: 'b' }];
+    const bare = brf.briefEvents(gapSession, [], ctx);
+    const deduped = brf.briefEvents(gapSession, findings, ctx);
+    assert.ok(bare.some((e) => /idle before #5/.test(e.line)), 'the gap is an event on its own');
+    assert.ok(!deduped.some((e) => /idle before #5/.test(e.line)),
+      'once a finding owns that request, repeating it invites double-counting the money');
+  });
+
+  test('events are ranked by dollars and capped', () => {
+    const many = Array.from({ length: 12 }, (_, i) =>
+      ev({ id: `m${i}`, t: i * 2 * HOUR, s: 'm', cost: i * 0.5, cr: 100000 }));
+    const events = brf.briefEvents(many, [], ctx);
+    assert.ok(events.length <= 5, `capped, got ${events.length}`);
+    const impacts = events.map((e) => e.impact);
+    assert.deepEqual(impacts, [...impacts].sort((a, b) => b - a), 'dearest first');
+  });
+
+  test('"the dearest request" never names the runner-up', () => {
+    const bare = brf.briefEvents(gapSession, [], ctx);
+    assert.ok(bare.some((e) => /#5 was the dearest request/.test(e.line)));
+    // Once a finding owns the dearest one, this line goes quiet rather than
+    // promoting the second-dearest and calling it the dearest.
+    const findings = [{ anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', title: 't', body: 'b' }];
+    assert.ok(!brf.briefEvents(gapSession, findings, ctx).some((e) => /dearest request/.test(e.line)));
+  });
+
+  test('a compaction the findings already judged is not re-narrated', () => {
+    // compaction-worked / compaction-undone anchor to the regrowth request, not
+    // to the summary, so matching on request id alone would miss this.
+    const withCompaction = [
+      ...plain(3, 'c'),
+      ev({ id: 'c-sum', t: 4 * MIN, s: 'c', cost: 0.07, in: 165817, out: 2786 }),
+      ...plain(3, 'c2'),
+    ];
+    assert.ok(brf.briefEvents(withCompaction, [], ctx).some((e) => /compacted the conversation/.test(e.line)));
+    const judged = [{ rule: 'compaction-undone', anchor: { requestId: 'c2-2', sessionId: 'c' }, severity: 'medium', title: 't', body: 'b' }];
+    assert.ok(!brf.briefEvents(withCompaction, judged, ctx).some((e) => /compacted the conversation/.test(e.line)));
+  });
+
+  test('the cost split leads with the largest bucket and drops the empty ones', () => {
+    const text = brf.buildRequestBrief({
+      event: gapSession[4], sessionEvents: gapSession, session: { id: 'g' }, ...ctx,
+    });
+    const split = text.match(/- Cost split: (.*)/)[1];
+    assert.ok(split.startsWith('cache write'), `largest first, got "${split}"`);
+    assert.ok(!/cache read/.test(split), 'a cold start read nothing; saying so in dollars costs tokens');
+    const shares = [...split.matchAll(/\((\d+)%\)/g)].map((m) => Number(m[1]));
+    assert.deepEqual(shares, [...shares].sort((a, b) => b - a));
+  });
+
+  test('errored requests are one line, not one line each', () => {
+    const withErrors = [
+      ...plain(3, 'e'),
+      ev({ id: 'e-x', t: 10 * MIN, s: 'e', cost: 0.07, cr: 1000, counted: false }),
+      ev({ id: 'e-y', t: 11 * MIN, s: 'e', cost: 0.07, cr: 1000, counted: false }),
+    ];
+    const lines = brf.briefEvents(withErrors, [], ctx).map((e) => e.line);
+    const errored = lines.filter((l) => /errored/.test(l));
+    assert.equal(errored.length, 1);
+    assert.ok(/2 requests errored/.test(errored[0]));
+  });
+
+  const session = { id: 'g', name: 'Migrate auth service', costBasis: 'billed by the plan' };
+
+  test('a session brief states its cost basis, its shape and its money', () => {
+    const findings = [{
+      anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', impact: 3.1,
+      title: '$3.10 spent re-caching a thread left for 5.1h', body: 'The prompt cache had expired.',
+      action: 'Start a fresh chat after hours away.',
+    }];
+    const text = brf.buildSessionBrief({ session, events: gapSession, findings, ...ctx,
+      template: brf.BRIEF_TEMPLATES[0] });
+    assert.ok(text.includes('billed by the plan'), 'without this the dollars are ambiguous');
+    assert.ok(text.includes('Migrate auth service'));
+    assert.ok(/## Cost curve/.test(text));
+    assert.ok(/Context handling was \d+%/.test(text));
+    assert.ok(text.includes('$3.10 spent re-caching'), 'findings are quoted');
+    assert.ok(text.includes(brf.BRIEF_TEMPLATES[0].prompt), 'the question is the point of the brief');
+    assert.ok(/markers.*idle before #5/.test(text), 'the curve marks where the shape changed');
+  });
+
+  test('the finding action is left out, since beating it is the job', () => {
+    const findings = [{
+      anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', impact: 3.1,
+      title: 'Re-cached a stale thread', body: 'Body.', action: 'GENERIC-ADVICE-MARKER',
+    }];
+    const text = brf.buildSessionBrief({ session, events: gapSession, findings, ...ctx });
+    assert.ok(text.includes('Re-cached a stale thread'));
+    assert.ok(!text.includes('GENERIC-ADVICE-MARKER'),
+      'quoting our own advice anchors the answer to what we are trying to improve on');
+  });
+
+  test('findings are capped and a positive never crowds out real money', () => {
+    const findings = [
+      ...Array.from({ length: 6 }, (_, i) => ({
+        anchor: { requestId: `g-after${i % 4}`, sessionId: 'g' }, severity: 'high', impact: 6 - i,
+        title: `High ${i}`, body: 'b',
+      })),
+      { anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'positive', impact: 0, title: 'Nice', body: 'b' },
+    ];
+    const text = brf.buildSessionBrief({ session, events: gapSession, findings, ...ctx });
+    const quoted = text.match(/^\d+\. \[/gm) || [];
+    assert.equal(quoted.length, 4);
+    assert.ok(!text.includes('Nice'), 'the positive is dropped before a finding with dollars on it');
+  });
+
+  test('the detailed timeline is opt-in, and it is what costs the tokens', () => {
+    const compact = brf.buildSessionBrief({ session, events: plain(47), ...ctx });
+    const detailed = brf.buildSessionBrief({ session, events: plain(47), detail: true, ...ctx });
+    assert.ok(!/^#12 /m.test(compact), 'compact never lists requests');
+    assert.ok(/^#12 /m.test(detailed));
+    assert.ok(brf.estimateBriefSize(detailed).tokens > brf.estimateBriefSize(compact).tokens * 2,
+      'if detail were cheap there would be no reason to default to compact');
+  });
+
+  test('a session brief stays roughly flat as the session grows', () => {
+    const small = brf.estimateBriefSize(brf.buildSessionBrief({ session, events: plain(12), ...ctx })).tokens;
+    const large = brf.estimateBriefSize(brf.buildSessionBrief({ session, events: plain(300), ...ctx })).tokens;
+    assert.ok(large < small * 1.3, `12 requests cost ${small} tokens, 300 cost ${large}`);
+  });
+
+  test('a request brief looks one request back and three forward', () => {
+    const text = brf.buildRequestBrief({
+      event: gapSession[4],
+      sessionEvents: gapSession,
+      session,
+      findings: [],
+      template: brf.BRIEF_TEMPLATES.find((t) => t.id === 'request-avoidable'),
+      ...ctx,
+    });
+    assert.ok(/request #5 of 9/.test(text), 'position in the session');
+    assert.ok(/- Before: #4 /.test(text));
+    assert.ok(/4h 57m before this one/.test(text), 'the gap is what the previous request is there to establish');
+    assert.ok(/- After: #6 .* · #7 .* · #8 /.test(text), 'three forward — was the re-cache earned back?');
+    assert.ok(/1 more request/.test(text), 'and what became of the rest');
+    assert.ok(/Shape: cold start/.test(text));
+    assert.ok(/Cost split: cache write/.test(text));
+  });
+
+  test('a request brief handles the ends of a session', () => {
+    const last = brf.buildRequestBrief({ event: gapSession[8], sessionEvents: gapSession, session, ...ctx });
+    assert.ok(/After: nothing/.test(last));
+    const first = brf.buildRequestBrief({ event: gapSession[0], sessionEvents: gapSession, session, ...ctx });
+    assert.ok(!/- Before:/.test(first));
+  });
+
+  test('nothing a user wrote can reach the brief', () => {
+    // The extension never reads prompts or code, but a brief is the one thing
+    // here that leaves the machine — so this asserts the shape rather than
+    // trusting it.
+    const decoy = {
+      ...gapSession[4],
+      prompt: 'SECRET-PROMPT-TEXT',
+      text: 'SECRET-MESSAGE-TEXT',
+      content: 'SECRET-CODE-CONTEXT',
+      messages: [{ role: 'user', content: 'SECRET-TURN' }],
+    };
+    const events = [...gapSession.slice(0, 4), decoy, ...gapSession.slice(5)];
+    const both = brf.buildSessionBrief({ session, events, detail: true, ...ctx })
+      + brf.buildRequestBrief({ event: decoy, sessionEvents: events, session, ...ctx });
+    for (const secret of ['SECRET-PROMPT-TEXT', 'SECRET-MESSAGE-TEXT', 'SECRET-CODE-CONTEXT', 'SECRET-TURN']) {
+      assert.ok(!both.includes(secret), `${secret} reached the brief`);
+    }
+  });
+
+  test('the preamble forbids the three things that waste a round trip', () => {
+    const p = brf.BRIEF_PREAMBLE;
+    assert.ok(/ask no clarifying questions/.test(p));
+    assert.ok(/Never invent, estimate or extrapolate/.test(p));
+    assert.ok(/never prompts, messages or code/.test(p), 'it must explain why nobody can answer "what were you doing"');
+    assert.ok(/cache read ~0\.1x input/.test(p),
+      'without the rate ratios a reader congratulates the user on a 90% cache hit rate');
+  });
+
+  test('every template demands the answer cite figures', () => {
+    for (const t of brf.BRIEF_TEMPLATES) {
+      assert.ok(['session', 'request'].includes(t.scope));
+      assert.ok(t.prompt.length > 40, `${t.id} has no real prompt`);
+    }
+    assert.ok(brf.BRIEF_TEMPLATES.some((t) => t.scope === 'session'));
+    assert.ok(brf.BRIEF_TEMPLATES.some((t) => t.scope === 'request'));
+  });
+
+  test('the size estimate grows with the text and is never zero for real text', () => {
+    assert.equal(brf.estimateBriefSize('').tokens, 0);
+    assert.ok(brf.estimateBriefSize('abcd').tokens >= 1);
+    assert.ok(brf.estimateBriefSize('x'.repeat(4000)).tokens > brf.estimateBriefSize('x'.repeat(400)).tokens);
+  });
+
+  test('the period brief keeps the notes it has always had', () => {
+    // buildCursorBrief now pulls these from here; if they changed, a shipped
+    // brief changed with them.
+    assert.deepEqual(brf.BRIEF_NOTES, [
+      '- Auto optimizes for task success and uses the Auto+Composer pool — not always the cheapest rate card.',
+      '- Cheaper models in comparisons assume the same token counts; real usage may differ.',
+      '- Token cost excludes flat per-request usage fees unless noted in summary.',
+    ]);
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    assert.ok(main.includes("parts.push('---', 'Notes for the model:', ...BRIEF_NOTES)"),
+      'the period brief must still emit the same heading above them');
+  });
+
+  test('sessions the dashboard can price oddly still produce a brief', () => {
+    const single = [ev({ id: 'one', t: 0, s: 'x', cost: 0.4, in: 5000, out: 900, cr: 20000 })];
+    assert.ok(brf.buildSessionBrief({ session: { id: 'x' }, events: single, ...ctx }).length > 0);
+    // No pricing table for this model: the split is unavailable, the brief isn't.
+    const unpriced = brf.buildSessionBrief({
+      session: { id: 'x' }, events: single, ...ctx, breakdownOf: () => null,
+    });
+    assert.ok(unpriced.includes('## Cost curve'));
+    assert.ok(!unpriced.includes('Context handling was'));
+    assert.equal(brf.buildSessionBrief({ session, events: [], ...ctx }), '');
+    assert.equal(brf.buildRequestBrief({ event: null, ...ctx }), '');
+  });
+
+  test('every id the ask dialog wires up exists in the markup', () => {
+    const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+    for (const id of [
+      'sessionAskBtn', 'askCursorDialog', 'askTitle', 'askClose', 'askRequest',
+      'askTemplate', 'askCustomQ', 'askDetail', 'askDetailLabel', 'askPreview',
+      'askSize', 'askCopy', 'askStatus',
+    ]) {
+      assert.ok(html.includes(`id="${id}"`), `markup is missing id="${id}"`);
+    }
+  });
+
+  test('the ask dialog is not nested inside a view that can be display:none', () => {
+    // A <dialog> inside a hidden ancestor opens at zero size — the exact bug the
+    // session detail dialog already had, and this one is opened from it.
+    const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+    const before = html.slice(0, html.indexOf('id="askCursorDialog"'));
+    const opened = (before.match(/<section /g) || []).length;
+    const closed = (before.match(/<\/section>/g) || []).length;
+    assert.equal(opened, closed, 'askCursorDialog sits inside an unclosed <section>');
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

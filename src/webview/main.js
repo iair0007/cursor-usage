@@ -71,7 +71,32 @@ import {
 
 const inVsCode = typeof acquireVsCodeApi === 'function';
 const vscode = inVsCode ? acquireVsCodeApi() : null;
-const browserToken = inVsCode ? null : (window.__CURSOR_USAGE_TOKEN__ || '');
+
+const BROWSER_TOKEN_KEY = 'cursorUsageDashboardToken';
+
+/**
+ * The RPC token for a standalone browser tab.
+ *
+ * The extension host opens the tab at `/?token=…` and the token moves straight
+ * into sessionStorage: it survives a reload (which the URL would not, since it
+ * is cleaned immediately) and it dies with the tab. It is deliberately not
+ * inlined into the page — a `<script>` block carrying it would be blocked by
+ * the page's own `script-src 'self'`, which is exactly what should happen to
+ * inline script.
+ */
+function readBrowserToken() {
+  const url = new URL(window.location.href);
+  const fromUrl = url.searchParams.get('token');
+  if (fromUrl) {
+    try { sessionStorage.setItem(BROWSER_TOKEN_KEY, fromUrl); } catch { /* private mode */ }
+    // Off the address bar, out of the history entry, and out of any Referer.
+    window.history.replaceState(null, '', url.pathname);
+    return fromUrl;
+  }
+  try { return sessionStorage.getItem(BROWSER_TOKEN_KEY) || ''; } catch { return ''; }
+}
+
+const browserToken = inVsCode ? null : readBrowserToken();
 
 // ---------------------------------------------------------------------------
 // RPC bridge to the extension host
@@ -127,7 +152,17 @@ async function rpcOverHttp(method, params, timeoutMs) {
   } finally {
     clearTimeout(timer);
   }
-  const msg = await res.json();
+  // Not every response is a JSON envelope: a rejected token or a wrong path is
+  // answered by the server itself, and calling .json() on those turns a clear
+  // problem into "Unexpected token 'F' in JSON at position 0".
+  if (res.status === 403) {
+    throw new Error('This dashboard tab is no longer authorised — run "Cursor Usage: Open in Browser" '
+      + 'again from the IDE to get a fresh link.');
+  }
+  if (!res.ok) {
+    throw new Error(`"${method}" failed: the extension answered ${res.status}.`);
+  }
+  const msg = await res.json().catch(() => ({ error: `"${method}" returned a malformed response.` }));
   if (msg.error) {
     const err = new Error(msg.error);
     err.authError = Boolean(msg.authError);
@@ -1726,7 +1761,10 @@ function sessionLabel(id) {
  */
 async function loadSessionTitles(ids) {
   const { titles, titlesPending } = state.sessions;
-  const wanted = ids.filter(
+  // Deduped: a page of the request log is mostly a handful of conversations
+  // repeated, and asking for the same id 20 times in one call is 20 times the
+  // payload for the same answer.
+  const wanted = [...new Set(ids)].filter(
     (id) => id !== UNATTRIBUTED_SESSION && !titles.has(id) && !titlesPending.has(id),
   );
   if (!wanted.length) return;
@@ -1762,9 +1800,13 @@ async function loadSessionTitles(ids) {
   }
   if (!learned) return;
   if (state.appView === 'analyze' && state.analyzePanel === 'sessions') renderSessions();
-  // The request log names sessions too, so a lookup that lands after it has
-  // drawn would otherwise leave raw ids in a column that has room for names.
-  if (state.appView === 'usage' && state.panel === 'requests') renderTable(state.filtered, summarize(state.filtered));
+  // The request log names sessions too, and it is redrawn here whichever view
+  // is on screen: switching tabs only unhides the table, it does not rebuild
+  // it. The first page of names is usually requested while the user is still
+  // on the Overview, so gating this on the current view meant the names had
+  // arrived but the column kept showing raw ids until a sort or a page change
+  // happened to force a redraw.
+  if (state.filtered.length) renderTable(state.filtered, summarize(state.filtered));
 }
 
 function fmtDuration(ms) {
@@ -3095,10 +3137,13 @@ function renderTable(events, summary) {
       : (e.cacheReadTokens > 0 ? ' title="No matching model pricing — savings unavailable"' : '');
     const flags = findingsForRequest(state.insights, e.id);
     const sessionId = e.conversationId || null;
-    const sessionName = sessionId ? (state.sessions.titles.get(sessionId) || sessionId) : null;
+    // Same label the session list uses: an unnamed conversation is shortened
+    // rather than printed in full, so one column doesn't read as a 24-character
+    // id while the other reads as "conv_0000…0023".
+    const label = sessionId ? sessionLabel(sessionId) : null;
     const sessionCell = sessionId
-      ? `<button type="button" class="btn-link session-link" data-session="${esc(sessionId)}"
-          title="${esc(sessionName)}">${esc(sessionName)}</button>`
+      ? `<button type="button" class="btn-link session-link${label.isId ? ' is-id' : ''}"
+          data-session="${esc(sessionId)}" title="${esc(sessionId)}">${esc(label.text)}</button>`
       : '<span class="session-none" title="The usage API reported no conversation for this request">—</span>';
     const open = state.expandedRequests.has(e.id);
     const row = `<tr class="${expensive ? 'expensive' : ''}${open ? ' row-open' : ''}" data-request="${esc(e.id)}">
@@ -3770,7 +3815,26 @@ function exportCsv() {
   ]);
   const csv = [headers.join(','), ...rows.map((r) => r.map(csvCell).join(','))].join('\n');
   const filename = `cursor-usage-${$('startDate').value}-${$('endDate').value}.csv`;
+  // In a browser tab the host's save dialog would open behind the IDE window,
+  // where nobody watching this tab would see it. The browser's own download is
+  // both visible and where a browser user expects a file to land.
+  if (!inVsCode) {
+    downloadCsv(csv, filename);
+    return;
+  }
   rpc('exportCsv', { csv, filename }).catch((e) => showAlert('error', `Export failed: ${e.message}`));
+}
+
+function downloadCsv(csv, filename) {
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showAlert('info', `Downloading ${filename}.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -5301,6 +5365,10 @@ async function init() {
   // to its own change event — handling both would toggle the row twice.
   $('sessionsList')?.addEventListener('click', (ev) => {
     if (ev.target.closest('input[type="checkbox"]')) return;
+    // The name is a link into the session's own view, handled by the delegated
+    // finding/session listener. Without this it also toggled the row into the
+    // comparison tray, so opening a session quietly picked it for comparison.
+    if (ev.target.closest('.session-open')) return;
     const sortable = ev.target.closest('[data-session-sort]');
     if (sortable) {
       setSessionSort(sortable.dataset.sessionSort);

@@ -67,7 +67,8 @@ All notable user-facing changes. Earlier releases predate this file; see the
   beside them, discounts included.
 - **The request log names the conversation each request came from**, and links
   to it — so an expensive row no longer means going hunting for which chat it
-  belonged to.
+  belonged to. Conversations Cursor has no name for are shortened the same way
+  the session list shortens them, rather than printing a raw id in full.
 - **New per-session view.** Opens from the session list, a request row, or a
   finding. Shows where that session's money went by token bucket, the findings
   anchored to it, and a bar per request in the order you asked them, with the
@@ -102,8 +103,12 @@ All notable user-facing changes. Earlier releases predate this file; see the
   same dashboard in your default browser instead of the IDE panel. It's
   served by a small local HTTP server on `127.0.0.1` — same local data
   access as the webview, same extension host underneath, just reachable from
-  a real browser tab. Gated by a random per-launch token and bound to
-  loopback only, so nothing else on the machine (or network) can reach it.
+  a real browser tab. Every call that returns usage data is gated by a random
+  per-session token, and the server is bound to loopback only, so nothing else
+  on the machine (or network) can reach it. The tab keeps working across a
+  reload, and **follows your OS light/dark preference** — there's no editor
+  theme to inherit out there. **Export CSV** downloads through the browser
+  rather than opening a save dialog back in the IDE, where you wouldn't see it.
 
 ## 0.7.2 — 2026-08-15
 

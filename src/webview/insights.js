@@ -328,10 +328,15 @@ export function buildInsights({ events, ratesFor, thresholds = {} }) {
   const overhead = newChatOverhead(priced, dollarsOf, t);
   if (overhead) findings.push(overhead);
 
+  // Two compactions in one session can both regrow into the same later request,
+  // and the rule anchors to the regrowth rather than to the summary — so the
+  // same card would be rendered twice and its dollars counted twice in a brief.
+  const unique = [...new Map(findings.map((f) => [f.id, f])).values()];
+
   // Positive findings are worth showing but never worth topping the list: they
   // have no dollars attached and would otherwise outrank real money whenever
   // impact ties at zero.
-  return findings.sort((a, b) => {
+  return unique.sort((a, b) => {
     if ((a.severity === 'positive') !== (b.severity === 'positive')) return a.severity === 'positive' ? 1 : -1;
     return (b.impact ?? 0) - (a.impact ?? 0);
   });

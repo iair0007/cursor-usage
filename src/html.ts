@@ -38,11 +38,18 @@ ${dashboardBody()}
 /**
  * Standalone page served by the local browser server (see browserServer.ts)
  * so the dashboard can be opened in a real browser tab instead of the VS
- * Code webview. Same body markup and bundled main.js/styles.css; the token
- * lets the client's fetch-based RPC bridge authenticate its calls back to
- * the extension host.
+ * Code webview. Same body markup and bundled main.js/styles.css.
+ *
+ * Carries no token of its own. main.js picks the token out of the launch URL
+ * and keeps it in sessionStorage — which is what lets the tab survive a
+ * reload, and what keeps this page free of the inline script that
+ * `script-src 'self'` would (correctly) refuse to run.
+ *
+ * `class="standalone"` marks the one context where no VS Code theme variables
+ * exist, so the stylesheet can follow the OS light/dark preference instead of
+ * always rendering the light fallback palette.
  */
-export function getBrowserDashboardHtml(token: string): string {
+export function getBrowserDashboardHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -51,14 +58,11 @@ export function getBrowserDashboardHtml(token: string): string {
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self';" />
   <title>Cursor Usage Dashboard</title>
+  <link rel="icon" href="/favicon.png" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
-<body>
+<body class="standalone">
 ${dashboardBody()}
-  <script>
-    window.__CURSOR_USAGE_TOKEN__ = ${JSON.stringify(token)};
-    if (location.search) history.replaceState(null, '', location.pathname);
-  </script>
   <script src="/main.js"></script>
 </body>
 </html>`;

@@ -384,10 +384,15 @@
             <h4>Cost per request</h4>
             <p class="panel-desc">Each bar is one request, in order. The shaded part is context handling —
               re-reading and re-caching the conversation — as opposed to the answer itself.</p>
-            <div id="sessionDetailTimeline" class="session-timeline"></div>
-          </section>
-        </div>
-      </dialog>
+          <div id="sessionDetailTimeline" class="session-timeline"></div>
+        </section>
+      </div>
+      <!--
+        Inside the dialog on purpose: a modal renders in the top layer, so a
+        tooltip parented to <body> would sit behind it whatever its z-index.
+      -->
+      <div id="tlTip" class="tl-tip" role="tooltip" hidden></div>
+    </dialog>
 
     <dialog id="askCursorDialog" class="sessions-dialog ask-dialog">
       <header class="sessions-dialog-head">

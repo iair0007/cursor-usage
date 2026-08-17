@@ -38,6 +38,36 @@ All notable user-facing changes. Earlier releases predate this file; see the
   starts in is already covered by the idle gap and the session's median; what
   nothing else can tell you is whether a huge re-cache was earned back over the
   turns that followed or thrown away when the thread was abandoned.
+- **The session timeline now shows each request's cost on hover**, and marks the
+  turns Cursor generated to summarise the conversation with a striped bar and a
+  legend. The bars carried this detail before, but only in the browser's own
+  tooltip, which waits about a second and can't be reached from the keyboard.
+- **The request that did the summarising is now findable.** It carries a
+  `summary` chip in the request log, and the "summarising worked, then the
+  context grew back" finding gained a second link straight to it — the finding is
+  anchored to the request that spent the money, which is not the summary, so
+  until now nothing in the product pointed at it.
+- **New findings for things that changed partway through a session**, all derived
+  from token counts and timestamps as ever:
+  - *Switching model* — prices the requests after the switch against the rate card
+    of the model you left. Both figures cover identical token counts, so a session
+    whose context grew across the switch doesn't blame the new model for growth it
+    had nothing to do with. Reported the other way round too when a switch saved
+    money.
+  - *Raising the reasoning effort* — Cursor bills every effort level of a model on
+    one published row, so this can't be a price comparison: re-pricing the same
+    tokens would return zero by construction. It's measured in what actually
+    changes, which is how much the model writes.
+  - *A price that moved under you* — the same model billed differently against the
+    same published rate, which is usually a promotion starting or ending. Measured
+    from what was charged rather than from the discount table, whose entries are
+    per-day and so would only ever catch a session that ran across midnight.
+- **Fixed: findings in an expanded request row ran off the right of the screen.**
+  The request log needs `white-space: nowrap` for its twelve columns of timestamps
+  and token counts, and that inherits — so in the one cell that holds sentences it
+  turned each finding into a single unbreakable line. Worse, that line's width fed
+  back into the table's own minimum width, so the detail row wasn't merely sitting
+  in a wide table, it was what made the table wide.
 - **The session timeline now prices every bar.** It used to print only a "peak"
   caption, centred under the middle of the plot — so on a three-request session
   it sat above the *smallest* bar and read as that bar's label. Each bar now

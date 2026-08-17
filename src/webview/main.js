@@ -2831,6 +2831,12 @@ function renderFindingCards(findings, opts = {}) {
     if (opts.linkRequest !== false && f.anchor?.requestId) {
       links.push(`<button type="button" class="btn-link finding-jump" data-request="${esc(f.anchor.requestId)}">Show me the request →</button>`);
     }
+    // Some findings are about one request but caused by another — a thread that
+    // regrew after a summary is the case. The summary is what the reader wants
+    // to see next, and it is not the anchor.
+    if (f.anchor?.summaryRequestId) {
+      links.push(`<button type="button" class="btn-link finding-jump" data-request="${esc(f.anchor.summaryRequestId)}">Show me the summary →</button>`);
+    }
     if (opts.linkSession !== false && f.anchor?.sessionId && f.anchor.sessionId !== UNATTRIBUTED_SESSION) {
       links.push(`<button type="button" class="btn-link finding-session" data-session="${esc(f.anchor.sessionId)}">Open the session →</button>`);
     }
@@ -2895,6 +2901,7 @@ function renderSessionTimeline(events) {
   const priced = events.filter((e) => e.cost != null && e.cost > 0);
   if (!priced.length) return '<p class="bd-empty">No priced requests in this session.</p>';
   const max = Math.max(...priced.map((e) => e.cost));
+  let compactions = 0;
   const bars = priced.map((event, index) => {
     const breakdown = breakdownForEvent(event);
     const contextPct = breakdown && breakdown.total > 0
@@ -2902,12 +2909,22 @@ function renderSessionTimeline(events) {
       : 0;
     const height = max > 0 ? Math.max(3, (event.cost / max) * 100) : 3;
     const flags = findingsForRequest(state.insights, event.id);
-    const tip = `#${index + 1} · ${fmt.date(event.timestampMs)} · ${fmt.money(event.cost)}`
-      + `${breakdown ? ` · ${fmt.pct(contextPct)} context` : ''}`
-      + `${flags.length ? `\n${flags.map((f) => f.title).join('\n')}` : ''}`;
-    return `<button type="button" class="tl-bar${flags.length ? ' tl-flagged' : ''}"
+    const isCompaction = classifyRequest(event, state.analyzeThresholds) === 'compaction';
+    if (isCompaction) compactions += 1;
+    // Carried as data rather than a `title`, because the native tooltip waits
+    // about a second before appearing and can't be reached from the keyboard.
+    // renderTimelineTip below builds the visible one from these.
+    const lines = [
+      `#${index + 1} · ${fmt.date(event.timestampMs)}`,
+      `${fmt.money(event.cost)}${breakdown ? ` · ${fmt.pct(contextPct)} context handling` : ''}`,
+      esc(event.model),
+      ...(isCompaction ? ['Cursor summarised the conversation here'] : []),
+      ...flags.map((f) => f.title),
+    ];
+    return `<button type="button" class="tl-bar${flags.length ? ' tl-flagged' : ''}${isCompaction ? ' tl-compaction' : ''}"
         data-request="${esc(event.id)}" style="--bar-h:${height}%;--ctx-h:${contextPct}%"
-        title="${esc(tip)}"><span class="tl-context"></span></button>`;
+        data-tl-tip="${esc(lines.join('\n'))}"
+        aria-label="${esc(lines.join('. '))}"><span class="tl-context"></span></button>`;
   }).join('');
 
   // A price under every bar, while they are wide enough to carry one. Past this
@@ -2920,7 +2937,41 @@ function renderSessionTimeline(events) {
       .map((e) => `<span>${moneyFine(e.cost)}</span>`).join('')}</div>`
     : `<div class="tl-axis"><span>first request</span>`
       + `<span>peak ${fmt.money(max)} at #${peakAt}</span><span>last request</span></div>`;
-  return `<div class="tl-plot">${bars}</div>${foot}`;
+  const legend = compactions
+    ? `<p class="tl-legend"><span class="tl-key tl-compaction"></span>${compactions === 1
+      ? 'The striped bar is where Cursor summarised the conversation'
+      : `The ${fmt.num(compactions)} striped bars are where Cursor summarised the conversation`} — not a request you made.</p>`
+    : '';
+  return `<div class="tl-plot">${bars}</div>${foot}${legend}`;
+}
+
+/**
+ * The timeline's tooltip: one element, moved and refilled as bars are hovered.
+ *
+ * Fixed rather than absolute because `.tl-plot` scrolls horizontally, and an
+ * `overflow-x: auto` box clips on both axes — an absolutely positioned tip would
+ * be cut off by the plot it belongs to. It also has to live inside the dialog:
+ * a modal renders in the top layer, so a tooltip parented to <body> would sit
+ * behind it however high its z-index.
+ */
+function showTimelineTip(bar) {
+  const el = $('tlTip');
+  if (!el || !bar?.dataset.tlTip) return;
+  el.textContent = bar.dataset.tlTip;
+  el.hidden = false;
+  const rect = bar.getBoundingClientRect();
+  const tip = el.getBoundingClientRect();
+  // Above the bar by default, below it when there's no room — a short bar near
+  // the top of the plot has nothing above it to pop into.
+  const above = rect.top - tip.height - 8;
+  el.style.top = `${above > 8 ? above : rect.bottom + 8}px`;
+  const left = rect.left + rect.width / 2 - tip.width / 2;
+  el.style.left = `${Math.max(8, Math.min(left, window.innerWidth - tip.width - 8))}px`;
+}
+
+function hideTimelineTip() {
+  const el = $('tlTip');
+  if (el) el.hidden = true;
 }
 
 /** Opens the per-session breakdown for one conversation. */
@@ -3146,9 +3197,20 @@ function renderTable(events, summary) {
           data-session="${esc(sessionId)}" title="${esc(sessionId)}">${esc(label.text)}</button>`
       : '<span class="session-none" title="The usage API reported no conversation for this request">—</span>';
     const open = state.expandedRequests.has(e.id);
+    const kind = classifyRequest(e, state.analyzeThresholds);
+    // A compaction is not a request the user made, and it is the one row people
+    // go looking for after reading "summarising worked" — so it says so in the
+    // log rather than only inside the detail nobody has expanded yet.
+    // A native title rather than the .tip pattern: the other per-row
+    // explanations in this table use one, and a CSS tooltip here would be
+    // clipped by the log's own horizontal scroll.
+    const kindChip = kind === 'compaction'
+      ? '<span class="kind-chip" title="Cursor compacting the conversation: the whole thread went up'
+        + ' in one uncached request and a summary came back. Not a request you made.">summary</span>'
+      : '';
     const row = `<tr class="${expensive ? 'expensive' : ''}${open ? ' row-open' : ''}" data-request="${esc(e.id)}">
       <td class="time-cell"><button type="button" class="row-toggle" data-toggle="${esc(e.id)}"
-        aria-expanded="${open}" title="What this request's cost was made of">${open ? '▾' : '▸'}</button>${fmt.date(e.timestampMs)}${insightBadge(flags)}</td>
+        aria-expanded="${open}" title="What this request's cost was made of">${open ? '▾' : '▸'}</button>${fmt.date(e.timestampMs)}${kindChip}${insightBadge(flags)}</td>
       <td>${esc(e.model)}${discountBadge(discountForEvent(e.modelRaw, e.timestampMs))}</td>
       <td class="session-cell">${sessionCell}</td>
       <td class="cost">${fmt.money(e.cost)}</td>
@@ -3162,21 +3224,22 @@ function renderTable(events, summary) {
       <td><button type="button" class="btn-link btn-compare" data-id="${esc(e.id)}">Compare</button></td>
     </tr>`;
     if (!open) return row;
-    const kind = classifyRequest(e, state.analyzeThresholds);
     const kindNote = kind === 'compaction'
       ? '<p class="bd-note">This looks like Cursor compacting the conversation: the whole thread went up '
         + 'in one uncached request and a summary came back. It is not a request you made.</p>'
       : '';
     return `${row}<tr class="row-detail" data-detail="${esc(e.id)}"><td colspan="12">
-      <div class="detail-grid">
-        <div>
-          <h4>What this cost was made of</h4>
-          ${renderBreakdown(breakdownForEvent(e), e)}
-          ${kindNote}
+      <div class="detail-sticky">
+        <div class="detail-grid">
+          <div>
+            <h4>What this cost was made of</h4>
+            ${renderBreakdown(breakdownForEvent(e), e)}
+            ${kindNote}
+          </div>
+          <div>${flags.length
+            ? `<h4>What stands out</h4><div class="findings-grid">${renderFindingCards(flags, { linkRequest: false })}</div>`
+            : ''}</div>
         </div>
-        <div>${flags.length
-          ? `<h4>What stands out</h4><div class="findings-grid">${renderFindingCards(flags, { linkRequest: false })}</div>`
-          : ''}</div>
       </div>
     </td></tr>`;
   }).join('');
@@ -5586,6 +5649,19 @@ async function init() {
   });
 
   $('sessionDetailClose')?.addEventListener('click', () => $('sessionDetailDialog').close());
+
+  // Delegated so it survives the timeline being re-rendered, and bound to focus
+  // as well as hover so the bars are readable without a pointer — which the
+  // native title attribute they used to carry never was.
+  const timeline = $('sessionDetailTimeline');
+  timeline?.addEventListener('mouseover', (ev) => showTimelineTip(ev.target.closest('.tl-bar')));
+  timeline?.addEventListener('focusin', (ev) => showTimelineTip(ev.target.closest('.tl-bar')));
+  timeline?.addEventListener('mouseleave', hideTimelineTip);
+  timeline?.addEventListener('focusout', hideTimelineTip);
+  // The plot scrolls sideways on a long session, which would leave the tip
+  // pointing at wherever the bar used to be.
+  timeline?.addEventListener('scroll', hideTimelineTip, true);
+  $('sessionDetailDialog')?.addEventListener('close', hideTimelineTip);
 
   // Stacks on top of the session dialog rather than replacing it, so closing the
   // ask puts the user back on the breakdown they were reading.

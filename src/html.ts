@@ -512,6 +512,11 @@ function dashboardBody(): string {
           <div id="sessionDetailTimeline" class="session-timeline"></div>
         </section>
       </div>
+      <!--
+        Inside the dialog on purpose: a modal renders in the top layer, so a
+        tooltip parented to <body> would sit behind it whatever its z-index.
+      -->
+      <div id="tlTip" class="tl-tip" role="tooltip" hidden></div>
     </dialog>
 
       <!--

@@ -13,7 +13,13 @@
 // identically on the Overview, in the session list and on the request row —
 // one rule, one place to fix it, three places it shows up.
 
-import { UNATTRIBUTED_SESSION } from './logic.js';
+import {
+  UNATTRIBUTED_SESSION,
+  autoRouting,
+  displayModel,
+  estimateTokenCost,
+  normModel,
+} from './logic.js';
 
 export const INSIGHT_DEFAULTS = {
   /**
@@ -46,6 +52,15 @@ export const INSIGHT_DEFAULTS = {
   compactionReliefPct: 40,
   concentrationTopN: 3,
   concentrationSharePct: 30,
+  /** Requests needed either side of a change before it is worth judging. */
+  switchMinRequests: 3,
+  /** A change has to move real money, and move it by a real proportion. */
+  switchMinImpact: 0.25,
+  switchMinPct: 20,
+  /** Output per request must grow by this much to call it an effort change. */
+  effortOutputMultiple: 1.5,
+  /** How far the billed-to-list ratio must move to count as a price change. */
+  priceShiftPct: 10,
 };
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -211,8 +226,12 @@ function compactionOutcome(list, idx, sessionId, dollarsOf, t) {
     const breakdown = dollarsOf(regrown);
     const spent = breakdown ? breakdown.cacheRead : 0;
     return finding(
+      // Anchored to the regrowth, because that is the request that cost the
+      // money — but `summaryRequestId` carries the summary itself, so the card
+      // can offer a link to it too. Without that, the one request the finding is
+      // about is the one nothing in the product points at.
       'compaction-undone', 'medium', 'request',
-      { requestId: regrown.id, sessionId }, spent,
+      { requestId: regrown.id, sessionId, summaryRequestId: event.id }, spent,
       'Summarising worked, then the context grew back',
       `Compacting at this point cut cache reads by ${reliefPct.toFixed(0)}% for ${money(event.cost ?? 0)}. `
         + `Within ${hours(regrown.timestampMs - event.timestampMs)} the thread was back to its previous `
@@ -232,6 +251,247 @@ function compactionOutcome(list, idx, sessionId, dollarsOf, t) {
     'Worth doing again when a thread starts feeling heavy — it costs cents and it is working here.',
     { reliefPct, costDollars: event.cost ?? 0 },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Things that changed partway through a session
+//
+// Three rules, not one, because the three changes people make are measured in
+// genuinely different units and merging them would print a confident wrong
+// number. `pricingLabel` is what separates them: it is the catalog row a request
+// actually priced against, where `modelRaw` is the billed variant string.
+//
+//   - A different rate card (a new model, or Auto starting to route somewhere)
+//     changes the price per token. Measurable by re-pricing the same tokens.
+//   - A different reasoning effort bills on the *same* rate card — Cursor's own
+//     docs say effort changes token usage, not price — so re-pricing yields
+//     exactly zero. It has to be measured in tokens instead.
+//   - A promotion beginning or ending changes neither, but changes what was
+//     actually charged for identical work.
+// ---------------------------------------------------------------------------
+
+/** Contiguous runs of requests sharing a key, in the order they were asked. */
+function runsBy(list, keyOf) {
+  const runs = [];
+  for (const event of list) {
+    const key = keyOf(event);
+    const last = runs[runs.length - 1];
+    if (last && last.key === key) last.events.push(event);
+    else runs.push({ key, events: [event] });
+  }
+  return runs;
+}
+
+function sumTokens(events) {
+  return events.reduce((acc, e) => ({
+    input: acc.input + (e.inputTokens || 0),
+    output: acc.output + (e.outputTokens || 0),
+    cacheRead: acc.cacheRead + (e.cacheReadTokens || 0),
+    cacheWrite: acc.cacheWrite + (e.cacheWriteTokens || 0),
+  }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+}
+
+function spent(events) {
+  return events.reduce((s, e) => s + (e.cost ?? 0), 0);
+}
+
+/** The rate card a request priced against, or its normalised name when unpriced. */
+function rateCardOf(event, ratesFor) {
+  const rates = ratesFor(event.modelRaw, event);
+  return rates?.label || `?${normModel(event.modelRaw)}`;
+}
+
+/**
+ * Moving to a different rate card partway through, and what it cost.
+ *
+ * The comparison prices the requests *after* the switch against the rates of the
+ * model that was left, rather than comparing what each half of the session
+ * actually spent. That distinction is the whole rule: a switch nearly always
+ * happens once a conversation is already large, so raw before-and-after spend
+ * would charge the new model for context growth it had nothing to do with.
+ * Holding the tokens fixed cancels the growth and leaves only the price.
+ */
+function modelSwitch(list, sessionId, ratesFor, t) {
+  const runs = runsBy(list, (e) => rateCardOf(e, ratesFor));
+  if (runs.length < 2) return null;
+
+  let worst = null;
+  for (let i = 1; i < runs.length; i += 1) {
+    const before = runs[i - 1];
+    const after = runs[i];
+    if (before.events.length < t.switchMinRequests || after.events.length < t.switchMinRequests) continue;
+    const priorRates = ratesFor(before.events[before.events.length - 1].modelRaw, before.events[0]);
+    if (!priorRates) continue;
+    const actual = spent(after.events);
+    const counterfactual = estimateTokenCost(priorRates, sumTokens(after.events));
+    if (counterfactual == null || !(actual > 0) || !(counterfactual > 0)) continue;
+    const delta = actual - counterfactual;
+    const pct = Math.abs(delta / counterfactual) * 100;
+    if (Math.abs(delta) < t.switchMinImpact || pct < t.switchMinPct) continue;
+    if (!worst || Math.abs(delta) > Math.abs(worst.delta)) {
+      worst = { before, after, delta, actual, counterfactual, at: list.indexOf(after.events[0]) };
+    }
+  }
+  if (!worst) return null;
+
+  const { before, after, delta, actual, counterfactual, at } = worst;
+  const fromName = displayModel(before.events[0].modelRaw);
+  const toName = displayModel(after.events[0].modelRaw);
+  const routed = autoRouting(after.events[0].modelRaw);
+  const how = routed
+    ? `Auto routed to ${routed.model}`
+    : `You moved from ${fromName} to ${toName}`;
+  const dearer = delta > 0;
+
+  return finding(
+    'model-switch', dearer ? 'high' : 'positive', 'request',
+    { requestId: after.events[0].id, sessionId }, dearer ? delta : 0,
+    dearer
+      ? `Switching to ${toName} cost ${money(delta)} more than staying put`
+      : `Switching to ${toName} saved ${money(-delta)}`,
+    `${how} at request #${at + 1}. The ${count(after.events.length)} requests after it cost `
+      + `${money(actual)}; the same tokens on ${fromName} would have been ${money(counterfactual)}. `
+      + 'Both figures price identical token counts, so this is the rate difference alone — the '
+      + 'context had grown either way.',
+    dearer
+      ? 'Worth knowing before the next long session. This compares price, not results: the model you '
+        + 'left might have needed more turns to finish the same work, which no token count can show.'
+      : 'The cheaper card did the rest of this session. Worth repeating when the work suits it.',
+    { fromLabel: before.key, toLabel: after.key, actual, counterfactual, delta, switchedAt: at + 1 },
+  );
+}
+
+/**
+ * Raising the reasoning effort, which costs more without costing more per token.
+ *
+ * Cursor bills every effort level of a model on one published row, so this
+ * cannot be measured the way a model switch is — re-pricing the same tokens
+ * against the same rate card returns the same number by construction. What
+ * actually changes is how much the model writes, so that is what gets measured.
+ */
+function effortSwitch(list, sessionId, ratesFor, t) {
+  const runs = runsBy(list, (e) => `${rateCardOf(e, ratesFor)}|${normModel(e.modelRaw)}`);
+  if (runs.length < 2) return null;
+
+  for (let i = 1; i < runs.length; i += 1) {
+    const before = runs[i - 1];
+    const after = runs[i];
+    // Same rate card either side is what makes this an effort change rather
+    // than a model change — the other rule owns that case.
+    if (rateCardOf(before.events[0], ratesFor) !== rateCardOf(after.events[0], ratesFor)) continue;
+    if (before.events.length < t.switchMinRequests || after.events.length < t.switchMinRequests) continue;
+
+    const outBefore = median(before.events.map((e) => e.outputTokens || 0));
+    const outAfter = median(after.events.map((e) => e.outputTokens || 0));
+    if (!(outBefore > 0) || outAfter < outBefore * t.effortOutputMultiple) continue;
+
+    const costBefore = median(before.events.map((e) => e.cost ?? 0));
+    const costAfter = median(after.events.map((e) => e.cost ?? 0));
+    const impact = Math.max(0, (costAfter - costBefore) * after.events.length);
+    if (impact < t.switchMinImpact) continue;
+
+    const at = list.indexOf(after.events[0]);
+    return finding(
+      'effort-switch', 'medium', 'request',
+      { requestId: after.events[0].id, sessionId }, impact,
+      `Raising the effort level added ${money(impact)} over ${count(after.events.length)} requests`,
+      `From request #${at + 1} the model changed from ${displayModel(before.events[0].modelRaw)} to `
+        + `${displayModel(after.events[0].modelRaw)} — the same rate card at a different reasoning `
+        + `effort. The price per token did not change; the amount written did, from `
+        + `${count(outBefore)} to ${count(outAfter)} output tokens on a typical request, taking the `
+        + `typical request from ${money(costBefore)} to ${money(costAfter)}.`,
+      'A higher effort earns its keep on genuinely hard problems and quietly does not on the rest '
+        + 'of a session. Worth dropping back once the hard part is done.',
+      { outputBefore: outBefore, outputAfter: outAfter, costBefore, costAfter, switchedAt: at + 1 },
+    );
+  }
+  return null;
+}
+
+/**
+ * The same model billed at a different effective rate partway through.
+ *
+ * Measured against what Cursor actually charged rather than against the discount
+ * table, because those entries are keyed by day: read that way, a promotion
+ * boundary could only ever land inside a session that ran across midnight. The
+ * billed-to-list ratio moves whatever the cause and whenever it happens.
+ */
+function priceChanged(list, sessionId, ratesFor, t) {
+  // What one request was charged, as a fraction of what its tokens are worth at
+  // the published rate. A promotion moves this; nothing the user does moves it.
+  const ratioOf = (event) => {
+    const rates = ratesFor(event.modelRaw, event);
+    if (!rates || event.cost == null) return null;
+    // A discounted card already has the promotion baked into it, so measuring
+    // against it would compare the charge to itself and always find nothing.
+    const listRates = rates.discountPct ? { ...rates, ...undiscount(rates) } : rates;
+    const expected = estimateTokenCost(listRates, sumTokens([event]));
+    return expected > 0 ? event.cost / expected : null;
+  };
+  // Nearest 5%: the ratio wobbles by a fraction of a cent's rounding on every
+  // request, and grouping on the raw value would make every request its own run.
+  const bucketOf = (event) => {
+    const ratio = ratioOf(event);
+    return ratio == null ? 'none' : String(Math.round(ratio * 20) / 20);
+  };
+
+  // Grouped inside each rate card, not across them: a price change happens to
+  // one model while it is in use, so both sides of it are the same rate card and
+  // splitting on the card alone would leave a single run with nothing to compare.
+  for (const card of runsBy(list, (e) => rateCardOf(e, ratesFor))) {
+    const runs = runsBy(card.events, bucketOf);
+    for (let i = 1; i < runs.length; i += 1) {
+      const before = runs[i - 1];
+      const after = runs[i];
+      if (before.events.length < t.switchMinRequests || after.events.length < t.switchMinRequests) continue;
+      const rBefore = median(before.events.map(ratioOf).filter((r) => r != null));
+      const rAfter = median(after.events.map(ratioOf).filter((r) => r != null));
+      if (!(rBefore > 0) || !(rAfter > 0)) continue;
+      const shift = ((rAfter - rBefore) / rBefore) * 100;
+      if (Math.abs(shift) < t.priceShiftPct) continue;
+      const at = list.indexOf(after.events[0]);
+      const dearer = shift > 0;
+      const impact = dearer
+        ? Math.max(0, spent(after.events) - spent(after.events) / (rAfter / rBefore))
+        : 0;
+      if (dearer && impact < t.switchMinImpact) continue;
+      return priceChangeFinding(after, sessionId, at, shift, dearer, impact, rBefore, rAfter);
+    }
+  }
+  return null;
+}
+
+function priceChangeFinding(after, sessionId, at, shift, dearer, impact, rBefore, rAfter) {
+  const name = displayModel(after.events[0].modelRaw);
+  const moved = Math.abs(shift).toFixed(0);
+  return finding(
+    'price-changed', dearer ? 'high' : 'positive', 'request',
+    { requestId: after.events[0].id, sessionId }, impact,
+    dearer
+      ? `${name} got ${moved}% dearer partway through this session`
+      : `${name} got ${moved}% cheaper partway through this session`,
+    `From request #${at + 1} the same model was billed differently against the same published `
+      + `price — ${dearer ? 'up' : 'down'} ${moved}% on identical work. A promotion starting or `
+      + 'ending is the usual reason.',
+    dearer
+      ? 'Nothing you did, and nothing to fix — but it explains a jump that would otherwise look '
+        + 'like your own usage changing.'
+      : 'Worth knowing while it lasts: the same work is costing less than the rate card says.',
+    { ratioBefore: rBefore, ratioAfter: rAfter, shiftPct: shift, changedAt: at + 1 },
+  );
+}
+
+/** List rates behind a discounted card, so a charge can be compared to par. */
+function undiscount(rates) {
+  const factor = 1 - (rates.discountPct || 0) / 100;
+  if (!(factor > 0)) return {};
+  const up = (v) => (v == null ? null : v / factor);
+  return {
+    input: up(rates.input),
+    output: up(rates.output),
+    cacheRead: up(rates.cacheRead),
+    cacheWrite: up(rates.cacheWrite),
+  };
 }
 
 function spendConcentration(priced, totalCost, dollarsOf, t) {
@@ -319,6 +579,16 @@ export function buildInsights({ events, ratesFor, thresholds = {} }) {
           const outcome = compactionOutcome(list, idx, sessionId, dollarsOf, t);
           if (outcome) findings.push(outcome);
         }
+      }
+    }
+
+    // What changed partway through, judged over the session as a whole rather
+    // than request by request — a switch is a property of the sequence, not of
+    // any one row in it, so these run once per conversation.
+    if (sessionId !== UNATTRIBUTED_SESSION) {
+      for (const detect of [modelSwitch, effortSwitch, priceChanged]) {
+        const found = detect(list, sessionId, ratesFor, t);
+        if (found) findings.push(found);
       }
     }
   }

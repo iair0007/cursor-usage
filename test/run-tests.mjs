@@ -2564,6 +2564,167 @@ console.log('insights (advice derived from token counts alone)');
     assert.deepEqual(ins.buildInsights({ events: [ev({ id: 'x', t: 0, s: 's', cost: null })], ratesFor }), []);
     assert.equal(ins.costBreakdown(ev({ id: 'x', t: 0, s: 's', cost: 1 }), null), null);
   });
+
+  test('a compaction that regrew points at the summary as well as the regrowth', () => {
+    // The finding is anchored to the request that spent the money, but the
+    // summary is what the reader wants to see next and it is not the anchor.
+    const MIN = 60 * 1000;
+    const session = [
+      ...[0, 1, 2, 3].map((i) => ev({ id: `c${i}`, t: i * MIN, s: 'c', cost: 0.4, cr: 900000, cw: 10000 })),
+      ev({ id: 'summary', t: 5 * MIN, s: 'c', cost: 0.07, in: 165817, out: 2786 }),
+      ...[0, 1, 2, 3].map((i) => ev({ id: `d${i}`, t: (6 + i) * MIN, s: 'c', cost: 0.1, cr: 100000, cw: 10000 })),
+      ev({ id: 'regrown', t: 20 * MIN, s: 'c', cost: 0.9, cr: 1200000, cw: 10000 }),
+    ];
+    const undone = ins.buildInsights({ events: session, ratesFor }).find((f) => f.rule === 'compaction-undone');
+    assert.ok(undone, 'expected a compaction-undone finding');
+    assert.equal(undone.anchor.requestId, 'regrown');
+    assert.equal(undone.anchor.summaryRequestId, 'summary');
+  });
+}
+
+console.log('what changed partway through a session');
+{
+  const ins = await loadTs('src/webview/insights.js', 'insights-switch.mjs');
+  const MIN = 60 * 1000;
+
+  // Two genuinely different rate cards, plus a second variant of one of them
+  // that prices against the same card — which is exactly how Cursor bills
+  // reasoning effort, and the distinction the two detectors turn on.
+  const CARDS = {
+    'claude-4-5-sonnet': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Claude 4.5 Sonnet' },
+    'claude-4-5-sonnet-thinking': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Claude 4.5 Sonnet' },
+    'composer-2.5': { input: 0.5, output: 2.5, cacheRead: 0.2, cacheWrite: 0.5, label: 'Composer 2.5' },
+  };
+  const ratesFor = (modelRaw) => CARDS[modelRaw] || null;
+  const listCost = (modelRaw, k) => {
+    const r = CARDS[modelRaw];
+    return (k.in * r.input + k.out * r.output + k.cr * r.cacheRead + k.cw * r.cacheWrite) / 1e6;
+  };
+
+  let seq = 0;
+  const ev = (modelRaw, k, opts = {}) => ({
+    id: opts.id ?? `q${seq++}`,
+    timestampMs: (opts.at ?? seq) * MIN,
+    modelRaw,
+    model: modelRaw,
+    conversationId: opts.s ?? 's',
+    cost: opts.cost ?? listCost(modelRaw, k),
+    inputTokens: k.in, outputTokens: k.out, cacheReadTokens: k.cr, cacheWriteTokens: k.cw,
+    totalTokens: k.in + k.out + k.cr + k.cw,
+  });
+  const run = (n, modelRaw, k, opts = {}) => Array.from({ length: n }, (_, i) =>
+    ev(modelRaw, k, { ...opts, at: (opts.from ?? 0) + i }));
+
+  const TOK = { in: 5000, out: 3000, cr: 400000, cw: 20000 };
+  const find = (events, rule) => ins.buildInsights({ events, ratesFor }).find((f) => f.rule === rule);
+
+  test('switching rate card is priced against the model you left, not the one you moved to', () => {
+    // Token counts are identical either side, so any difference the detector
+    // reports has to be the rate and nothing else. This is the property the
+    // whole rule rests on: a switch usually happens once a session is already
+    // large, and comparing raw before/after spend would blame the new model for
+    // context growth it had nothing to do with.
+    const events = [...run(4, 'composer-2.5', TOK), ...run(4, 'claude-4-5-sonnet', TOK, { from: 4 })];
+    const f = find(events, 'model-switch');
+    assert.ok(f, 'expected a model-switch finding');
+    assert.equal(f.severity, 'high');
+    assert.equal(f.evidence.switchedAt, 5);
+    assert.equal(f.evidence.fromLabel, 'Composer 2.5');
+    assert.equal(f.evidence.toLabel, 'Claude 4.5 Sonnet');
+    const expected = 4 * (listCost('claude-4-5-sonnet', TOK) - listCost('composer-2.5', TOK));
+    assert.ok(Math.abs(f.impact - expected) < 1e-9, `impact ${f.impact} should be the rate gap ${expected}`);
+    assert.match(f.body, /the same tokens on composer-2\.5 would have been/);
+  });
+
+  test('context growing across the switch is not charged to the new model', () => {
+    // Same switch, but the second half also reads four times the context. The
+    // impact must still be only the rate difference on the tokens actually sent.
+    const grown = { in: 5000, out: 3000, cr: 1600000, cw: 20000 };
+    const events = [...run(4, 'composer-2.5', TOK), ...run(4, 'claude-4-5-sonnet', grown, { from: 4 })];
+    const f = find(events, 'model-switch');
+    const expected = 4 * (listCost('claude-4-5-sonnet', grown) - listCost('composer-2.5', grown));
+    assert.ok(Math.abs(f.impact - expected) < 1e-9,
+      'the counterfactual must price the grown tokens both ways, not compare halves');
+  });
+
+  test('a switch that saved money is reported, and ranked below findings that cost money', () => {
+    const events = [...run(4, 'claude-4-5-sonnet', TOK), ...run(4, 'composer-2.5', TOK, { from: 4 })];
+    const f = find(events, 'model-switch');
+    assert.ok(f);
+    assert.equal(f.severity, 'positive');
+    assert.equal(f.impact, 0, 'a positive carries no dollars, so it cannot outrank real money');
+    assert.match(f.title, /saved/);
+  });
+
+  test('raising the effort level is measured in tokens, never in rates', () => {
+    // Both variants price against one published row, so re-pricing the same
+    // tokens would return exactly zero. What changes is how much gets written.
+    const low = { in: 5000, out: 2000, cr: 300000, cw: 20000 };
+    const high = { in: 5000, out: 9000, cr: 300000, cw: 20000 };
+    const events = [...run(4, 'claude-4-5-sonnet', low), ...run(4, 'claude-4-5-sonnet-thinking', high, { from: 4 })];
+    const f = find(events, 'effort-switch');
+    assert.ok(f, 'expected an effort-switch finding');
+    assert.equal(f.evidence.outputBefore, 2000);
+    assert.equal(f.evidence.outputAfter, 9000);
+    assert.ok(f.impact > 0);
+    assert.match(f.body, /The price per token did not change/);
+    // The failure mode worth pinning: the same rate card either side must not
+    // read as a model switch, which would report a $0.00 rate difference.
+    assert.equal(find(events, 'model-switch'), undefined);
+  });
+
+  test('a promotion ending mid-session is caught from the charge, not the discount table', () => {
+    // Discounts are stored per day, so reading them would only ever catch a
+    // session that ran across midnight. The billed-to-list ratio moves whenever
+    // the price does.
+    const half = listCost('claude-4-5-sonnet', TOK) / 2;
+    const events = [
+      ...run(4, 'claude-4-5-sonnet', TOK, { cost: half }),
+      ...run(4, 'claude-4-5-sonnet', TOK, { from: 4 }),
+    ];
+    const f = find(events, 'price-changed');
+    assert.ok(f, 'expected a price-changed finding');
+    assert.equal(f.severity, 'high');
+    assert.equal(f.evidence.changedAt, 5);
+    assert.ok(Math.abs(f.evidence.shiftPct - 100) < 1, `shift was ${f.evidence.shiftPct}%`);
+    assert.match(f.title, /dearer/);
+  });
+
+  test('a steady session reports none of the three', () => {
+    const events = run(8, 'claude-4-5-sonnet', TOK);
+    for (const rule of ['model-switch', 'effort-switch', 'price-changed']) {
+      assert.equal(find(events, rule), undefined, `${rule} fired on an unchanged session`);
+    }
+  });
+
+  test('a change too small or too brief to matter is left alone', () => {
+    // Two requests either side is not a pattern, whatever the rate gap.
+    const brief = [...run(2, 'composer-2.5', TOK), ...run(2, 'claude-4-5-sonnet', TOK, { from: 2 })];
+    assert.equal(find(brief, 'model-switch'), undefined);
+    // And a switch between two cards priced almost identically is noise.
+    const tiny = { in: 100, out: 50, cr: 2000, cw: 100 };
+    const cheap = [...run(4, 'composer-2.5', tiny), ...run(4, 'claude-4-5-sonnet', tiny, { from: 4 })];
+    assert.equal(find(cheap, 'model-switch'), undefined);
+  });
+
+  test('the unattributed bucket gets none of them', () => {
+    // It is not a conversation, so a "switch" across it compares unrelated work.
+    const events = [
+      ...run(4, 'composer-2.5', TOK, { s: null }),
+      ...run(4, 'claude-4-5-sonnet', TOK, { from: 4, s: null }),
+    ].map((e) => ({ ...e, conversationId: null }));
+    const found = ins.buildInsights({ events, ratesFor });
+    for (const rule of ['model-switch', 'effort-switch', 'price-changed']) {
+      assert.equal(found.find((f) => f.rule === rule), undefined, `${rule} fired on the unattributed bucket`);
+    }
+  });
+
+  test('an unpriced model does not throw or invent a comparison', () => {
+    const events = [...run(4, 'composer-2.5', TOK),
+      ...Array.from({ length: 4 }, (_, i) => ({ ...ev('composer-2.5', TOK, { at: 4 + i }), modelRaw: 'who-knows' }))];
+    assert.doesNotThrow(() => ins.buildInsights({ events, ratesFor }));
+    assert.equal(find(events, 'model-switch'), undefined, 'no rates on one side means no honest comparison');
+  });
 }
 
 console.log('brief (handing one session or request to Cursor Chat)');
@@ -3027,6 +3188,44 @@ console.log('handing a brief to Cursor Chat');
   });
 }
 
+console.log('request-log row detail');
+{
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+
+  test('the detail cell undoes the nowrap the data columns need', () => {
+    // `td { white-space: nowrap }` is right for twelve columns of timestamps and
+    // token counts, and inherited — so in the one cell that holds sentences it
+    // turned each finding into a single unbreakable line whose min-content width
+    // fed back into the table's own minimum width under `table-layout: auto`.
+    // The detail row was not sitting in a wide table; it was making it wide.
+    assert.match(css, /td \{[^}]*white-space: nowrap;/s, 'the data columns still expect nowrap');
+    const rule = css.match(/\.row-detail > td \{[^}]*\}/)[0];
+    assert.match(rule, /white-space: normal/, '.row-detail > td must reset it');
+  });
+
+  test('long unbroken text cannot re-inflate the cell', () => {
+    assert.match(css, /\.finding-card h4,\s*\n\.finding-card p,\s*\n\.finding-action \{ overflow-wrap: anywhere; \}/);
+  });
+
+  test('the grid children are allowed to shrink', () => {
+    // Grid items refuse to go below their content's min-content width unless
+    // told to, which would undo the wrapping fix on a narrow column.
+    assert.match(css, /\.detail-grid > div \{ min-width: 0; \}/);
+    assert.match(css, /\.findings-grid \{[^}]*min-width: 0/);
+  });
+
+  test('the detail content is pinned to the visible width', () => {
+    // The twelve data columns can overflow a narrow window on their own, and
+    // then the cell is as wide as the table whatever this row does.
+    const rule = css.match(/\.detail-sticky \{[^}]*\}/)[0];
+    assert.match(rule, /position: sticky/);
+    assert.match(rule, /left: 0/);
+    assert.match(rule, /width: min\(100%, calc\(100vw - \d+px\)\)/);
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    assert.match(main, /<div class="detail-sticky">/, 'and something has to carry the class');
+  });
+}
+
 console.log('session timeline');
 {
   const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
@@ -3054,6 +3253,28 @@ console.log('session timeline');
     // 3px gap in an ~816px dialog that starts around 60 bars.
     const max = Number(main.match(/const TIMELINE_LABEL_MAX = (\d+)/)[1]);
     assert.ok(max > 0 && max <= 20, `TIMELINE_LABEL_MAX is ${max}, too close to the scroll threshold`);
+  });
+
+  test('the compaction bars and the tooltip are wired to something real', () => {
+    const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+    assert.match(fn, /tl-compaction/, 'a summarising turn is marked in the plot');
+    assert.match(fn, /data-tl-tip=/, 'the tip text travels as data, not as a native title');
+    assert.ok(!/title="\$\{esc\(tip\)\}"/.test(fn),
+      'the native title must be gone, or two tooltips fight over the same bar');
+    // Fixed, not absolute: .tl-plot scrolls horizontally, and an overflow-x box
+    // clips on both axes, so an absolute tip would be cut off by its own plot.
+    const tip = css.match(/\.tl-tip \{[^}]*\}/)[0];
+    assert.match(tip, /position: fixed/);
+    assert.match(tip, /white-space: pre-line/, 'the tip is multi-line');
+    for (const id of ['tlTip']) {
+      const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+      assert.ok(html.includes(`id="${id}"`), `markup is missing id="${id}"`);
+      // Inside the dialog: a modal renders in the top layer, so a tooltip
+      // parented to <body> would sit behind it whatever its z-index.
+      const dialog = html.slice(html.indexOf('id="sessionDetailDialog"'));
+      assert.ok(dialog.slice(0, dialog.indexOf('</dialog>')).includes(`id="${id}"`),
+        `${id} must live inside the session dialog`);
+    }
   });
 
   test('the label row shares the plot\'s flex rules so labels sit under their bars', () => {

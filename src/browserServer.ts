@@ -16,12 +16,18 @@ const MAX_RPC_BODY_BYTES = 25 * 1024 * 1024;
  * Serves the same dashboard the webview shows, over plain HTTP on
  * 127.0.0.1, so it can be opened in a real browser tab instead of the VS
  * Code webview. Bound to loopback only, with a random per-launch token
- * required on every request, since anything reachable at a fixed localhost
- * port is reachable by any other local process or web page — see the
- * request handling below for what that token actually defends against.
+ * required on every call that returns usage data, since anything reachable at
+ * a localhost port is reachable by any other local process or web page — see
+ * the request handling below for what that token actually defends against.
+ * The static shell (page, script, stylesheet) is served ungated: it carries no
+ * data, and gating it would break the browser's own reload.
  */
 export class BrowserServer {
-  private static current: BrowserServer | undefined;
+  // A promise rather than the instance: two invocations of the command in
+  // quick succession would both find `current` unset while the first was still
+  // awaiting listen(), start a second server, and leak the first — bound to a
+  // port nothing can close.
+  private static starting: Promise<BrowserServer> | undefined;
 
   private readonly server: http.Server;
   private readonly token = crypto.randomBytes(24).toString('hex');
@@ -29,6 +35,7 @@ export class BrowserServer {
   private port = 0;
   private script = '';
   private styles = '';
+  private icon: Buffer | undefined;
 
   static async show(
     context: vscode.ExtensionContext,
@@ -36,18 +43,27 @@ export class BrowserServer {
     statusBar: UsageStatusBar | undefined,
     log: (msg: string) => void,
   ): Promise<void> {
-    if (!BrowserServer.current) {
+    if (!BrowserServer.starting) {
       const instance = new BrowserServer(context, service, statusBar, log);
-      await instance.start();
-      BrowserServer.current = instance;
+      BrowserServer.starting = instance.start().then(() => instance);
+      // A failed start must not poison every later attempt with a rejected
+      // promise nobody can retry past.
+      BrowserServer.starting.catch(() => { BrowserServer.starting = undefined; });
     }
-    await BrowserServer.current.open();
+    await (await BrowserServer.starting).open();
   }
 
   /** Closes the loopback server, if one is running. Called on extension deactivate. */
   static stop(): void {
-    BrowserServer.current?.server.close();
-    BrowserServer.current = undefined;
+    const starting = BrowserServer.starting;
+    BrowserServer.starting = undefined;
+    if (!starting) return;
+    void starting.then((instance) => {
+      // close() alone only stops new connections: a browser tab still holding a
+      // keep-alive socket would keep the port bound for as long as it is open.
+      instance.server.closeAllConnections?.();
+      instance.server.close();
+    }, () => {});
   }
 
   private constructor(
@@ -64,6 +80,15 @@ export class BrowserServer {
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     this.script = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(media, 'main.js'))).toString('utf8');
     this.styles = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(media, 'styles.css'))).toString('utf8');
+    // The extension's own icon, so the tab is identifiable in a row of tabs
+    // rather than carrying the browser's blank-document glyph.
+    try {
+      this.icon = Buffer.from(await vscode.workspace.fs.readFile(
+        vscode.Uri.joinPath(this.context.extensionUri, 'resources', 'icon.png'),
+      ));
+    } catch {
+      this.icon = undefined;
+    }
 
     await new Promise<void>((resolve, reject) => {
       this.server.once('error', reject);
@@ -87,15 +112,12 @@ export class BrowserServer {
   private route(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url || '/', this.baseUrl);
 
-    // The page itself carries nothing sensitive, but still gating it on the
-    // token keeps a browser tab pointed at a fixed, guessable-ish loopback
-    // port from silently rendering someone else's dashboard shell.
+    // Served without the token on purpose. The shell holds no usage data —
+    // every figure on it arrives over /api/rpc, which is gated — and gating the
+    // page too would mean a plain reload (the token is stripped from the URL as
+    // soon as the tab has it) rendering "Forbidden" instead of the dashboard.
     if (req.method === 'GET' && url.pathname === '/') {
-      if (url.searchParams.get('token') !== this.token) {
-        res.writeHead(403, { 'Content-Type': 'text/plain' }).end('Forbidden');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(getBrowserDashboardHtml(this.token));
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(getBrowserDashboardHtml());
       return;
     }
     if (req.method === 'GET' && url.pathname === '/main.js') {
@@ -104,6 +126,14 @@ export class BrowserServer {
     }
     if (req.method === 'GET' && url.pathname === '/styles.css') {
       res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' }).end(this.styles);
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/favicon.png') {
+      if (!this.icon) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'image/png' }).end(this.icon);
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/rpc') {
@@ -123,10 +153,22 @@ export class BrowserServer {
    * machine hitting the port directly) from reading usage data blind.
    */
   private handleRpc(req: http.IncomingMessage, res: http.ServerResponse): void {
-    if (req.headers[TOKEN_HEADER] !== this.token) {
+    if (!this.tokenMatches(req.headers[TOKEN_HEADER])) {
       res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'Forbidden' }));
       return;
     }
+    this.readRpcBody(req, res);
+  }
+
+  /** Constant-time token check, so a wrong guess reveals nothing by how fast it failed. */
+  private tokenMatches(sent: string | string[] | undefined): boolean {
+    if (typeof sent !== 'string') return false;
+    const a = Buffer.from(sent, 'utf8');
+    const b = Buffer.from(this.token, 'utf8');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+
+  private readRpcBody(req: http.IncomingMessage, res: http.ServerResponse): void {
     const chunks: Buffer[] = [];
     let size = 0;
     // Guards against the 'data' handler responding more than once — without

@@ -52,6 +52,54 @@ body.vscode-high-contrast-light {
   color-scheme: light;
 }
 
+/* The standalone browser page (browserServer.ts) is the one place with no VS
+   Code variables to inherit, so every token above resolves to its light
+   fallback — a white page next to a dark IDE. There is no theme to read there,
+   but there is an OS preference, so follow that. Scoped to body.standalone:
+   inside the webview the editor's own theme already decides. */
+@media (prefers-color-scheme: dark) {
+  body.standalone {
+    color-scheme: dark;
+    --bg: #1a1a1a;
+    --panel: #232323;
+    --border: rgba(255, 255, 255, 0.14);
+    --text: #e6e6e6;
+    --muted: #9d9d9d;
+    --accent: #4daafc;
+    --accent-fg: #ffffff;
+    --btn-bg: rgba(255, 255, 255, 0.1);
+    --btn-fg: #e6e6e6;
+    --btn-primary-bg: #0e639c;
+    --input-bg: #2a2a2a;
+    --input-fg: #e6e6e6;
+    --input-border: rgba(255, 255, 255, 0.18);
+    --hover: rgba(255, 255, 255, 0.07);
+    --green: #3fd39a;
+    --green-strong: #34c48c;
+    --amber: #e0a044;
+    --red: #f2716b;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    /* --bucket-* are computed on :root, so they would keep the light accent
+       even here; the charts and the handful of rules that reach for a
+       --vscode-* variable directly need the same treatment. */
+    --bucket-output: #4daafc;
+    --bucket-input: #7a8699;
+    --vscode-editorWidget-background: #232323;
+    --vscode-editorWidget-foreground: #e6e6e6;
+    --vscode-editorWidget-border: rgba(255, 255, 255, 0.14);
+    --vscode-editorHoverWidget-background: #2a2a2a;
+    --vscode-editorHoverWidget-foreground: #e6e6e6;
+    --vscode-editorHoverWidget-border: rgba(255, 255, 255, 0.18);
+    --vscode-descriptionForeground: #9d9d9d;
+    --vscode-textLink-foreground: #4daafc;
+    --vscode-input-background: #2a2a2a;
+    --vscode-input-foreground: #e6e6e6;
+    --vscode-input-border: rgba(255, 255, 255, 0.18);
+    --vscode-button-foreground: #ffffff;
+    --vscode-focusBorder: #4daafc;
+  }
+}
+
 .app {
   max-width: 1280px;
   margin: 0 auto;

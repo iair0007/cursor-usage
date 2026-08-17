@@ -1129,6 +1129,30 @@ test('period wiring cannot match the cost-mode buttons', () => {
     + 'preset clears the What-if/Billed highlight and clicking one fires the period handler',
   );
 });
+test('session names reach the request log whatever view is on screen', () => {
+  // Switching to Requests only unhides the table; it does not rebuild it. The
+  // first lookup lands while the user is still on the Overview, so a re-render
+  // gated on the current view left the column showing raw ids.
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const fn = main.match(/async function loadSessionTitles\(ids\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
+  assert.ok(fn, 'expected loadSessionTitles');
+  const redraw = fn.slice(fn.indexOf('if (!learned) return;'));
+  const table = redraw.match(/.*renderTable\(.*/)?.[0] || '';
+  assert.ok(table, 'a learned name must redraw the request log');
+  assert.ok(!/state\.appView/.test(table), 'the redraw must not depend on which view is visible');
+});
+
+test('opening a session does not also pick it for comparison', () => {
+  // The session name became a link into the session view, inside a row whose
+  // own click handler toggles the comparison selection — so one click did both.
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const handler = main.match(/\$\('sessionsList'\)\?\.addEventListener\('click'[\s\S]*?\n {2}\}\);/)?.[0] || '';
+  assert.ok(handler, 'expected the delegated sessions-list click handler');
+  const guard = handler.indexOf('.session-open');
+  const toggle = handler.indexOf('toggleSessionSelected');
+  assert.ok(guard > -1 && guard < toggle, 'the name link must bail out before the row toggle runs');
+});
+
 test('the period and cost-mode controls exist exactly once', () => {
   // Overview used to carry a second copy of these chips, two rows below the
   // filter bar — two controls for one filter, which is what a user sees as
@@ -2464,6 +2488,26 @@ console.log('insights (advice derived from token counts alone)');
     assert.ok(undone.impact > 1);
   });
 
+  test('two compactions regrowing into one request say so once', () => {
+    // Both summaries find the same later request as their regrowth, and the
+    // rule anchors there — so without a dedupe the card renders twice and its
+    // dollars are counted twice by anything that totals findings.
+    const events = [
+      ev({ id: 'b1', t: 0, s: 'c3', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'b2', t: 60000, s: 'c3', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'sum1', t: 120000, s: 'c3', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'm1', t: 180000, s: 'c3', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'm2', t: 240000, s: 'c3', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'sum2', t: 300000, s: 'c3', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'm3', t: 360000, s: 'c3', cost: 0.1, in: 3000, out: 4000, cr: 100000, cw: 10000 }),
+      ev({ id: 'm4', t: 420000, s: 'c3', cost: 0.1, in: 3000, out: 4000, cr: 100000, cw: 10000 }),
+      ev({ id: 'regrow', t: 34 * 60000, s: 'c3', cost: 4.21, in: 11069, out: 45131, cr: 9306929, cw: 237065 }),
+    ];
+    const found = ins.buildInsights({ events, ratesFor });
+    assert.deepEqual(found.map((f) => f.id), [...new Set(found.map((f) => f.id))],
+      'the same finding was emitted twice');
+  });
+
   test('spend concentration reports the outliers and points at the dearest', () => {
     const many = [
       ...Array.from({ length: 12 }, (_, i) => ev({ id: `m${i}`, t: i * 60000, s: 'm', cost: 0.05, in: 2000, out: 1000, cr: 100000, cw: 5000 })),
@@ -2844,6 +2888,80 @@ console.log('brief (handing one session or request to Cursor Chat)');
     const opened = (before.match(/<section /g) || []).length;
     const closed = (before.match(/<\/section>/g) || []).length;
     assert.equal(opened, closed, 'askCursorDialog sits inside an unclosed <section>');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The standalone browser page. Its own CSP is the thing most likely to break
+// it, and it breaks it silently: a blocked bootstrap script leaves a page that
+// renders perfectly and can't load a single number.
+// ---------------------------------------------------------------------------
+console.log('\nbrowser page (Open in Browser)');
+{
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  const browserFn = html.slice(
+    html.indexOf('export function getBrowserDashboardHtml'),
+    html.indexOf('function dashboardBody'),
+  );
+
+  test('the page runs no inline script its own CSP would refuse', () => {
+    // script-src 'self' blocks inline script with no nonce and no hash, so an
+    // inline <script> here means the dashboard loads and then does nothing.
+    const csp = browserFn.match(/Content-Security-Policy[\s\S]*?content="([^"]+)"/)?.[1] || '';
+    assert.ok(/script-src [^;]*'self'/.test(csp), 'expected script-src to allow only same-origin scripts');
+    assert.ok(!/'unsafe-inline'/.test(csp.match(/script-src[^;]*/)?.[0] || ''),
+      'inline script must stay blocked — fix the page, not the policy');
+    const inline = (browserFn.match(/<script(?![^>]*\ssrc=)[^>]*>/g) || [])
+      .filter((tag) => !/nonce=/.test(tag));
+    assert.deepEqual(inline, [], `inline <script> would be blocked by this page's CSP: ${inline.join(', ')}`);
+  });
+
+  test('the RPC token is never written into the page', () => {
+    // It arrives in the launch URL and lives in sessionStorage; embedding it in
+    // the HTML is what forced the inline script in the first place.
+    assert.ok(!/getBrowserDashboardHtml\s*\(\s*token/.test(browserFn),
+      'the page should not take a token to render');
+    assert.ok(!/__CURSOR_USAGE_TOKEN__/.test(html), 'the token must not be inlined into the markup');
+  });
+
+  test('a reloaded tab can still authenticate', () => {
+    // The token is stripped from the URL on first load, so a plain F5 has to be
+    // served by sessionStorage or the tab comes back with no data at all.
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.match(/function readBrowserToken\(\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
+    assert.ok(fn, 'main.js must resolve the browser token in one place');
+    assert.ok(/searchParams\.get\('token'\)/.test(fn), 'must read the token the launch URL carries');
+    assert.ok(/sessionStorage\.setItem/.test(fn) && /sessionStorage\.getItem/.test(fn),
+      'must survive a reload, which the URL no longer can');
+    assert.ok(/replaceState/.test(fn), 'must clean the token out of the address bar and history');
+  });
+
+  test('the server gates the data and not the shell', () => {
+    const server = readFileSync(path.join(here, '..', 'src/browserServer.ts'), 'utf8');
+    const rpc = server.slice(server.indexOf('private handleRpc'), server.indexOf('private readRpcBody'));
+    assert.ok(/tokenMatches\(req\.headers\[TOKEN_HEADER\]\)/.test(rpc), '/api/rpc must require the token header');
+    const shell = server.slice(server.indexOf("url.pathname === '/'"), server.indexOf("url.pathname === '/main.js'"));
+    assert.ok(!/403/.test(shell), 'gating the shell breaks reload — the shell carries no data');
+    assert.ok(/timingSafeEqual/.test(server), 'compare the token in constant time');
+  });
+
+  test('non-JSON answers surface as a message, not a parse error', () => {
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.match(/async function rpcOverHttp\([\s\S]*?\n\}/)?.[0] || '';
+    assert.ok(/res\.status === 403/.test(fn), 'a stale token needs an answer the user can act on');
+    assert.ok(/res\.ok/.test(fn), 'other error statuses must not be fed to res.json()');
+  });
+
+  test('the standalone page can follow the OS theme', () => {
+    // Nothing in a browser tab defines the --vscode-* variables the palette is
+    // built on, so every token falls back to its light value.
+    assert.ok(/<body class="standalone">/.test(browserFn), 'the page must mark itself as standalone');
+    const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+    const dark = css.match(/@media \(prefers-color-scheme: dark\)\s*\{\s*body\.standalone\s*\{[\s\S]*?\n {2}\}/)?.[0] || '';
+    assert.ok(dark, 'expected a dark palette scoped to the standalone page');
+    for (const token of ['--bg', '--panel', '--text', '--border', '--input-bg']) {
+      assert.ok(dark.includes(`${token}:`), `dark palette leaves ${token} at its light value`);
+    }
   });
 }
 

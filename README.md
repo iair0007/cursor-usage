@@ -167,7 +167,9 @@ Discounted requests are badged **"Discounted"** wherever they appear — the req
 
 ## Opening the dashboard in a browser
 
-Prefer a real browser tab over the IDE panel? Click **"Open in browser ↗"** next to the header links, or run *"Cursor Usage: Open in Browser"* from the command palette. This starts a small local server on `127.0.0.1` (a random free port, never exposed beyond your machine) and opens your default browser to it. It's the same dashboard and the same local data access as the IDE panel — nothing is sent anywhere new — just served over HTTP instead of a VS Code webview. Each launch uses a fresh random access token embedded in the URL, so nothing else on your machine can read your usage data through that port. The server shuts down when the IDE window closes.
+Prefer a real browser tab over the IDE panel? Click **"Open in browser ↗"** next to the header links, or run *"Cursor Usage: Open in Browser"* from the command palette. This starts a small local server on `127.0.0.1` (a random free port, never exposed beyond your machine) and opens your default browser to it. It's the same dashboard and the same local data access as the IDE panel — nothing is sent anywhere new — just served over HTTP instead of a VS Code webview. The tab follows your operating system's light/dark preference, since there's no editor theme to inherit out there.
+
+A random access token is generated per IDE session and handed to the tab in its launch URL; the page moves it into `sessionStorage` and clears it out of the address bar straight away, so it survives a reload but never lands in your browser history. Every call that returns usage data requires it, so nothing else on your machine can read your usage through that port. Opening the bare URL in a new tab gets you the dashboard shell and a message telling you to relaunch it from the IDE. The server shuts down when the IDE window closes.
 
 ## Authentication & privacy
 

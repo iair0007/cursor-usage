@@ -217,6 +217,21 @@ export function parsePricing(md) {
     }
   }
 
+  // Auto's rate can go missing on its own, and it used to take Auto down with
+  // it. The wholesale fallback below only fires when *nothing* parsed, so a page
+  // that still lists every named model but has moved, renamed or un-tabled the
+  // Auto row left `auto.input` null — and since Auto is priced from that field
+  // alone, every Auto request lost its rates, its cache-savings figure and its
+  // cost breakdown, and the UI reported the most-used model in the product as
+  // "not in the pricing table". A built-in rate that might be a little stale is
+  // better than no rate at all; `autoFallback` records which one is on screen so
+  // nothing has to present a guess as a scrape.
+  let autoFallback = false;
+  if (auto.input == null && models.length > 0) {
+    Object.assign(auto, FALLBACK_PRICING.auto);
+    autoFallback = true;
+  }
+
   // Scrape found nothing usable (empty/unreachable doc, or page restructured) — fall back.
   if (auto.input == null && models.length === 0) {
     const fallbackModels = FALLBACK_PRICING.models.map((m) => ({ ...m, name: normModel(m.display) }));
@@ -228,7 +243,7 @@ export function parsePricing(md) {
     };
   }
 
-  return { auto, models, aliasIndex: buildAliasIndex(models), fallback: false };
+  return { auto, models, aliasIndex: buildAliasIndex(models), fallback: false, autoFallback };
 }
 
 /**
@@ -246,6 +261,9 @@ export function matchPricing(model, pricing) {
     cacheRead: pricing.auto.cacheRead,
     output: pricing.auto.output,
     label: 'Auto',
+    // True when the pricing page didn't publish an Auto rate this time and the
+    // built-in one stood in — see parsePricing. Carried so the UI can say so.
+    estimated: pricing.autoFallback === true,
   } : null);
   // Auto is billed one of two ways, and which one depends on the router mode.
   // Cost mode keeps Auto's bundled flat rate whatever it routes to. Balance and

@@ -78,8 +78,7 @@ export const BRIEF_TEMPLATES = [
   {
     id: 'session-too-long',
     scope: 'session',
-    title: 'Should I have split this session?',
-    desc: 'Where a fresh chat would have paid for itself',
+    title: 'Find where starting a fresh chat would have saved money.',
     prompt: 'Using the cost curve and the events, tell me whether this conversation should have '
       + 'been split, and at which request number. Quote the dollars I would have saved and show '
       + 'how you got that from the figures above. If the data says the session was run well, say '
@@ -88,8 +87,7 @@ export const BRIEF_TEMPLATES = [
   {
     id: 'session-waste',
     scope: 'session',
-    title: "What did this cost that it didn't have to?",
-    desc: 'Avoidable spend, ranked, in dollars',
+    title: 'Identify avoidable spend, ranked by dollar impact.',
     prompt: 'Rank the avoidable spend in this session from largest to smallest — re-caching after '
       + 'idle gaps, context grown past what the turn needed, errored requests, compaction that '
       + "didn't hold. Give a dollar figure per item, total them, and state that total as a share "
@@ -99,8 +97,7 @@ export const BRIEF_TEMPLATES = [
   {
     id: 'session-next-time',
     scope: 'session',
-    title: 'How do I run the next one like this?',
-    desc: 'A plan for the same work, done cheaper',
+    title: 'Create a cheaper plan for doing the same work.',
     prompt: "Assume I'm about to start the same kind of work again. Give me a run plan in at most "
       + '5 bullets: when to open a new chat, when to compact, what to keep out of context, and the '
       + 'exact request number in the curve above where I should have stopped and started fresh. '
@@ -109,15 +106,14 @@ export const BRIEF_TEMPLATES = [
   {
     id: 'session-custom',
     scope: 'session',
-    title: 'Custom question',
-    desc: 'You write the question',
+    title: 'Custom question - Write a question',
+    custom: true,
     prompt: 'Answer my question using only the session data below.',
   },
   {
     id: 'request-avoidable',
     scope: 'request',
-    title: 'Was this request avoidable?',
-    desc: 'What to have done at this exact moment',
+    title: 'Find out whether this request was avoidable.',
     prompt: 'Was this request avoidable, and what should I have done instead at this exact moment? '
       + 'Quote the dollars and show the arithmetic from the numbers below. Use the requests that '
       + 'came after it to judge whether the money it spent was earned back or thrown away.',
@@ -125,8 +121,8 @@ export const BRIEF_TEMPLATES = [
   {
     id: 'request-custom',
     scope: 'request',
-    title: 'Custom question',
-    desc: 'You write the question',
+    title: 'Custom question - Write a question',
+    custom: true,
     prompt: 'Answer my question using only the request data below.',
   },
 ];
@@ -413,19 +409,18 @@ function splitLine(spend) {
     .join(' · ');
 }
 
-/** One line per request. The escape hatch, never the default — see the note at the top. */
-function detailBlock(events, formatTime) {
-  const time = formatTime || defaultFormatTime;
-  return events.map((e, i) =>
-    `#${i + 1} ${time(e.timestampMs)} ${e.model} ${money(e.cost ?? 0)} `
-    + `in ${tok(e.inputTokens)} out ${tok(e.outputTokens)} `
-    + `cr ${tok(e.cacheReadTokens)} cw ${tok(e.cacheWriteTokens)}`,
-  ).join('\n');
-}
-
+/**
+ * The question the brief is asking.
+ *
+ * The user's own wording only counts when the chosen template is the one that
+ * asks for it. Taking it whenever the box was non-empty meant a question typed
+ * once quietly overrode every template picked after it, with nothing on screen
+ * to say so.
+ */
 function taskBlock(template, question) {
   const custom = (question || '').trim();
-  return ['## Task', custom || template?.prompt || '', ''];
+  const wanted = template?.custom === true;
+  return ['## Task', (wanted && custom) || template?.prompt || '', ''];
 }
 
 function joinBrief(parts) {
@@ -451,7 +446,6 @@ export function buildSessionBrief({
   formatTime,
   template,
   question,
-  detail = false,
 } = {}) {
   if (!events.length) return '';
   const time = formatTime || defaultFormatTime;
@@ -536,10 +530,6 @@ export function buildSessionBrief({
       findingsBlock(findings),
       '',
     );
-  }
-
-  if (detail) {
-    parts.push(`## Every request (${count(events.length)})`, detailBlock(events, formatTime), '');
   }
 
   parts.push('---', 'Notes:', ...BRIEF_NOTES);

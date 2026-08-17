@@ -7,11 +7,18 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 - **You can now ask Cursor Chat about one session, or one request.** The
   per-session breakdown has an **Ask Cursor Chat** button that builds a brief
-  about that conversation and copies it for you to paste, the same way the
-  period-wide panel in Analyze already did. Pick *should I have split this
-  session?*, *what did this cost that it didn't have to?*, *how do I run the next
-  one like this?*, or write your own question. Switch the scope to a single
-  request and it briefs that one instead.
+  about that conversation and hands it over. Pick *find where starting a fresh
+  chat would have saved money*, *identify avoidable spend, ranked by dollar
+  impact*, *create a cheaper plan for doing the same work*, or write your own
+  question. Switch the scope to a single request and it briefs that one instead.
+- **It opens Cursor Chat with the brief already in the box — and stops there.**
+  Nothing is sent until you read it and press Enter. This goes through Cursor's
+  own prompt deeplink, which answers with a confirmation before a chat exists, so
+  there is no path here that can spend money on a prompt you haven't seen. Where
+  that isn't available — an older build, a remote session, a brief past the
+  deeplink's size cap — it falls back to copying and opening chat for you to
+  paste, and the button says which of those actually happened rather than
+  claiming the best case.
 - **The brief is built to be small, because the analysis costs tokens too.** It
   never lists your requests one per line. Instead it reports the session's
   spending as six equal slices — so a 300-request session costs the same to
@@ -21,9 +28,7 @@ All notable user-facing changes. Earlier releases predate this file; see the
   twice. A 47-request session comes out around 900 tokens.
 - **It tells you what it will cost before you send it.** The dialog shows the
   brief's size in tokens and roughly what that's worth as input on the model you
-  actually used. The "include every request" escape hatch prices itself too —
-  measured off the real brief, not estimated — so ticking it is a decision rather
-  than a surprise.
+  actually used.
 - **The brief teaches the model Cursor's cache economics up front**, which is
   what gets a useful answer in one round trip instead of three. Without it a
   model reads "68% of your spend was cache reads" as good news. It's also told
@@ -33,6 +38,19 @@ All notable user-facing changes. Earlier releases predate this file; see the
   starts in is already covered by the idle gap and the session's median; what
   nothing else can tell you is whether a huge re-cache was earned back over the
   turns that followed or thrown away when the thread was abandoned.
+- **The session timeline now prices every bar.** It used to print only a "peak"
+  caption, centred under the middle of the plot — so on a three-request session
+  it sat above the *smallest* bar and read as that bar's label. Each bar now
+  carries its own cost, and on longer sessions, where bars are too narrow for
+  that, the caption names the request the peak belongs to.
+- **Fixed: Auto could lose its pricing entirely and report itself as an unknown
+  model.** Auto is priced from a single field, and the fallback that covers a
+  failed scrape only fired when *nothing* on the pricing page parsed. So a page
+  that still listed every named model but had moved or renamed the Auto row left
+  Auto with no rates — no cost breakdown, no cache-savings figure, and "this
+  model isn't in the pricing table" against the most-used model in the product.
+  Auto now falls back on its own, and says when the rate on screen is the
+  built-in one rather than a published one.
 - Briefs carry token counts, timings, costs and the conversation's name. Nothing
   you wrote is in them, because none of it is ever read.
 

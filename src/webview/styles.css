@@ -1691,6 +1691,25 @@ tr.row-open > td { border-bottom-color: transparent; }
   border-radius: 0 0 2px 2px;
 }
 .tl-flagged { box-shadow: 0 -3px 0 0 var(--red); }
+/* Deliberately the same flex rules as .tl-plot, so each label sits under its own
+   bar without wrapping the bars in columns — their heights are percentages of
+   .tl-plot, and a wrapper would resolve them against itself instead. */
+.tl-labels {
+  display: flex;
+  gap: 3px;
+  padding: 0 6px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.tl-labels span {
+  flex: 1 0 10px;
+  min-width: 10px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tl-axis {
   display: flex;
   justify-content: space-between;
@@ -1740,8 +1759,6 @@ tr.row-open > td { border-bottom-color: transparent; }
 .ask-field .optional { color: var(--muted); font-weight: 400; font-size: 11px; }
 .ask-field textarea { resize: vertical; }
 .ask-field select { width: 100%; }
-
-.ask-detail { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
 
 .ask-preview summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .ask-preview textarea {

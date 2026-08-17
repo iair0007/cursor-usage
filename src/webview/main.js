@@ -305,7 +305,6 @@ const state = {
     sessionId: null,
     requestId: null,
     templateId: null,
-    detail: false,
   },
   charts: {},
   chartsReady: false,
@@ -2710,6 +2709,15 @@ const BUCKET_LABELS = {
 const BUCKET_ORDER = ['cacheRead', 'cacheWrite', 'output', 'input'];
 
 /**
+ * Bars that still get their own price label underneath.
+ *
+ * Well under the ~60 at which .tl-plot starts scrolling horizontally: the label
+ * row is a sibling of the plot, so once the plot scrolls the two would slide out
+ * of alignment with each other.
+ */
+const TIMELINE_LABEL_MAX = 14;
+
+/**
  * Money at the precision the figure deserves.
  *
  * fmt.money rounds to cents, which turns most of a per-request breakdown into
@@ -2733,9 +2741,15 @@ function insightBadge(findings) {
 }
 
 /** What a request's cost was made of: a proportional bar plus the figures. */
-function renderBreakdown(breakdown) {
+function renderBreakdown(breakdown, event) {
   if (!breakdown || !(breakdown.total > 0)) {
-    return '<p class="bd-empty">This model isn\'t in the pricing table, so its cost can\'t be broken down.</p>';
+    // Two different failures used to share one sentence, and the sentence was
+    // wrong for the second one: a request that moved no tokens has nothing to
+    // split, whatever the pricing table says about its model.
+    const noTokens = event && !(event.totalTokens > 0);
+    return `<p class="bd-empty">${noTokens
+      ? 'This request moved no tokens, so there is nothing to break down.'
+      : "This model isn't in the pricing table, so its cost can't be broken down."}</p>`;
   }
   const segments = BUCKET_ORDER
     .filter((key) => breakdown[key] > 0)
@@ -2748,10 +2762,15 @@ function renderBreakdown(breakdown) {
       <span class="bd-val">${moneyFine(breakdown[key])}</span>
       <span class="bd-pct">${fmt.pct((breakdown[key] / breakdown.total) * 100)}</span>
     </li>`).join('');
-  const note = breakdown.scaled
-    ? '<p class="bd-note">Split across the real charge for this request, which was below list price that day.</p>'
-    : '';
-  return `<div class="breakdown"><div class="bd-bar">${segments}</div><ul class="bd-list">${rows}</ul>${note}</div>`;
+  const notes = [
+    breakdown.scaled
+      ? 'Split across the real charge for this request, which was below list price that day.'
+      : '',
+    breakdown.estimated
+      ? "Cursor's pricing page didn't publish an Auto rate this time, so these proportions use the built-in one — the total is still what you were charged."
+      : '',
+  ].filter(Boolean).map((n) => `<p class="bd-note">${n}</p>`).join('');
+  return `<div class="breakdown"><div class="bd-bar">${segments}</div><ul class="bd-list">${rows}</ul>${notes}</div>`;
 }
 
 /**
@@ -2848,8 +2867,18 @@ function renderSessionTimeline(events) {
         data-request="${esc(event.id)}" style="--bar-h:${height}%;--ctx-h:${contextPct}%"
         title="${esc(tip)}"><span class="tl-context"></span></button>`;
   }).join('');
-  return `<div class="tl-plot">${bars}</div>
-    <div class="tl-axis"><span>first request</span><span>${fmt.money(max)} peak</span><span>last request</span></div>`;
+
+  // A price under every bar, while they are wide enough to carry one. Past this
+  // the labels collide and the axis row does the job instead — but it now names
+  // which request the peak belongs to. It never did, and with three bars the
+  // centred "peak" caption landed over the smallest one and read as its label.
+  const peakAt = priced.findIndex((e) => e.cost === max) + 1;
+  const foot = priced.length <= TIMELINE_LABEL_MAX
+    ? `<div class="tl-labels">${priced
+      .map((e) => `<span>${moneyFine(e.cost)}</span>`).join('')}</div>`
+    : `<div class="tl-axis"><span>first request</span>`
+      + `<span>peak ${fmt.money(max)} at #${peakAt}</span><span>last request</span></div>`;
+  return `<div class="tl-plot">${bars}</div>${foot}`;
 }
 
 /** Opens the per-session breakdown for one conversation. */
@@ -2932,8 +2961,8 @@ function askContext() {
   };
 }
 
-function buildAskBrief(overrides = {}) {
-  const { sessionId, scope, requestId, detail } = { ...state.ask, ...overrides };
+function buildAskBrief() {
+  const { sessionId, scope, requestId } = state.ask;
   if (!sessionId) return '';
   const events = sessionEventsInOrder(sessionId);
   if (!events.length) return '';
@@ -2965,7 +2994,6 @@ function buildAskBrief(overrides = {}) {
     findings: findingsForSession(state.insights, sessionId),
     template,
     question,
-    detail,
     ...askContext(),
   });
 }
@@ -3011,23 +3039,13 @@ function renderAskDialog() {
   const offered = askTemplates(scope);
   const chosen = currentAskTemplate();
   $('askTemplate').innerHTML = offered.map((t) =>
-    `<option value="${esc(t.id)}"${t.id === chosen.id ? ' selected' : ''}>${esc(t.title)} — ${esc(t.desc)}</option>`,
+    `<option value="${esc(t.id)}"${t.id === chosen.id ? ' selected' : ''}>${esc(t.title)}</option>`,
   ).join('');
 
-  // The detailed timeline is the one control here that can multiply the brief's
-  // size, so it prices itself rather than making the user copy it to find out.
-  // Measured off the two real briefs rather than estimated per row: a guess that
-  // is 60% out is worse than no figure, since this one is offered as a reason to
-  // leave the box unticked.
-  const detailRow = $('askDetail').closest('label');
-  detailRow.classList.toggle('hidden', scope !== 'session');
-  $('askDetail').checked = state.ask.detail;
-  if (scope === 'session') {
-    const extra = estimateBriefSize(buildAskBrief({ detail: true })).tokens
-      - estimateBriefSize(buildAskBrief({ detail: false })).tokens;
-    $('askDetailLabel').textContent = `Include every request (${fmt.num(events.length)}, `
-      + `+${fmt.num(Math.max(0, extra))} tokens)`;
-  }
+  // The question box belongs to the Custom option and nothing else. Left always
+  // open it read as a second question you could add to any template, when in
+  // fact anything typed there replaced the template silently and for good.
+  $('askCustomField').classList.toggle('hidden', chosen.custom !== true);
 
   updateAskPreview();
 }
@@ -3108,7 +3126,7 @@ function renderTable(events, summary) {
       <div class="detail-grid">
         <div>
           <h4>What this cost was made of</h4>
-          ${renderBreakdown(breakdownForEvent(e))}
+          ${renderBreakdown(breakdownForEvent(e), e)}
           ${kindNote}
         </div>
         <div>${flags.length
@@ -4339,24 +4357,24 @@ function renderAnalyze() {
  * Returns false when the copy failed, so callers can fall back to showing the
  * text somewhere the user can select it by hand.
  */
-async function copyBriefText(text, statusEl) {
+async function sendBriefToCursor(text, statusEl) {
   if (!text) return false;
+  let outcome;
   try {
-    await rpc('copyText', { text });
+    outcome = await rpc('sendToCursorChat', { text });
   } catch {
     return false;
   }
-  let opened = false;
-  try {
-    opened = Boolean((await rpc('focusCursorChat')).opened);
-  } catch {
-    opened = false;
-  }
   if (statusEl) {
-    statusEl.textContent = opened
-      ? 'Copied — Cursor Chat is open, press ⌘/Ctrl+V then Enter'
-      : 'Copied — paste in Cursor Chat';
-    setTimeout(() => { statusEl.textContent = ''; }, 4000);
+    // Three different things can have happened and only one of them is "done".
+    // Saying "opened and pasted" when the text is merely on the clipboard sends
+    // the user to a chat window to press Enter on nothing.
+    statusEl.textContent = outcome?.pasted
+      ? 'Opened Cursor Chat with the brief in the box — read it, then press Enter'
+      : outcome?.opened
+        ? 'Copied — Cursor Chat is open, press ⌘/Ctrl+V then Enter'
+        : 'Copied — paste in Cursor Chat';
+    setTimeout(() => { statusEl.textContent = ''; }, 6000);
   }
   return true;
 }
@@ -4364,7 +4382,7 @@ async function copyBriefText(text, statusEl) {
 async function copyCursorBrief() {
   const text = buildCursorBrief();
   if (!text) return;
-  if (!await copyBriefText(text, $('copyBriefStatus'))) {
+  if (!await sendBriefToCursor(text, $('copyBriefStatus'))) {
     $('analyzeBriefPreview').value = text;
     $('analyzeBriefPreview').closest('details')?.setAttribute('open', 'open');
     showAlert('info', 'Could not copy automatically — select the preview text and copy manually.');
@@ -5510,7 +5528,6 @@ async function init() {
     if (target.name === 'askScope') state.ask.scope = target.value;
     else if (target.id === 'askRequest') state.ask.requestId = target.value;
     else if (target.id === 'askTemplate') state.ask.templateId = target.value;
-    else if (target.id === 'askDetail') state.ask.detail = target.checked;
     else return;
     renderAskDialog();
   });
@@ -5518,7 +5535,7 @@ async function init() {
   $('askCopy')?.addEventListener('click', async () => {
     const text = buildAskBrief();
     if (!text) return;
-    if (!await copyBriefText(text, $('askStatus'))) {
+    if (!await sendBriefToCursor(text, $('askStatus'))) {
       $('askPreview').closest('details')?.setAttribute('open', 'open');
       showAlert('info', 'Could not copy automatically — select the preview text and copy manually.');
     }

@@ -103,6 +103,9 @@ export function costBreakdown(event, rates) {
     // Anything past a rounding difference means list price and the real charge
     // disagreed — a discount, usually.
     scaled: Math.abs(scale - 1) > 0.01,
+    // The rates themselves were a built-in default rather than a scrape, so the
+    // proportions are indicative and the caller should say as much.
+    estimated: rates.estimated === true,
   };
 }
 

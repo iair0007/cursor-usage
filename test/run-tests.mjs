@@ -2716,13 +2716,40 @@ console.log('brief (handing one session or request to Cursor Chat)');
     assert.ok(!text.includes('Nice'), 'the positive is dropped before a finding with dollars on it');
   });
 
-  test('the detailed timeline is opt-in, and it is what costs the tokens', () => {
-    const compact = brf.buildSessionBrief({ session, events: plain(47), ...ctx });
-    const detailed = brf.buildSessionBrief({ session, events: plain(47), detail: true, ...ctx });
-    assert.ok(!/^#12 /m.test(compact), 'compact never lists requests');
-    assert.ok(/^#12 /m.test(detailed));
-    assert.ok(brf.estimateBriefSize(detailed).tokens > brf.estimateBriefSize(compact).tokens * 2,
-      'if detail were cheap there would be no reason to default to compact');
+  test('a brief never lists requests one per line, at any size', () => {
+    // Not a default any more — the opt-in that used to turn this on is gone, so
+    // it is now an unconditional property of the format.
+    for (const n of [3, 12, 47, 300]) {
+      const text = brf.buildSessionBrief({ session, events: plain(n), ...ctx });
+      assert.ok(!/^#\d+ \d/m.test(text), `${n}-request brief listed requests`);
+    }
+  });
+
+  test('a typed question only counts when the question template asked for one', () => {
+    // It used to win over whatever template was selected, silently and for good.
+    const picked = brf.BRIEF_TEMPLATES.find((t) => t.id === 'session-too-long');
+    const custom = brf.BRIEF_TEMPLATES.find((t) => t.id === 'session-custom');
+    const typed = 'MY-OWN-QUESTION';
+    const withTemplate = brf.buildSessionBrief({ session, events: plain(6), template: picked, question: typed, ...ctx });
+    assert.ok(withTemplate.includes(picked.prompt), 'the chosen template still asks its question');
+    assert.ok(!withTemplate.includes(typed), 'stale text in the box must not hijack a template');
+    const withCustom = brf.buildSessionBrief({ session, events: plain(6), template: custom, question: typed, ...ctx });
+    assert.ok(withCustom.includes(typed));
+  });
+
+  test('the question labels read as one instruction each', () => {
+    for (const t of brf.BRIEF_TEMPLATES) {
+      assert.ok(!t.title.includes(' — '), `"${t.title}" still carries a dash-appended explainer`);
+      assert.equal(t.desc, undefined, `${t.id} still has a desc the dropdown would have to render`);
+    }
+    const byId = Object.fromEntries(brf.BRIEF_TEMPLATES.map((t) => [t.id, t.title]));
+    assert.equal(byId['session-too-long'], 'Find where starting a fresh chat would have saved money.');
+    assert.equal(byId['session-waste'], 'Identify avoidable spend, ranked by dollar impact.');
+    assert.equal(byId['session-next-time'], 'Create a cheaper plan for doing the same work.');
+    assert.equal(byId['session-custom'], 'Custom question - Write a question');
+    // Only the custom ones open the free-text box.
+    assert.deepEqual(brf.BRIEF_TEMPLATES.filter((t) => t.custom).map((t) => t.id),
+      ['session-custom', 'request-custom']);
   });
 
   test('a session brief stays roughly flat as the session grows', () => {
@@ -2768,7 +2795,7 @@ console.log('brief (handing one session or request to Cursor Chat)');
       messages: [{ role: 'user', content: 'SECRET-TURN' }],
     };
     const events = [...gapSession.slice(0, 4), decoy, ...gapSession.slice(5)];
-    const both = brf.buildSessionBrief({ session, events, detail: true, ...ctx })
+    const both = brf.buildSessionBrief({ session, events, ...ctx })
       + brf.buildRequestBrief({ event: decoy, sessionEvents: events, session, ...ctx });
     for (const secret of ['SECRET-PROMPT-TEXT', 'SECRET-MESSAGE-TEXT', 'SECRET-CODE-CONTEXT', 'SECRET-TURN']) {
       assert.ok(!both.includes(secret), `${secret} reached the brief`);
@@ -2829,7 +2856,7 @@ console.log('brief (handing one session or request to Cursor Chat)');
     const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
     for (const id of [
       'sessionAskBtn', 'askCursorDialog', 'askTitle', 'askClose', 'askRequest',
-      'askTemplate', 'askCustomQ', 'askDetail', 'askDetailLabel', 'askPreview',
+      'askTemplate', 'askCustomQ', 'askCustomField', 'askPreview',
       'askSize', 'askCopy', 'askStatus',
     ]) {
       assert.ok(html.includes(`id="${id}"`), `markup is missing id="${id}"`);
@@ -2844,6 +2871,157 @@ console.log('brief (handing one session or request to Cursor Chat)');
     const opened = (before.match(/<section /g) || []).length;
     const closed = (before.match(/<\/section>/g) || []).length;
     assert.equal(opened, closed, 'askCursorDialog sits inside an unclosed <section>');
+  });
+}
+
+console.log('Auto keeps a rate even when the pricing page moves it');
+{
+  const MODELS_TABLE = [
+    '| Model | Input | Cache Write | Cache Read | Output |',
+    '| --- | --- | --- | --- | --- |',
+    '| Claude 4.5 Sonnet | $3 | $3.75 | $0.30 | $15 |',
+    '| GPT-5.2 | $1.25 | $1.56 | $0.13 | $10 |',
+  ].join('\n');
+
+  test('a page that lists models but no Auto row still prices Auto', () => {
+    // This is the regression. Auto is priced from `pricing.auto` alone, and the
+    // wholesale fallback only fired when *nothing* parsed — so a page that still
+    // listed every named model but had moved or renamed the Auto row left Auto
+    // with no rates at all. Every Auto request then lost its cost breakdown, its
+    // cache-savings figure, and got reported as "not in the pricing table" — for
+    // the most-used model in the product.
+    const pricing = parsePricing(`## Pricing\n${MODELS_TABLE}`);
+    assert.equal(pricing.models.length, 2, 'the named models still parse');
+    assert.equal(pricing.autoFallback, true, 'and the substitution is recorded, not hidden');
+    const rates = matchPricing('auto', pricing);
+    assert.ok(rates, 'Auto must never come back unpriced');
+    assert.ok(rates.input > 0 && rates.output > 0);
+    assert.equal(rates.estimated, true, 'so the UI can say the rate is built-in, not scraped');
+  });
+
+  test('a published Auto rate is never overwritten by the built-in one', () => {
+    for (const doc of [
+      `### Auto pricing\n| Input and cache write | $1.10 |\n| Cache read | $0.22 |\n| Output | $5 |\n\n## Models\n${MODELS_TABLE}`,
+      `## Auto modes\n| Model | Input | Cache Write | Cache Read | Output |\n| --- | --- | --- | --- | --- |\n| Auto Cost | $1.10 | $1.10 | $0.22 | $5 |`,
+    ]) {
+      const pricing = parsePricing(doc);
+      assert.equal(pricing.autoFallback, false, 'a real rate was published');
+      const rates = matchPricing('auto', pricing);
+      assert.equal(rates.input, 1.1);
+      assert.equal(rates.output, 5);
+      assert.ok(!rates.estimated);
+    }
+  });
+
+  test('every spelling of Auto reaches the same rate', () => {
+    const pricing = parsePricing(`## Pricing\n${MODELS_TABLE}`);
+    for (const raw of ['auto', 'Auto', 'default', 'cursor-auto', 'Auto Cost', 'auto-cost']) {
+      assert.ok(matchPricing(raw, pricing), `matchPricing(${JSON.stringify(raw)}) came back null`);
+    }
+  });
+
+  test('the built-in rate carries through to a cost breakdown', async () => {
+    const ins = await loadTs('src/webview/insights.js', 'insights3.mjs');
+    const pricing = parsePricing(`## Pricing\n${MODELS_TABLE}`);
+    const b = ins.costBreakdown(
+      { inputTokens: 5000, outputTokens: 900, cacheReadTokens: 400000, cacheWriteTokens: 20000, cost: 0.4 },
+      matchPricing('auto', pricing),
+    );
+    assert.ok(b && b.total > 0, 'an Auto request must be breakable down');
+    assert.equal(b.estimated, true, 'and must be able to say the rates were a default');
+  });
+}
+
+console.log('handing a brief to Cursor Chat');
+{
+  const rpc = readFileSync(path.join(here, '..', 'src/rpcDispatcher.ts'), 'utf8');
+
+  test('the chat command is never called with a query', () => {
+    // The load-bearing safety property. Upstream, `workbench.action.chat.open`
+    // only leaves a prompt unsent when passed `isPartialQuery: true`; a bare
+    // string — the form nearly every snippet on the web uses — normalizes to
+    // `{ query }` and calls acceptInput(), which bills a request on the spot.
+    // Whether Cursor honours `isPartialQuery` is undocumented, so the command is
+    // only ever called with no arguments at all.
+    const calls = [...rpc.matchAll(/executeCommand\(([^)]*)\)/g)].map((m) => m[1].trim());
+    for (const call of calls) {
+      assert.ok(!/chat\.open['"]\s*,/.test(call),
+        `chat.open is being passed an argument, which can submit a paid request: ${call}`);
+    }
+    // The comment above the method names this key to explain why it is avoided,
+    // so strip comments before looking for it as actual code.
+    const code = rpc.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    assert.ok(!/isPartialQuery/.test(code),
+      'gambling a paid request on an option key Cursor may silently ignore');
+    assert.ok(rpc.includes('executeCommand(command)'),
+      'the chat-panel candidates must stay argument-free');
+  });
+
+  test('the clipboard is written before anything else is attempted', () => {
+    const body = rpc.slice(rpc.indexOf('private async sendToCursorChat'));
+    const clip = body.indexOf('clipboard.writeText');
+    const deeplink = body.indexOf('prefillViaDeeplink');
+    assert.ok(clip > -1 && deeplink > clip,
+      'every path below can fail; the clipboard is what makes that survivable');
+  });
+
+  test('the deeplink is capped and gated to a desktop Cursor', () => {
+    assert.ok(rpc.includes('DEEPLINK_MAX_CHARS = 8000'), 'Cursor caps a deeplink payload');
+    assert.ok(/query\.length > RpcDispatcher\.DEEPLINK_MAX_CHARS/.test(rpc), 'and the cap is measured after encoding');
+    assert.ok(rpc.includes('new URLSearchParams({ text })'),
+      'hand-rolled encoding truncates the prompt at the first "&"');
+    assert.ok(rpc.includes("uriScheme !== 'cursor'"), 'do not fire cursor:// at a non-Cursor host');
+    assert.ok(rpc.includes('vscode.UIKind.Desktop'), 'the in-process interception is desktop-only');
+  });
+
+  test('the webview reports what actually happened, not what it hoped for', () => {
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.slice(main.indexOf('async function sendBriefToCursor'));
+    assert.ok(fn.includes('outcome?.pasted'), 'a paste and a copy are different outcomes');
+    assert.ok(fn.includes('outcome?.opened'));
+    assert.ok(/Copied — paste in Cursor Chat/.test(fn), 'and the plain copy is still a real outcome');
+  });
+}
+
+console.log('session timeline');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function openSessionDetail'));
+
+  test('the peak caption names the request it belongs to', () => {
+    // It used to read "$1.02 peak", centred by space-between under the middle of
+    // the plot — so on a three-bar session it sat over the *smallest* bar and
+    // read as that bar's label.
+    assert.ok(/peak \$\{|peak \$/.test(fn) || fn.includes('peak ${fmt.money(max)} at #${peakAt}'),
+      'the peak caption must say which request it is about');
+    assert.ok(fn.includes('peakAt'), 'and that index has to be computed');
+  });
+
+  test('bars get their own price while they are wide enough to show one', () => {
+    assert.ok(fn.includes('tl-labels'));
+    assert.ok(fn.includes('moneyFine(e.cost)'),
+      'fmt.money rounds a fraction-of-a-cent request to $0.00');
+    assert.ok(fn.includes('TIMELINE_LABEL_MAX'));
+  });
+
+  test('labels stop well before the plot starts scrolling', () => {
+    // .tl-labels is a sibling of .tl-plot, so once the plot scrolls horizontally
+    // the two slide out of alignment with each other. At flex 1 0 10px with a
+    // 3px gap in an ~816px dialog that starts around 60 bars.
+    const max = Number(main.match(/const TIMELINE_LABEL_MAX = (\d+)/)[1]);
+    assert.ok(max > 0 && max <= 20, `TIMELINE_LABEL_MAX is ${max}, too close to the scroll threshold`);
+  });
+
+  test('the label row shares the plot\'s flex rules so labels sit under their bars', () => {
+    const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+    const labels = css.slice(css.indexOf('.tl-labels {'), css.indexOf('.tl-axis {'));
+    const plot = css.slice(css.indexOf('.tl-plot {'), css.indexOf('.tl-bar {'));
+    for (const rule of ['gap: 3px', 'padding: 6px']) {
+      assert.ok(plot.includes(rule), `.tl-plot lost "${rule}"`);
+      assert.ok(labels.includes(rule.replace('padding: 6px', 'padding: 0 6px')),
+        `.tl-labels must match .tl-plot on "${rule}"`);
+    }
+    assert.ok(labels.includes('flex: 1 0 10px'), 'and on how each cell sizes');
   });
 }
 

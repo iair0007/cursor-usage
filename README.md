@@ -85,7 +85,7 @@ Three sub-tabs, all answering "why does my bill look like this" — **Findings**
 
 ![Analyze tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analyze.png)
 
-**Findings** are rule-based with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, a measured promotion and what it's worth switching to it for — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick, copies it, and focuses Cursor's chat so you just paste and send.
+**Findings** are rule-based with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, a measured promotion and what it's worth switching to it for — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick and opens Cursor's chat with it in the input box, unsent, for you to read and send yourself.
 
 Findings that are about a specific request say what the pattern cost and link through to it, and the same finding appears wherever you happen to be looking — on the Overview, on the session it belongs to, and as a marker on the row in the log. They're derived from token counts and timestamps alone, never from anything you wrote:
 
@@ -113,9 +113,11 @@ Groups the requests in your selected period by the Cursor conversation they came
 
 ![Sessions list](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-sessions.png)
 
-**Click a session name** to open its breakdown: where that session's money went by token bucket, the findings anchored to it, and one bar per request in the order you asked them, with the context share shaded. A session that got more expensive as it went looks expensive — the shaded band swells while the solid part stays flat.
+**Click a session name** to open its breakdown: where that session's money went by token bucket, the findings anchored to it, and one bar per request in the order you asked them, each priced, with the context share shaded. A session that got more expensive as it went looks expensive — the shaded band swells while the solid part stays flat.
 
-**Ask Cursor Chat about it.** The breakdown has an **Ask Cursor Chat** button that builds a brief about *this* session — or about one request out of it — and copies it for you to paste. It's engineered small on purpose, because the analysis costs tokens too: instead of listing every request, it reports the session's spending as six equal slices, so a 300-request session costs the same to describe as a 12-request one and the growth curve, the step down at a compaction and the spike all still show. Anything a finding already explains isn't repeated. The dialog tells you the brief's size in tokens and roughly what it'll cost to send *before* you send it, and the "include every request" option prices itself so you can see what it would add. Pick a question — *should I have split this session?*, *what did this cost that it didn't have to?*, *how do I run the next one like this?* — or write your own.
+**Ask Cursor Chat about it.** The breakdown has an **Ask Cursor Chat** button that builds a brief about *this* session — or about one request out of it — and opens Cursor Chat with it already in the input box. It stops there: nothing is sent until you've read it and pressed Enter. Where prefilling isn't available it copies the brief and opens chat for you to paste, and tells you which happened.
+
+The brief is engineered small on purpose, because the analysis costs tokens too: instead of listing every request, it reports the session's spending as six equal slices, so a 300-request session costs the same to describe as a 12-request one and the growth curve, the step down at a compaction and the spike all still show. Anything a finding already explains isn't repeated. The dialog tells you the brief's size in tokens and roughly what it'll cost to send *before* you send it. Pick a question — *find where starting a fresh chat would have saved money*, *identify avoidable spend, ranked by dollar impact*, *create a cheaper plan for doing the same work* — or write your own.
 
 The brief carries the conversation's name, its token counts, timings and costs, and nothing else. Nothing you typed is in it, because the extension never read it.
 

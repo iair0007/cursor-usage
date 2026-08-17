@@ -99,8 +99,8 @@ export class RpcDispatcher {
       case 'copyText':
         await vscode.env.clipboard.writeText(String(params.text ?? ''));
         return { ok: true };
-      case 'focusCursorChat':
-        return { opened: await this.focusCursorChat() };
+      case 'sendToCursorChat':
+        return this.sendToCursorChat(String(params.text ?? ''));
       case 'exportCsv':
         return this.saveCsv(String(params.csv ?? ''), String(params.filename || 'cursor-usage.csv'));
       case 'openInBrowser':
@@ -112,28 +112,111 @@ export class RpcDispatcher {
   }
 
   /**
-   * Best-effort attempt to bring Cursor's own chat/composer panel into focus
-   * so the user only has to paste, instead of also hunting for the panel.
-   * There is no documented, stable API for this — Cursor doesn't support
-   * VS Code's own `workbench.action.chat.open`, and no third-party extension
-   * has a confirmed way to pass prompt text into Cursor's chat. So this only
-   * tries to *open/focus* the panel (never to populate or submit a prompt,
-   * which could otherwise send a request on the user's behalf without them
-   * reviewing it first) and silently no-ops if none of the candidate
-   * commands exist on this Cursor version.
+   * Hands a brief to Cursor's own chat — in the input box, never sent.
+   *
+   * The clipboard is written first and unconditionally, so every path below can
+   * fail and the user is still no worse off than the plain "copied, go paste it"
+   * this used to do.
+   *
+   * Then the deeplink, which is the only mechanism that is *structurally* unable
+   * to submit: Cursor answers it with a "Create chat with prompt" confirmation,
+   * so a human sees the prompt before a request exists. On desktop this doesn't
+   * even leave the process — VS Code's RelayURLService intercepts URIs matching
+   * the app's own `urlProtocol` ahead of the external opener and dispatches them
+   * to the handling extension in-process — which is why `uriScheme` and desktop
+   * are the things worth checking rather than the app name.
+   *
+   * What is deliberately *not* here is `workbench.action.chat.open` with a query.
+   * Upstream it only leaves the prompt unsent when passed `isPartialQuery: true`;
+   * every other shape — including the bare-string form that most snippets on the
+   * web use — calls `acceptInput()` and bills a request immediately. Whether
+   * Cursor honours `isPartialQuery` is undocumented, and an option key it might
+   * silently ignore is not something to gamble a paid request on. The command
+   * still gets called with *no arguments* further down, where it can only open an
+   * empty chat.
    */
-  private async focusCursorChat(): Promise<boolean> {
-    const candidates = ['composer.createNewComposerTab', 'aichat.newchataction', 'workbench.action.chat.open'];
+  private async sendToCursorChat(text: string): Promise<{ pasted: boolean; opened: boolean; via: string }> {
+    await vscode.env.clipboard.writeText(text);
+    if (await this.prefillViaDeeplink(text)) return { pasted: true, opened: true, via: 'deeplink' };
+    const via = await this.openChatPanel();
+    return { pasted: false, opened: Boolean(via), via: via || 'none' };
+  }
+
+  /** Cursor's documented cap on a deeplink's payload, measured after encoding. */
+  private static readonly DEEPLINK_MAX_CHARS = 8000;
+
+  private async prefillViaDeeplink(text: string): Promise<boolean> {
+    if (!text) return false;
+    if (vscode.env.uriScheme !== 'cursor') {
+      this.log(`sendToCursorChat: uriScheme is "${vscode.env.uriScheme}", not Cursor — skipping deeplink`);
+      return false;
+    }
+    // The in-process interception is desktop-only; on web or over a remote the
+    // URI would genuinely try to leave the editor, which helps nobody.
+    if (vscode.env.remoteName !== undefined || vscode.env.uiKind !== vscode.UIKind.Desktop) {
+      this.log('sendToCursorChat: remote or web session — skipping deeplink');
+      return false;
+    }
+    // URLSearchParams both escapes "&" (which used to truncate the prompt) and
+    // encodes a space as "+" rather than "%20", which matters when the payload
+    // is measured against a cap.
+    const query = new URLSearchParams({ text }).toString();
+    if (query.length > RpcDispatcher.DEEPLINK_MAX_CHARS) {
+      this.log(`sendToCursorChat: brief is ${query.length} encoded chars, over the `
+        + `${RpcDispatcher.DEEPLINK_MAX_CHARS} deeplink cap — falling back to the clipboard`);
+      return false;
+    }
+    try {
+      const uri = vscode.Uri.parse(`cursor://anysphere.cursor-deeplink/prompt?${query}`);
+      // Only `false` is informative here: the default external opener returns
+      // true unconditionally, so a true tells us nothing was refused, not that
+      // anything was handled.
+      const refused = (await vscode.env.openExternal(uri)) === false;
+      if (refused) {
+        this.log('sendToCursorChat: no handler took the prompt deeplink');
+        return false;
+      }
+      this.log('sendToCursorChat: handed the brief to Cursor via the prompt deeplink');
+      return true;
+    } catch (e: any) {
+      this.log(`sendToCursorChat: deeplink failed (${e?.message || e})`);
+      return false;
+    }
+  }
+
+  /**
+   * Opens or focuses whatever Cursor calls its chat on this version, so there is
+   * somewhere to paste. Every id here is called with no arguments, which is what
+   * makes the list safe to walk: with nothing to submit, none of them can send.
+   * Checked against the command registry first rather than probed by throwing.
+   */
+  private async openChatPanel(): Promise<string | null> {
+    const candidates = [
+      'composer.startComposerPrompt',
+      'composer.createNewComposerTab',
+      'composer.newAgentChat',
+      'aichat.newchataction',
+      'glass.focusInput',
+      'workbench.action.chat.open',
+    ];
+    let registered: string[] = [];
+    try {
+      registered = await vscode.commands.getCommands(true);
+    } catch {
+      registered = [];
+    }
     for (const command of candidates) {
+      if (registered.length && !registered.includes(command)) continue;
       try {
         await vscode.commands.executeCommand(command);
-        this.log(`focusCursorChat: opened chat via "${command}"`);
-        return true;
+        this.log(`sendToCursorChat: opened chat via "${command}"`);
+        return command;
       } catch (e: any) {
-        this.log(`focusCursorChat: "${command}" unavailable (${e?.message || e})`);
+        this.log(`sendToCursorChat: "${command}" failed (${e?.message || e})`);
       }
     }
-    return false;
+    this.log('sendToCursorChat: no chat command available on this build');
+    return null;
   }
 
   private async saveCsv(csv: string, filename: string): Promise<{ ok: boolean; path?: string }> {

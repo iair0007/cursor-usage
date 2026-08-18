@@ -584,9 +584,18 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       continue;
     }
 
-    // Auto routes to a model Cursor does not name, so its billed value cannot
-    // be checked against any single rate row. Only the fallback below needs one.
-    if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) {
+    // Bare Auto routes to a model Cursor does not name, so its billed value
+    // cannot be checked against any single rate row. Only the fallback below
+    // needs one.
+    //
+    // A Balance or Intelligence row is the opposite case and must not be swept
+    // up with it: Cursor names the model it routed to ("Cursor Grok 4.5 (Auto
+    // Balanced)") precisely because the request was billed at that model's own
+    // rate, and matchPricing already resolves it to that catalog row. Skipping
+    // it on the word "auto" made every routed request permanently undetectable
+    // on an account where Cursor omits tokenUsage.totalCents — the promotion
+    // could be running and nothing here would ever measure it.
+    if (!n || n === 'unknown' || n === 'default' || (n.includes('auto') && !autoRouting(e.modelRaw))) {
       skip('Auto or unnamed model, and no list value to compare against');
       continue;
     }

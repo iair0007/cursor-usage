@@ -83,6 +83,15 @@ All notable user-facing changes. Earlier releases predate this file; see the
   built-in one rather than a published one.
 - Briefs carry token counts, timings, costs and the conversation's name. Nothing
   you wrote is in them, because none of it is ever read.
+- Discount detection no longer skips an Auto-routed request that names the model
+  it was routed to. Balance and Intelligence bill at the routed model's own rate
+  — which is exactly why Cursor spells it out as "Cursor Grok 4.5 (Auto
+  Balanced)" — and the pricing lookup already resolves those rows to the right
+  model. Detection was still discarding them on the word "auto", alongside bare
+  Auto, whose model genuinely cannot be named. On an account where Cursor omits
+  the per-request list value, that left every routed request permanently
+  unmeasurable: a promotion could be running on the model and no estimate would
+  ever reflect it.
 
 ## 0.9.0 — 2026-08-16
 

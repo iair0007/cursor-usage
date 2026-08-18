@@ -462,6 +462,23 @@ test('Auto is skipped — its billed value belongs to a model Cursor does not na
   const autos = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelRaw: 'auto' }));
   assert.deepEqual(detectDiscounts(autos, pricing).discounts, {});
 });
+test('a Balance-routed row is measured — Cursor named the model it billed at', () => {
+  // The opposite case to bare Auto: "(Auto Balanced)" means the request was
+  // billed at the named model's own rate, and matchPricing resolves it to that
+  // catalog row. Skipping it on the word "auto" left every routed request
+  // permanently undetectable wherever tokenUsage.totalCents is absent.
+  const routed = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 0.5), modelRaw: 'Cursor Grok 4.6 High (Auto Balanced)' }));
+  const { discounts } = detectDiscounts(routed, pricing);
+  assert.equal(discounts['cursor-grok-4-6-high-auto-balanced']['2026-08-13'].pct, 50);
+});
+test('a Balance-routed row at list price is reported as no discount, not as unknown', () => {
+  const routed = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 1), modelRaw: 'Cursor Grok 4.6 High (Auto Balanced)' }));
+  const { discounts, observed } = detectDiscounts(routed, pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high-auto-balanced|2026-08-13'));
+});
 // Grok publishes no cache-write rate, so a request carrying cache writes has
 // two defensible prices: writes at the input rate (what estimateTokenCost
 // substitutes) and writes free. These fixtures name the billed figure outright,

@@ -25,6 +25,14 @@ export interface RawUsageEvent {
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
     totalCents?: number;
+    /**
+     * A standing per-account reduction (enterprise agreement), as a percentage.
+     * Applied to the charge on every request, which makes it the account's real
+     * baseline price — not a promotion. Discount detection has to subtract it
+     * before measuring, or every model reads as permanently on sale by this
+     * much and every genuine promotion reads deeper than it is.
+     */
+    enterpriseUsageDiscountPercent?: number;
   } | null;
 }
 
@@ -186,6 +194,9 @@ export function toRawEvent(e: any): RawUsageEvent {
             'cacheCreationInputTokens', 'cache_creation_input_tokens',
           ),
           totalCents: num(tu.totalCents) ?? undefined,
+          enterpriseUsageDiscountPercent: tu.enterpriseUsageDiscountPercent !== undefined
+            ? num(tu.enterpriseUsageDiscountPercent) ?? undefined
+            : undefined,
         }
       : null,
   };

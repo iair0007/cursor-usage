@@ -469,6 +469,53 @@ test('Auto is skipped — its billed value belongs to a model Cursor does not na
   const autos = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelRaw: 'auto' }));
   assert.deepEqual(detectDiscounts(autos, pricing).discounts, {});
 });
+// An enterprise agreement is a standing reduction on every request, reported
+// on the event as enterpriseUsageDiscountPercent while totalCents stays at
+// list. Measured against list it looks like a permanent sale on every model.
+const entEvent = (i, billedFraction, pct) => ({
+  id: `x${i}`,
+  timestampMs: new Date(`2026-08-12T1${i}:00:00`).getTime(),
+  modelRaw: 'cursor-grok-4.6-high',
+  listTokenCost: 1,
+  billedTokenCost: billedFraction,
+  baselineDiscountPct: pct,
+  inputTokens: 5000, outputTokens: 900, cacheReadTokens: 400_000, cacheWriteTokens: 0,
+});
+
+test("a standing enterprise reduction is the account's price, not a sale", () => {
+  // Paying exactly the agreement and nothing more: no promotion to report.
+  const { discounts, observed } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.93, 7)), pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high|2026-08-12'), 'measured, and the answer was "no sale"');
+});
+
+test('a sale on top of an agreement is reported at its own size', () => {
+  // A 50% sale billed on a 7% account lands at 0.5 x 0.93 of list. Measured
+  // against list that reads 53.5%; against what the account actually pays, 50%.
+  const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.5 * 0.93, 7)), pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-12'].pct, 50);
+});
+
+test('an account with no agreement is measured exactly as before', () => {
+  const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.5, 0)), pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-12'].pct, 50);
+});
+
+test('a nonsense agreement percentage is ignored rather than trusted', () => {
+  for (const pct of [100, 120, -5, NaN, null]) {
+    const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.5, pct)), pricing);
+    assert.equal(discounts['cursor-grok-4-6-high']?.['2026-08-12']?.pct, 50,
+      `baseline ${pct} must not scale anything`);
+  }
+});
+
+test('the agreement percentage is read from the event Cursor sends', () => {
+  const api = readFileSync(path.join(here, '..', 'src/api.ts'), 'utf8');
+  assert.match(api, /enterpriseUsageDiscountPercent/);
+  const logic = readFileSync(path.join(here, '..', 'src/webview/logic.js'), 'utf8');
+  assert.match(logic, /baselineDiscountPct/);
+});
+
 test('a Balance-routed row is measured — Cursor named the model it billed at', () => {
   // The opposite case to bare Auto: "(Auto Balanced)" means the request was
   // billed at the named model's own rate, and matchPricing resolves it to that
@@ -3523,49 +3570,20 @@ console.log('\nsession charts and table');
     assert.match(css, /\.bd-seg:last-child \{ box-shadow: none; \}/);
   });
 
-  test('the sub-plot is measured from what went up, never from what came back', () => {
-    const fn = main.slice(main.indexOf('function tokensSent'), main.indexOf('function renderSessionTimeline'));
-    for (const field of ['inputTokens', 'cacheReadTokens', 'cacheWriteTokens']) {
-      assert.ok(fn.includes(field), `context has to include ${field}`);
-    }
-    assert.ok(!fn.includes('outputTokens'),
-      'output is the answer, not the context — folding it in makes a long reply look like a big thread');
-  });
-
-  test('the context plot is a second chart, never a second axis on the first', () => {
-    const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
-    assert.ok(fn.includes('maxOf(priced, tokensSent)'),
-      'the context plot is scaled by its own maximum — dollars and tokens share no unit');
-    assert.ok(fn.includes('tl-ctx-plot') && fn.includes('tl-ctx-bar'));
-    // The sub-plot sums the whole request, and an agent request re-sends the
-    // prefix on every internal turn — so the figure is context × turns and
-    // runs well past any model's window. Calling it the conversation's size
-    // makes a short request look like a thread that shrank on its own.
-    assert.ok(!/Context sent|tokens of context/.test(fn),
-      'the sub-plot must not be labelled as the size of the conversation');
-    assert.match(fn, /context size × turns/, 'and has to say what it actually is');
-    // "context size" is allowed only inside that phrase — anywhere else it is
-    // the old claim creeping back.
-    assert.equal(fn.match(/context size/g).length, fn.match(/context size × turns/g).length);
-    // Same x for both rows: the geometry comes from .tl-plot, which .tl-ctx-plot
-    // extends rather than redeclares, so the columns cannot drift apart.
-    assert.match(fn, /class="tl-plot tl-ctx-plot"/);
-    const ctx = css.match(/\.tl-ctx-bar \{[^}]*\}/)[0];
-    const bar = css.match(/\.tl-bar \{[^}]*\}/)[0];
-    for (const rule of ['flex: 1 0 10px', 'min-width: 10px']) {
-      assert.ok(bar.includes(rule) && ctx.includes(rule), `both bar rules need "${rule}" to stay aligned`);
+  test('the timeline is one plot — the token row that redrew it is gone', () => {
+    // Cost is very nearly a linear function of tokens sent (r = 0.99 on real
+    // usage), so a second row of bars drew the same shape twice, and the
+    // stacked cost bar already shows which bucket the tokens landed in.
+    for (const gone of ['tokensSent', 'tl-ctx-plot', 'tl-ctx-bar', 'tl-sub']) {
+      assert.ok(!main.includes(gone), `${gone} should have gone with the sub-plot`);
+      assert.ok(!css.includes(gone), `${gone} should have gone from the stylesheet`);
     }
   });
 
-  test('a summarising turn is striped in both plots', () => {
-    // .tl-compaction is declared above .tl-ctx-bar, so the `background`
-    // shorthand there would reset its background-image and drop the stripes
-    // from the one column the two plots exist to connect.
-    const ctx = css.match(/\.tl-ctx-bar \{[^}]*\}/)[0];
-    assert.match(ctx, /background-color: var\(--bucket-cache-read\)/);
-    assert.ok(!/\n\s*background: /.test(ctx), 'the background shorthand would clobber the stripe');
+  test('a summarising turn is still striped in the cost plot', () => {
     const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
-    assert.ok((fn.match(/tl-compaction/g) || []).length >= 2, 'both plots mark the compaction');
+    assert.match(fn, /tl-compaction/);
+    assert.match(css, /\.tl-compaction \{/);
   });
 
   test('the sessions table fits its width instead of scrolling sideways', () => {

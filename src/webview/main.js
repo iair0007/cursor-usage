@@ -2977,36 +2977,16 @@ function sessionSpendBreakdown(events) {
 }
 
 /**
- * Everything that went *up* with one request: the new prompt, the context
- * re-read from cache, and the context written to it. Output is excluded —
- * that came back down.
+ * Cost per request, in order, each bar stacked by where the money went.
  *
- * Emphatically NOT the size of the conversation, which is what this plot first
- * claimed to show. Cursor reports no context-window figure, and this cannot
- * stand in for one: an agent request re-sends the whole prefix on every
- * internal turn, so what lands here is context size × turns taken. That is why
- * the figure routinely runs to eight digits — far past any model's window —
- * and why a short request plots low next to a long one on the very same
- * conversation. The chart is labelled for what it measures.
- */
-function tokensSent(event) {
-  return (event.inputTokens || 0) + (event.cacheReadTokens || 0) + (event.cacheWriteTokens || 0);
-}
-
-/**
- * Two plots, one x-axis: cost per request, and the tokens sent to earn it.
- *
- * Deliberately not one chart with two scales. Dollars and tokens have no
- * common unit, and a second y-axis is the one chart form that reliably invents
- * a relationship the data doesn't have — you can slide either axis until the
- * series appear to lead or lag each other. Stacked as small multiples instead:
- * same bar order, same widths, same gaps, so request #12 is the twelfth column
- * of both and the eye does the correlating without being told a story.
- *
- * The context plot is what makes a compaction legible. A summary shows up as a
- * tall striped column — the whole thread going up uncached — followed by a
- * step down that lasts until the conversation grows back. That shape is the
- * entire argument for starting a fresh chat, and no sentence makes it as well.
+ * There was a second plot here — tokens sent per request — and it was removed
+ * rather than fixed. Cost is very nearly a linear function of tokens sent
+ * (r = 0.99 on real usage), so the two rows drew the same shape twice, and the
+ * stacked bars already say which bucket the tokens landed in. It also could not
+ * do the job it was added for: Cursor publishes no context-window figure, and a
+ * per-request token sum is context size × turns taken, not the size of the
+ * conversation. A chart that duplicates its neighbour and needs a paragraph
+ * explaining what it is not is noise.
  */
 function renderSessionTimeline(events) {
   const priced = events.filter((e) => e.cost != null && e.cost > 0);
@@ -3053,44 +3033,7 @@ function renderSessionTimeline(events) {
       ? 'The striped bar is where Cursor summarised the conversation'
       : `The ${fmt.num(compactions)} striped bars are where Cursor summarised the conversation`} — not a request you made.</p>`
     : '';
-  // Second plot, same x. Sized on its own maximum because it is its own chart
-  // with its own unit — the shared thing is the request order, never the scale.
-  const maxCtx = maxOf(priced, tokensSent);
-  const ctxBars = priced.map((event, index) => {
-    const tokens = tokensSent(event);
-    const height = maxCtx > 0 ? Math.max(2, (tokens / maxCtx) * 100) : 2;
-    const isCompaction = classifyRequest(event, state.analyzeThresholds) === 'compaction';
-    const lines = [
-      `#${index + 1} · ${fmt.date(event.timestampMs)}`,
-      `${fmt.num(tokens)} tokens sent`,
-      `in ${fmt.num(event.inputTokens)} · cache read ${fmt.num(event.cacheReadTokens)}`
-        + ` · cache write ${fmt.num(event.cacheWriteTokens)}`,
-      ...(isCompaction ? ['Cursor summarised the conversation here'] : []),
-    ];
-    // Same data-request as the cost bar above, so hovering, focusing and
-    // clicking a column behave identically in either plot.
-    return `<button type="button" class="tl-ctx-bar${isCompaction ? ' tl-compaction' : ''}"
-        data-request="${esc(event.id)}" style="--bar-h:${height}%"
-        data-tl-tip="${esc(lines.join('\n'))}"
-        aria-label="${esc(lines.join('. '))}"></button>`;
-  }).join('');
-
-  const peakCtx = priced[priced.findIndex((e) => tokensSent(e) === maxCtx)];
-  const ctxPlot = `
-    <div class="tl-sub">
-      <div class="tl-sub-head">
-        <h5>Tokens sent per request</h5>
-        <span class="tl-sub-note">most sent ${fmt.num(maxCtx)} tokens${peakCtx
-          ? ` at #${priced.indexOf(peakCtx) + 1}` : ''}</span>
-      </div>
-      <div class="tl-plot tl-ctx-plot">${ctxBars}</div>
-      <p class="tl-legend">Your prompt plus the conversation re-read from cache, on every internal
-        turn the agent took — so this is context size × turns, not the size of the conversation.
-        A short bar is a short request, not a smaller thread: only a striped bar is the thread
-        itself getting smaller. Cursor publishes no context-window figure.</p>
-    </div>`;
-
-  return `<div class="tl-plot">${bars}</div>${foot}${legend}${ctxPlot}`;
+  return `<div class="tl-plot">${bars}</div>${foot}${legend}`;
 }
 
 /**

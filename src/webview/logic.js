@@ -498,6 +498,27 @@ export const DISCOUNT_DETECTION = {
   exactSlackPct: 1,
 };
 
+/**
+ * What this account pays for a request that is on no promotion at all.
+ *
+ * Cursor reports a standing enterprise reduction on the event itself, and
+ * applies it to the charge while `totalCents` stays at list. Measured against
+ * list, then, every model on such an account sits permanently "below list" by
+ * that much — a 7% agreement put three models a hair under the 8% promotion
+ * floor, and pushed every real sale 7 points deeper than it was (a 33% sale
+ * measured as 37.7%, a 50% one as 53.5%). Price against what the account
+ * actually pays and both problems go away. Zero for everyone else, so this
+ * changes nothing on an account with no such agreement.
+ */
+function mul(value, factor) {
+  return value == null ? null : value * factor;
+}
+
+function baselineFactor(event) {
+  const pct = event?.baselineDiscountPct;
+  return Number.isFinite(pct) && pct > 0 && pct < 100 ? 1 - pct / 100 : 1;
+}
+
 function median(sorted) {
   if (!sorted.length) return null;
   const mid = Math.floor(sorted.length / 2);
@@ -559,7 +580,8 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     // thrown by a stale scrape, a model the table has never heard of, or an
     // unpublished cache-write rate — and Auto works, which the rate table can
     // never price because Cursor does not say what it routed to.
-    const list = e.listTokenCost;
+    const baseline = baselineFactor(e);
+    const list = e.listTokenCost != null ? e.listTokenCost * baseline : null;
     const billed = e.billedTokenCost;
     if (list != null && billed != null && list >= cfg.minExpectedCost) {
       diagnostics.considered++;
@@ -621,7 +643,7 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       cacheRead: e.cacheReadTokens,
       cacheWrite: e.cacheWriteTokens,
     };
-    const expected = estimateTokenCost(rates, tokens);
+    const expected = mul(estimateTokenCost(rates, tokens), baseline);
     if (expected == null || expected < cfg.minExpectedCost) {
       skip('below the sub-cent floor', n);
       continue;
@@ -646,7 +668,7 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     // that, while allowing the gaps too large for the substitution to explain.
     let floorExpected = expected;
     if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) {
-      floorExpected = estimateTokenCost({ ...rates, cacheWrite: 0 }, tokens);
+      floorExpected = mul(estimateTokenCost({ ...rates, cacheWrite: 0 }, tokens), baseline);
       if (floorExpected == null || !(floorExpected > 0)) {
         skip('cache-write rate unbounded', n);
         continue;
@@ -1082,6 +1104,13 @@ export function normalize(raw, pricing, opts = {}) {
   // since both come from Cursor for the same request, the gap between them is
   // the discount — measured, not inferred from a scraped rate table.
   const listTokenCost = modelCents != null ? modelCents / 100 : null;
+  // A standing per-account reduction (an enterprise agreement), applied to the
+  // charge on every request. It is the account's baseline price, not a sale,
+  // and detection has to price against it — see baselineFactor.
+  const baselineDiscountPct = Number.isFinite(tu.enterpriseUsageDiscountPercent)
+    && tu.enterpriseUsageDiscountPercent > 0 && tu.enterpriseUsageDiscountPercent < 100
+    ? Number(tu.enterpriseUsageDiscountPercent)
+    : 0;
   const billedTokenCost = isTokenBased && chargedCents != null
     ? Math.max(0, chargedCents - feeCents) / 100
     : null;
@@ -1136,6 +1165,7 @@ export function normalize(raw, pricing, opts = {}) {
     isTokenBased,
     billingRegime,
     planMeteredCost,
+    baselineDiscountPct,
     cacheSavings,
     noCacheCost,
     pricingLabel: rates?.label || null,

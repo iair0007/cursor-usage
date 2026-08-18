@@ -1910,47 +1910,6 @@ tr.row-open > td { border-bottom-color: transparent; }
     color-mix(in srgb, var(--bg) 55%, transparent) 3px 6px
   );
 }
-/* The context plot: its own chart, stacked under the cost one and sharing only
-   the x-axis. Every rule that decides column geometry — flex basis, gap,
-   padding — is inherited from .tl-plot, so the two rows stay aligned column for
-   column by construction rather than by two sets of numbers kept in step. */
-.tl-sub { margin-top: 14px; }
-.tl-sub-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 4px;
-}
-.tl-sub-head h5 {
-  margin: 0;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-.tl-sub-note { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
-/* Shorter than the cost plot on purpose: it is the supporting chart, and an
-   equal-height pair reads as two competing headlines. */
-.tl-ctx-plot { height: 74px; }
-/* One series, so one hue — the same orange the bar above uses for context
-   handling, which is what makes the two plots read as one story. */
-.tl-ctx-bar {
-  flex: 1 0 10px;
-  min-width: 10px;
-  height: var(--bar-h, 2%);
-  padding: 0;
-  border: 0;
-  border-radius: 2px 2px 0 0;
-  /* background-color, not the `background` shorthand: the shorthand resets
-     background-image, and .tl-compaction is declared above — so a summarising
-     turn lost its stripes in this plot while keeping them in the one above,
-     which is precisely the column the two plots exist to connect. */
-  background-color: var(--bucket-cache-read);
-  cursor: pointer;
-}
-.tl-ctx-bar:hover { outline: 1px solid var(--accent); }
 .tl-legend { margin: 6px 0 0; font-size: 10px; color: var(--muted); }
 .tl-key {
   display: inline-block;

@@ -5,6 +5,20 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.8.0 — 2026-08-17
 
+- **Promotions are measured against what your account actually pays.** Cursor
+  reports a standing enterprise reduction on each event while the list value
+  stays gross, so every model on such an account looked permanently discounted
+  by that amount — a 7% agreement sat a hair under the 8% promotion floor, and
+  pushed every real sale that much deeper: a 33% sale was reported as 37.7%, a
+  50% one as 53.5%. Detection now subtracts the agreement first, so the figure
+  matches what Cursor's own usage page shows. Accounts without an agreement are
+  measured exactly as before.
+- Removed the tokens-per-request row from the session timeline. Cost is very
+  nearly a linear function of tokens sent (r = 0.99 on real usage), so it drew
+  the same shape as the plot above it, and the stacked cost bar already shows
+  which bucket the tokens landed in. It also could not do the job it was added
+  for: Cursor publishes no context-window figure, and a per-request token sum is
+  context size × turns taken, not the size of the conversation.
 - **You can now ask Cursor Chat about one session, or one request.** The
   per-session breakdown has an **Ask Cursor Chat** button that builds a brief
   about that conversation and hands it over. Pick *find where starting a fresh

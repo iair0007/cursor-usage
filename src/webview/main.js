@@ -2062,13 +2062,15 @@ function renderSessionList(root, pagerRoot, sessions, periodCost) {
           <button type="button" class="btn-link session-open" data-session="${esc(t.sessionId)}">${esc(name.text)}</button>
           ${insightBadge(findingsForSession(state.insights, t.sessionId))}
         </th>
-        <td>${esc(fmt.date(t.firstMs))}</td>
-        <td>${esc(fmtDuration(m.durationMs))}</td>
-        <td>${fmt.num(t.requests)}${t.erroredRequests
+        <td class="session-started">${esc(fmt.date(t.firstMs))}</td>
+        <td class="session-duration">${esc(fmtDuration(m.durationMs))}</td>
+        <td class="session-requests">${fmt.num(t.requests)}${t.erroredRequests
           ? `<span class="compare-sub">+${fmt.num(t.erroredRequests)} errored</span>` : ''}</td>
-        <td>${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req${
+        <td class="session-cost">${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req${
           periodCost > 0 ? ` · ${fmt.pct((t.costDollars / periodCost) * 100)} of period` : ''}</span></td>
-        <td class="session-models">${t.models.slice(0, 3).map((x) => esc(displayModel(x))).join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
+        <td class="session-models">${t.models.slice(0, 3)
+          .map((x) => `<span class="session-model">${esc(displayModel(x))}</span>`)
+          .join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
       </tr>`;
   }).join('');
 
@@ -2936,11 +2938,32 @@ function sessionSpendBreakdown(events) {
 }
 
 /**
- * One bar per request, in the order they were asked.
+ * How big the conversation had grown by a given request.
  *
- * Height is cost, and the shaded portion is context handling. Seeing the
- * shaded band swell while the solid part stays flat is the whole argument for
- * splitting a long session, and it makes it without a sentence of explanation.
+ * Cursor's usage API reports no context-window figure, so this is measured
+ * rather than read: everything that went *up* with the request — the new
+ * prompt, the context re-read from cache, and the context written to it. The
+ * answer is deliberately excluded; output is what came back, and folding it in
+ * would make a long reply look like a big conversation.
+ */
+function contextTokens(event) {
+  return (event.inputTokens || 0) + (event.cacheReadTokens || 0) + (event.cacheWriteTokens || 0);
+}
+
+/**
+ * Two plots, one x-axis: cost per request, and the context behind it.
+ *
+ * Deliberately not one chart with two scales. Dollars and tokens have no
+ * common unit, and a second y-axis is the one chart form that reliably invents
+ * a relationship the data doesn't have — you can slide either axis until the
+ * series appear to lead or lag each other. Stacked as small multiples instead:
+ * same bar order, same widths, same gaps, so request #12 is the twelfth column
+ * of both and the eye does the correlating without being told a story.
+ *
+ * The context plot is what makes a compaction legible. A summary shows up as a
+ * tall striped column — the whole thread going up uncached — followed by a
+ * step down that lasts until the conversation grows back. That shape is the
+ * entire argument for starting a fresh chat, and no sentence makes it as well.
  */
 function renderSessionTimeline(events) {
   const priced = events.filter((e) => e.cost != null && e.cost > 0);
@@ -2987,7 +3010,43 @@ function renderSessionTimeline(events) {
       ? 'The striped bar is where Cursor summarised the conversation'
       : `The ${fmt.num(compactions)} striped bars are where Cursor summarised the conversation`} — not a request you made.</p>`
     : '';
-  return `<div class="tl-plot">${bars}</div>${foot}${legend}`;
+  // Second plot, same x. Sized on its own maximum because it is its own chart
+  // with its own unit — the shared thing is the request order, never the scale.
+  const maxCtx = maxOf(priced, contextTokens);
+  const ctxBars = priced.map((event, index) => {
+    const tokens = contextTokens(event);
+    const height = maxCtx > 0 ? Math.max(2, (tokens / maxCtx) * 100) : 2;
+    const isCompaction = classifyRequest(event, state.analyzeThresholds) === 'compaction';
+    const lines = [
+      `#${index + 1} · ${fmt.date(event.timestampMs)}`,
+      `${fmt.num(tokens)} tokens of context sent`,
+      `in ${fmt.num(event.inputTokens)} · cache read ${fmt.num(event.cacheReadTokens)}`
+        + ` · cache write ${fmt.num(event.cacheWriteTokens)}`,
+      ...(isCompaction ? ['Cursor summarised the conversation here'] : []),
+    ];
+    // Same data-request as the cost bar above, so hovering, focusing and
+    // clicking a column behave identically in either plot.
+    return `<button type="button" class="tl-ctx-bar${isCompaction ? ' tl-compaction' : ''}"
+        data-request="${esc(event.id)}" style="--bar-h:${height}%"
+        data-tl-tip="${esc(lines.join('\n'))}"
+        aria-label="${esc(lines.join('. '))}"></button>`;
+  }).join('');
+
+  const peakCtx = priced[priced.findIndex((e) => contextTokens(e) === maxCtx)];
+  const ctxPlot = `
+    <div class="tl-sub">
+      <div class="tl-sub-head">
+        <h5>Context sent</h5>
+        <span class="tl-sub-note">peak ${fmt.num(maxCtx)} tokens${peakCtx
+          ? ` at #${priced.indexOf(peakCtx) + 1}` : ''}</span>
+      </div>
+      <div class="tl-plot tl-ctx-plot">${ctxBars}</div>
+      <p class="tl-legend">Everything that went up with each request — your prompt plus the
+        conversation re-read from cache. Cursor doesn't publish a context size, so this is
+        measured from the token counts, and the answer that came back is not counted.</p>
+    </div>`;
+
+  return `<div class="tl-plot">${bars}</div>${foot}${legend}${ctxPlot}`;
 }
 
 /**

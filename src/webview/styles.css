@@ -79,11 +79,13 @@ body.vscode-high-contrast-light {
     --amber: #e0a044;
     --red: #f2716b;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-    /* --bucket-* are computed on :root, so they would keep the light accent
-       even here; the charts and the handful of rules that reach for a
-       --vscode-* variable directly need the same treatment. */
-    --bucket-output: #4daafc;
-    --bucket-input: #7a8699;
+    /* --bucket-* are set on :root, so without this the standalone page would
+       keep the light steps; they are the same dark steps the editor's dark
+       themes get above. */
+    --bucket-cache-read: #c98500;
+    --bucket-cache-write: #008300;
+    --bucket-output: #3987e5;
+    --bucket-input: #d55181;
     --vscode-editorWidget-background: #232323;
     --vscode-editorWidget-foreground: #e6e6e6;
     --vscode-editorWidget-border: rgba(255, 255, 255, 0.14);
@@ -1032,7 +1034,43 @@ tfoot td {
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 12px;
 }
-.sessions-table .session-models { color: var(--muted); font-size: 11px; }
+/* Header and cell centred together, per column, so a label sits over its own
+   data rather than over the right edge every column happened to share. The
+   money column keeps its digits right-aligned inside a centred block: the
+   figures still line up decimal-for-decimal for scanning down the column, and
+   the block sits under its header. */
+.sessions-table thead th { text-align: center; }
+.sessions-table thead th:first-child,
+.sessions-table thead th:nth-child(2) { text-align: left; }
+.sessions-table .session-started,
+.sessions-table .session-duration,
+.sessions-table .session-requests,
+.sessions-table .session-cost { text-align: center; }
+.sessions-table .session-cost .compare-sub { text-align: center; }
+/* A date and a duration are single values — breaking "Aug 17, 06:14 PM" across
+   two lines is never the wrap that saves the layout. */
+.sessions-table .session-started,
+.sessions-table .session-duration { white-space: nowrap; }
+/* The column that used to force the table sideways. Three model names at ~22
+   characters each ran to a single 45-character line, and with `table-layout:
+   auto` that width propagated into the table's own minimum — so the whole
+   table scrolled horizontally to serve one column. Capped and wrapped, it
+   costs a second line on the busiest rows and nothing on the rest. */
+.sessions-table .session-models {
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 200px;
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.35;
+}
+/* Each name is one unbreakable unit, so the line breaks at the commas between
+   them and never inside one. Neither `anywhere` nor `break-word` achieves this:
+   a hyphen is a legitimate break opportunity in its own right, so "cursor-grok
+   -4.6-high" was being split at its own hyphens however the overflow rules were
+   set. Only nowrap on the name itself takes those opportunities away. */
+.session-model { white-space: nowrap; }
 
 .analytics-chart-main { margin-bottom: 10px; }
 .analytics-chart-row {
@@ -1605,12 +1643,45 @@ thead .tip:focus::after {
 
 /* The four token buckets keep one set of colours everywhere they appear — the
    row breakdown, the session breakdown and the timeline — so the band the user
-   learns to recognise as "context" reads the same in all three. */
+   learns to recognise as "context" reads the same in all three.
+
+   Four hues, not two oranges and a grey. Cache read and cache write used to be
+   #d97706 and #f59e0b: adjacent segments of the same bar, 10.8 ΔE apart for
+   *normal* vision against a floor of 15, which is why nobody could tell which
+   band was which. Input was a grey below the chroma floor, so it read as
+   "no data" rather than as a bucket.
+
+   This set was chosen by running every four-hue candidate through a CVD and
+   contrast validator rather than by eye, and it is held to the strictest
+   pairlist — *all* pairs, not just the ones that touch in the bar. That is the
+   gate the legend needs: the legend stacks all four vertically, so the reader
+   compares every pair whether or not they are neighbours in the chart. Worst
+   pair 19.6 normal / 13.0 CVD on light, 19.3 / 6.9 on dark.
+
+   Two caveats the layout already answers. The dark green↔yellow pair sits in
+   the 6–8 CVD band, which is legal only with a secondary encoding, and yellow
+   and magenta fall under 3:1 on the light surface, which triggers the relief
+   rule. Both are covered the same way: every bucket is named and carries its
+   own dollar figure in the list beside the bar, and the segments are separated
+   by a surface gap — identity is never carried by colour alone. The green is
+   deliberately #008300 rather than the app's --green (#10b981): far enough from
+   the colour this UI uses for savings not to read as a status. */
 :root {
-  --bucket-cache-read: #d97706;
-  --bucket-cache-write: #f59e0b;
-  --bucket-output: var(--accent);
-  --bucket-input: #94a3b8;
+  --bucket-cache-read: #eda100;
+  --bucket-cache-write: #008300;
+  --bucket-output: #2a78d6;
+  --bucket-input: #e87ba4;
+}
+/* Stepped for a dark surface rather than flipped: the light hexes sit outside
+   the dark lightness band and lose contrast against it. Applied to the editor's
+   own dark themes as well as the standalone page, which previously kept the
+   light values in a dark IDE because only the standalone block overrode them. */
+body.vscode-dark,
+body.vscode-high-contrast:not(.vscode-high-contrast-light) {
+  --bucket-cache-read: #c98500;
+  --bucket-cache-write: #008300;
+  --bucket-output: #3987e5;
+  --bucket-input: #d55181;
 }
 
 .finding-impact {
@@ -1653,7 +1724,11 @@ thead .tip:focus::after {
   overflow: hidden;
   background: var(--border);
 }
-.bd-seg { display: block; height: 100%; }
+/* A 2px surface gap between segments. Two saturated fills meeting edge-to-edge
+   read as one blended band at the boundary; the gap is what makes the join a
+   join rather than a gradient, and it costs nothing at this bar height. */
+.bd-seg { display: block; height: 100%; box-shadow: 2px 0 0 0 var(--panel); }
+.bd-seg:last-child { box-shadow: none; }
 .bd-cacheRead { background: var(--bucket-cache-read); }
 .bd-cacheWrite { background: var(--bucket-cache-write); }
 .bd-output { background: var(--bucket-output); }
@@ -1821,6 +1896,47 @@ tr.row-open > td { border-bottom-color: transparent; }
     color-mix(in srgb, var(--bg) 55%, transparent) 3px 6px
   );
 }
+/* The context plot: its own chart, stacked under the cost one and sharing only
+   the x-axis. Every rule that decides column geometry — flex basis, gap,
+   padding — is inherited from .tl-plot, so the two rows stay aligned column for
+   column by construction rather than by two sets of numbers kept in step. */
+.tl-sub { margin-top: 14px; }
+.tl-sub-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.tl-sub-head h5 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.tl-sub-note { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Shorter than the cost plot on purpose: it is the supporting chart, and an
+   equal-height pair reads as two competing headlines. */
+.tl-ctx-plot { height: 74px; }
+/* One series, so one hue — the same orange the bar above uses for context
+   handling, which is what makes the two plots read as one story. */
+.tl-ctx-bar {
+  flex: 1 0 10px;
+  min-width: 10px;
+  height: var(--bar-h, 2%);
+  padding: 0;
+  border: 0;
+  border-radius: 2px 2px 0 0;
+  /* background-color, not the `background` shorthand: the shorthand resets
+     background-image, and .tl-compaction is declared above — so a summarising
+     turn lost its stripes in this plot while keeping them in the one above,
+     which is precisely the column the two plots exist to connect. */
+  background-color: var(--bucket-cache-read);
+  cursor: pointer;
+}
+.tl-ctx-bar:hover { outline: 1px solid var(--accent); }
 .tl-legend { margin: 6px 0 0; font-size: 10px; color: var(--muted); }
 .tl-key {
   display: inline-block;

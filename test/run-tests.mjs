@@ -3440,5 +3440,115 @@ console.log('\nreview fixes');
   });
 }
 
+// ---------------------------------------------------------------------------
+// The session charts and the sessions table.
+// ---------------------------------------------------------------------------
+console.log('\nsession charts and table');
+{
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+
+  /** Hue angle in degrees, for a cheap "are these actually different colours" check. */
+  const hueOf = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    if (max === min) return null;
+    const d = max - min;
+    const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    return ((h * 60) + 360) % 360;
+  };
+  const bucketsIn = (block) => ['cache-read', 'cache-write', 'output', 'input']
+    .map((k) => block.match(new RegExp(`--bucket-${k}:\\s*(#[0-9a-f]{6})`, 'i'))?.[1]);
+
+  test('the four token buckets are four different colours, in every theme', () => {
+    // They were #d97706 and #f59e0b — two steps of the same orange, 10.8 ΔE
+    // apart for normal vision against a floor of 15. The bands were adjacent
+    // segments of one bar, so nobody could tell which was which.
+    // Every rule that sets a bucket colour, wherever it lives: the light :root,
+    // the editor's dark themes, and the standalone page's OS-dark block. Each
+    // has to define the whole set — a scope that redefines two of the four
+    // leaves the other two on the palette of the opposite theme, which is how
+    // a dark IDE ended up drawing light-surface hexes.
+    const blocks = css.match(/\{[^{}]*--bucket-cache-read:[^{}]*\}/g) || [];
+    assert.equal(blocks.length, 3, 'expected a light, an editor-dark and a standalone-dark palette');
+    for (const block of blocks) {
+      const name = bucketsIn(block).join('/');
+      const hexes = bucketsIn(block);
+      assert.ok(hexes.every(Boolean), `${name} does not define all four buckets`);
+      assert.equal(new Set(hexes).size, 4, `${name} reuses a colour across buckets`);
+      for (let i = 0; i < hexes.length; i += 1) {
+        for (let j = i + 1; j < hexes.length; j += 1) {
+          const [a, b] = [hueOf(hexes[i]), hueOf(hexes[j])];
+          const apart = Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+          assert.ok(apart >= 45,
+            `${name}: ${hexes[i]} and ${hexes[j]} are ${apart.toFixed(0)}° apart — same hue family`);
+        }
+      }
+    }
+  });
+
+  test('stacked segments are separated by a surface gap, not just by hue', () => {
+    assert.match(css, /\.bd-seg \{[^}]*box-shadow: 2px 0 0 0 var\(--panel\)/);
+    assert.match(css, /\.bd-seg:last-child \{ box-shadow: none; \}/);
+  });
+
+  test('context is measured from what went up, never from what came back', () => {
+    const fn = main.slice(main.indexOf('function contextTokens'), main.indexOf('function renderSessionTimeline'));
+    for (const field of ['inputTokens', 'cacheReadTokens', 'cacheWriteTokens']) {
+      assert.ok(fn.includes(field), `context has to include ${field}`);
+    }
+    assert.ok(!fn.includes('outputTokens'),
+      'output is the answer, not the context — folding it in makes a long reply look like a big thread');
+  });
+
+  test('the context plot is a second chart, never a second axis on the first', () => {
+    const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
+    assert.ok(fn.includes('maxOf(priced, contextTokens)'),
+      'the context plot is scaled by its own maximum — dollars and tokens share no unit');
+    assert.ok(fn.includes('tl-ctx-plot') && fn.includes('tl-ctx-bar'));
+    // Same x for both rows: the geometry comes from .tl-plot, which .tl-ctx-plot
+    // extends rather than redeclares, so the columns cannot drift apart.
+    assert.match(fn, /class="tl-plot tl-ctx-plot"/);
+    const ctx = css.match(/\.tl-ctx-bar \{[^}]*\}/)[0];
+    const bar = css.match(/\.tl-bar \{[^}]*\}/)[0];
+    for (const rule of ['flex: 1 0 10px', 'min-width: 10px']) {
+      assert.ok(bar.includes(rule) && ctx.includes(rule), `both bar rules need "${rule}" to stay aligned`);
+    }
+  });
+
+  test('a summarising turn is striped in both plots', () => {
+    // .tl-compaction is declared above .tl-ctx-bar, so the `background`
+    // shorthand there would reset its background-image and drop the stripes
+    // from the one column the two plots exist to connect.
+    const ctx = css.match(/\.tl-ctx-bar \{[^}]*\}/)[0];
+    assert.match(ctx, /background-color: var\(--bucket-cache-read\)/);
+    assert.ok(!/\n\s*background: /.test(ctx), 'the background shorthand would clobber the stripe');
+    const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
+    assert.ok((fn.match(/tl-compaction/g) || []).length >= 2, 'both plots mark the compaction');
+  });
+
+  test('the sessions table fits its width instead of scrolling sideways', () => {
+    // One 45-character models cell used to set the table's minimum width, so
+    // the whole table scrolled horizontally to serve a single column.
+    const cell = css.match(/\.sessions-table \.session-models \{[^}]*\}/)[0];
+    assert.match(cell, /max-width: \d+px/);
+    assert.match(cell, /white-space: normal/);
+    // A hyphen is its own break opportunity, so no overflow-wrap value keeps
+    // "cursor-grok-4.6-high" together — only nowrap on the name does.
+    assert.match(css, /\.session-model \{ white-space: nowrap; \}/);
+    assert.match(main, /<span class="session-model">/);
+  });
+
+  test('each sessions column header sits over its own data', () => {
+    assert.match(css, /\.sessions-table thead th \{ text-align: center; \}/);
+    // The name column is text and stays left, with its header over the names.
+    assert.match(css, /\.sessions-table thead th:first-child,\s*\n\.sessions-table thead th:nth-child\(2\) \{ text-align: left; \}/);
+    for (const cls of ['session-started', 'session-duration', 'session-requests', 'session-cost']) {
+      assert.ok(main.includes(`class="${cls}"`), `the ${cls} column needs a class to be aligned by`);
+    }
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

@@ -148,6 +148,29 @@ All notable user-facing changes. Earlier releases predate this file; see the
   long enough — so it only ever broke for the heaviest users.
 - **Fixed: an error on the local browser server after it started listening could
   take the extension host down with it.** It's logged now.
+- **The four token buckets are now four genuinely different colours.** Cache read
+  and cache write were two steps of the same orange — as adjacent bands of one
+  bar, close enough that neither the chart nor its legend could be read — and
+  input was a grey so desaturated it looked like missing data. The replacement
+  set was picked by running candidates through a colour-blindness and contrast
+  validator rather than by eye, and it's held to the strictest gate: every pair
+  distinguishable, not just the ones that touch in the bar, since the legend
+  stacks all four. Segments are separated by a hairline gap as well, so two
+  fills meeting never blend into one band. Dark themes get their own steps —
+  until now a dark IDE was drawing the light palette.
+- **The session view has a second chart: the context behind each request.** One
+  bar per request under the cost plot, same columns in the same order, showing
+  everything that went *up* — your prompt plus the conversation re-read from
+  cache. It's what makes a compaction legible: the summary shows as a tall
+  striped column, then the context steps down and stays down until the thread
+  grows back. Deliberately a second chart rather than a second line on the cost
+  one; dollars and tokens share no scale, and overlaying them would suggest a
+  relationship the numbers don't contain. Cursor publishes no context-size
+  figure, so this is measured from the token counts and says so.
+- **The sessions table no longer scrolls sideways.** A single long Models cell
+  was setting the whole table's minimum width. Model names now wrap between
+  each other while staying intact individually, and each column header sits
+  over its own data instead of over the right edge every column shared.
 
 ## 0.8.0 — 2026-08-16
 

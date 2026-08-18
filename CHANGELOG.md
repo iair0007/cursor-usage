@@ -83,6 +83,16 @@ All notable user-facing changes. Earlier releases predate this file; see the
   built-in one rather than a published one.
 - Briefs carry token counts, timings, costs and the conversation's name. Nothing
   you wrote is in them, because none of it is ever read.
+- Fixed a red CI run. Two test blocks imported `src/webview/insights.js`
+  directly; it reaches `src/shared/usageLogic.ts` through `logic.js`, and only
+  Node 22 strips those types on the way in — CI runs Node 20, which throws
+  `ERR_UNKNOWN_FILE_EXTENSION`. They go through the suite's bundling helper now,
+  like every other module, and a test fails the suite if a raw import comes
+  back.
+- The test runner waits for async tests before printing the summary. One
+  `test(...)` call with an async body was not awaited, so it settled after the
+  exit code had been decided — a failure inside it would have left CI green.
+  Async tests are tracked and awaited whether or not the call site remembers.
 - The session sub-plot is labelled for what it measures. It was captioned as the
   size of the conversation, which the data cannot support: an agent request
   re-sends the whole prefix on every internal turn, so the figure is context

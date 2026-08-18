@@ -69,11 +69,16 @@ const {
 
 let passed = 0;
 let failed = 0;
+// Every async test's promise, so the summary cannot be printed — and the exit
+// code decided — while one is still running. An async test whose `test(...)`
+// call was not awaited used to settle after `process.exit(1)` had already been
+// skipped, so a failure inside it left CI green.
+const running = [];
 function test(name, fn) {
   try {
     const maybe = fn();
     if (maybe && typeof maybe.then === 'function') {
-      return maybe.then(
+      const settled = maybe.then(
         () => {
           passed++;
           console.log(`  ✓ ${name}`);
@@ -83,6 +88,8 @@ function test(name, fn) {
           console.error(`  ✗ ${name}\n    ${e.message}`);
         },
       );
+      running.push(settled);
+      return settled;
     }
     passed++;
     console.log(`  ✓ ${name}`);
@@ -3148,7 +3155,7 @@ console.log('Auto keeps a rate even when the pricing page moves it');
     }
   });
 
-  test('the built-in rate carries through to a cost breakdown', async () => {
+  await test('the built-in rate carries through to a cost breakdown', async () => {
     const ins = await loadTs('src/webview/insights.js', 'insights3.mjs');
     const pricing = parsePricing(`## Pricing\n${MODELS_TABLE}`);
     const b = ins.costBreakdown(
@@ -3588,7 +3595,7 @@ console.log('\nsession charts and table');
 // ---------------------------------------------------------------------------
 console.log('\nthe context/answer claim');
 {
-  const ins = await import('../src/webview/insights.js');
+  const ins = await loadTs('src/webview/insights.js', 'insights4.mjs');
   const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
   const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
   const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
@@ -3653,7 +3660,7 @@ console.log('\nthe context/answer claim');
 
 console.log('\none card per lesson');
 {
-  const { dedupeFindings, FINDING_CARD_LIMIT } = await import('../src/webview/insights.js');
+  const { dedupeFindings, FINDING_CARD_LIMIT } = await loadTs('src/webview/insights.js', 'insights5.mjs');
   const blowup = (id, impact) => ({
     id: `context-blowup:${id}`, rule: 'context-blowup', severity: 'high', impact,
     anchor: { requestId: id }, title: `Context grew — ${impact}`, body: 'b', action: 'a',
@@ -3724,5 +3731,26 @@ console.log('\none card per lesson');
   });
 }
 
+console.log('\nthe suite itself');
+{
+  const suite = readFileSync(path.join(here, 'run-tests.mjs'), 'utf8');
+
+  test('webview modules are loaded through the bundler, never imported raw', () => {
+    // src/webview/*.js imports src/shared/usageLogic.ts. Node 22 strips the
+    // types and loads it; CI's Node 20 throws ERR_UNKNOWN_FILE_EXTENSION. So a
+    // bare import() of one of these passes locally and fails only on CI —
+    // loadTs bundles it and works on both.
+    const raw = suite.match(/import\(\s*'\.\.\/src\/[^']+'/g) || [];
+    assert.deepEqual(raw, [], 'use loadTs(...) instead of importing src/ directly');
+  });
+
+  test('an async test that is not awaited still decides the exit code', () => {
+    assert.match(suite, /const running = \[\];/);
+    assert.match(suite, /running\.push\(settled\);/);
+    assert.match(suite, /await Promise\.all\(running\);/);
+  });
+}
+
+await Promise.all(running);
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

@@ -83,6 +83,14 @@ All notable user-facing changes. Earlier releases predate this file; see the
   built-in one rather than a published one.
 - Briefs carry token counts, timings, costs and the conversation's name. Nothing
   you wrote is in them, because none of it is ever read.
+- Findings are one card per kind, and a surface shows three of them. A rule that
+  fired on a dozen requests used to render a dozen cards carrying the same
+  explanation and the same closing tip, which buried the findings that were
+  actually different somewhere below the fold. The costliest instance is the one
+  on show — it is the one worth opening — and it carries a count of the others
+  and their combined dollars, so nothing is hidden and no total shrinks. The rest
+  are behind one "show more" button, and the brief handed to Cursor Chat says
+  each finding once for the same reason.
 - Discount detection no longer skips an Auto-routed request that names the model
   it was routed to. Balance and Intelligence bill at the routed model's own rate
   — which is exactly why Cursor spells it out as "Cursor Grok 4.5 (Auto

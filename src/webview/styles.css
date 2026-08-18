@@ -1151,7 +1151,21 @@ tfoot td {
   gap: 10px;
 }
 .finding-card p { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+/* The instances folded into this card. Set apart from the explanation above it
+   — it is a tally of other requests, not more detail about this one. */
+.finding-card .finding-related {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
 .finding-action { color: var(--accent); font-size: 12px; }
+/* Spans the whole grid rather than sitting in a cell, so it reads as the foot
+   of the list instead of a fourth card. */
+.findings-more {
+  grid-column: 1 / -1;
+  justify-self: start;
+  font-size: 12px;
+}
 .severity-high { border-left-color: var(--red); }
 .severity-medium { border-left-color: var(--amber); }
 .severity-positive { border-left-color: var(--green-strong); }

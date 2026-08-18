@@ -648,6 +648,59 @@ export function buildInsights({ events, ratesFor, thresholds = {} }) {
   });
 }
 
+/**
+ * How many finding cards a surface shows before the rest are folded away.
+ *
+ * A card is only worth its space if it tells the reader something the card
+ * above it did not, and three is about as many distinct lessons as anyone acts
+ * on in one sitting. What used to happen instead: the same rule firing on
+ * fourteen requests rendered fourteen cards with the same explanation and the
+ * same closing tip, and the genuinely different findings were somewhere below
+ * the fold, indistinguishable from the repetition.
+ */
+export const FINDING_CARD_LIMIT = 3;
+
+/**
+ * One card per kind of finding, worst first.
+ *
+ * A rule that fired repeatedly is a single card — the costliest instance, which
+ * is the one worth opening — carrying a count of the others and their combined
+ * dollars, so nothing is hidden and no total shrinks. Rules are the grouping
+ * key precisely because the body and the advice are written per rule: two cards
+ * from the same rule differ only in their numbers, which is exactly the
+ * repetition that makes a wall of cards unreadable.
+ *
+ * Period-level findings carry no `rule`, and each of them fires at most once,
+ * so their title is a stable key.
+ */
+export function dedupeFindings(findings) {
+  const groups = new Map();
+  for (const f of findings || []) {
+    const key = f.rule || f.title;
+    const group = groups.get(key);
+    if (!group) {
+      groups.set(key, { lead: f, count: 0, dollars: 0 });
+      continue;
+    }
+    // Keep the dearest instance as the one on show, and bank whichever of the
+    // two it displaces — so the folded dollars are every instance but the lead,
+    // however the list happened to be ordered coming in.
+    let displaced = f;
+    if ((f.impact ?? 0) > (group.lead.impact ?? 0)) {
+      displaced = group.lead;
+      group.lead = f;
+    }
+    group.dollars += displaced.impact ?? 0;
+    group.count += 1;
+  }
+  return [...groups.values()]
+    .map(({ lead, count, dollars }) => (count ? { ...lead, related: { count, dollars } } : lead))
+    .sort((a, b) => {
+      if ((a.severity === 'positive') !== (b.severity === 'positive')) return a.severity === 'positive' ? 1 : -1;
+      return (b.impact ?? 0) - (a.impact ?? 0);
+    });
+}
+
 /** The findings that belong to one request, for the row detail. */
 export function findingsForRequest(findings, requestId) {
   return findings.filter((f) => f.anchor.requestId === requestId);

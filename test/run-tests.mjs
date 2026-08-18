@@ -3641,5 +3641,78 @@ console.log('\nthe context/answer claim');
   });
 }
 
+console.log('\none card per lesson');
+{
+  const { dedupeFindings, FINDING_CARD_LIMIT } = await import('../src/webview/insights.js');
+  const blowup = (id, impact) => ({
+    id: `context-blowup:${id}`, rule: 'context-blowup', severity: 'high', impact,
+    anchor: { requestId: id }, title: `Context grew — ${impact}`, body: 'b', action: 'a',
+  });
+
+  test('a rule that fired repeatedly is one card, not one per request', () => {
+    const cards = dedupeFindings([blowup('r1', 6.81), blowup('r2', 4.36), blowup('r3', 3.47)]);
+    assert.equal(cards.length, 1);
+    assert.equal(cards[0].anchor.requestId, 'r1', 'the dearest instance is the one worth opening');
+  });
+
+  test('folding the repeats keeps their dollars on the card', () => {
+    const [card] = dedupeFindings([blowup('r1', 6.81), blowup('r2', 4.36), blowup('r3', 3.47)]);
+    assert.equal(card.related.count, 2);
+    assert.ok(Math.abs(card.related.dollars - 7.83) < 1e-9, 'every instance but the lead');
+  });
+
+  test('the lead is the dearest however the list arrived', () => {
+    const [card] = dedupeFindings([blowup('r3', 3.47), blowup('r1', 6.81), blowup('r2', 4.36)]);
+    assert.equal(card.anchor.requestId, 'r1');
+    assert.ok(Math.abs(card.related.dollars - 7.83) < 1e-9);
+  });
+
+  test('a rule that fired once carries no tally at all', () => {
+    const [card] = dedupeFindings([blowup('r1', 6.81)]);
+    assert.equal(card.related, undefined);
+  });
+
+  test('different rules stay separate — that is the whole point', () => {
+    const cards = dedupeFindings([
+      blowup('r1', 6.81), blowup('r2', 4.36),
+      { rule: 'model-switch', severity: 'high', impact: 7.8, anchor: { requestId: 'r9' }, title: 't', body: 'b', action: 'a' },
+    ]);
+    assert.deepEqual(cards.map((f) => f.rule), ['model-switch', 'context-blowup']);
+  });
+
+  test('period findings have no rule, so their title keys them', () => {
+    const cards = dedupeFindings([
+      { severity: 'medium', title: 'Low cache hit rate', body: 'b', action: 'a' },
+      { severity: 'medium', title: 'Heavy output requests', body: 'b', action: 'a' },
+    ]);
+    assert.equal(cards.length, 2);
+  });
+
+  test('positives never outrank real money', () => {
+    const cards = dedupeFindings([
+      { rule: 'cache-ok', severity: 'positive', impact: 0, title: 'p', body: 'b', action: 'a' },
+      blowup('r1', 1.2),
+    ]);
+    assert.equal(cards[0].rule, 'context-blowup');
+  });
+
+  test('three cards is the cap, and the rest are reachable rather than dropped', () => {
+    assert.equal(FINDING_CARD_LIMIT, 3);
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.slice(main.indexOf('function renderFindingGrid'), main.indexOf('/** Moves the user to a request'));
+    assert.match(fn, /slice\(0, FINDING_CARD_LIMIT\)/, 'the grid is capped');
+    assert.match(fn, /dedupeFindings\(findings\)/, 'and deduped before it is capped');
+    assert.match(fn, /findings-more/, 'with the remainder behind a button');
+    // Held in state, not in the DOM: every filter change re-renders the grid.
+    assert.match(main, /expandedFindings: new Set\(\)/);
+  });
+
+  test('the brief says each finding once too', () => {
+    const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
+    const fn = brief.slice(brief.indexOf('function findingsBlock'), brief.indexOf('function ratesBlock'));
+    assert.match(fn, /dedupeFindings\(findings\)/);
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

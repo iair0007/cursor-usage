@@ -55,6 +55,8 @@ import {
 } from './logic.js';
 import {
   buildInsights,
+  dedupeFindings,
+  FINDING_CARD_LIMIT,
   costBreakdown,
   classifyRequest,
   findingsForRequest,
@@ -281,6 +283,12 @@ const state = {
   insights: [],
   /** Request ids whose detail row is open in the log. */
   expandedRequests: new Set(),
+  /**
+   * Finding grids the user has expanded past the first few cards, keyed by
+   * surface ("analyze", "session:<id>"). Held here rather than in the DOM so
+   * the choice survives the re-render every filter change causes.
+   */
+  expandedFindings: new Set(),
   /** True once a load has settled, so views can tell "no data" from "not fetched yet". */
   loaded: false,
   pricing: null,
@@ -2859,13 +2867,40 @@ function renderFindingCards(findings, opts = {}) {
     if (opts.linkSession !== false && f.anchor?.sessionId && f.anchor.sessionId !== UNATTRIBUTED_SESSION) {
       links.push(`<button type="button" class="btn-link finding-session" data-session="${esc(f.anchor.sessionId)}">Open the session →</button>`);
     }
+    // What dedupeFindings folded into this card. Without it, collapsing the
+    // repeats would quietly drop their dollars from the only place the reader
+    // could see them — the point is to say the same thing once, not to report
+    // less money.
+    const scope = opts.relatedScope || 'this range';
+    const related = f.related?.count
+      ? `<p class="finding-related">${fmt.num(f.related.count)} other request${f.related.count === 1 ? '' : 's'} in `
+        + `${esc(scope)} hit this${f.related.dollars > 0 ? `, adding ${fmt.money(f.related.dollars)}` : ''}.</p>`
+      : '';
     return `<article class="finding-card severity-${f.severity}">
       <h4>${esc(f.title)}${impact}</h4>
       <p>${esc(f.body)}</p>
+      ${related}
       <span class="finding-action">→ ${esc(f.action)}</span>
       ${links.length ? `<div class="finding-links">${links.join('')}</div>` : ''}
     </article>`;
   }).join('');
+}
+
+/**
+ * A capped grid of findings, with the remainder behind one button.
+ *
+ * `expanded` is held per surface in state rather than in the DOM, so the
+ * choice survives the re-render that every filter change triggers.
+ */
+function renderFindingGrid(findings, { expanded, toggle, ...opts }) {
+  const ranked = dedupeFindings(findings);
+  const shown = expanded ? ranked : ranked.slice(0, FINDING_CARD_LIMIT);
+  const hidden = ranked.length - shown.length;
+  const more = ranked.length > FINDING_CARD_LIMIT
+    ? `<button type="button" class="btn-text findings-more" data-findings-toggle="${esc(toggle)}">${
+      expanded ? 'Show fewer' : `Show ${fmt.num(hidden)} more finding${hidden === 1 ? '' : 's'}`}</button>`
+    : '';
+  return renderFindingCards(shown, opts) + more;
 }
 
 /** Moves the user to a request in the log and opens its detail. */
@@ -3122,7 +3157,12 @@ function openSessionDetail(sessionId) {
   const findings = findingsForSession(state.insights, sessionId);
   $('sessionDetailFindings').innerHTML = findings.length
     ? `<section class="session-findings"><h4>What stands out</h4>
-        <div class="findings-grid">${renderFindingCards(findings, { linkSession: false })}</div></section>`
+        <div class="findings-grid">${renderFindingGrid(findings, {
+    expanded: state.expandedFindings.has(`session:${sessionId}`),
+    toggle: `session:${sessionId}`,
+    linkSession: false,
+    relatedScope: 'this session',
+  })}</div></section>`
     : '';
 
   $('sessionDetailTimeline').innerHTML = renderSessionTimeline(events);
@@ -4324,7 +4364,10 @@ function renderAnalyzeHero(data, events) {
 }
 
 function renderAnalyzeFindings(findings) {
-  $('analyzeFindings').innerHTML = renderFindingCards(findings);
+  $('analyzeFindings').innerHTML = renderFindingGrid(findings, {
+    expanded: state.expandedFindings.has('analyze'),
+    toggle: 'analyze',
+  });
 }
 
 function renderAnalyzeModelPanel(modelRows, totalCost) {
@@ -5758,6 +5801,15 @@ async function init() {
 
   // Findings carry their own links, and they appear in several containers.
   document.addEventListener('click', (ev) => {
+    const toggle = ev.target.closest('[data-findings-toggle]');
+    if (toggle) {
+      const key = toggle.dataset.findingsToggle;
+      if (state.expandedFindings.has(key)) state.expandedFindings.delete(key);
+      else state.expandedFindings.add(key);
+      if (key.startsWith('session:')) openSessionDetail(key.slice('session:'.length));
+      else renderAnalyze();
+      return;
+    }
     const toRequest = ev.target.closest('.finding-jump, .tl-bar');
     if (toRequest) {
       jumpToRequest(toRequest.dataset.request);

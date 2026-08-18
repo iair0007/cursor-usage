@@ -27,7 +27,7 @@
 // handling and the tests need no pricing table to run.
 
 import { sessionMetrics, sessionTotals } from './logic.js';
-import { spendSplit } from './insights.js';
+import { spendSplit, dedupeFindings } from './insights.js';
 
 /**
  * What the receiving model has to be told before it can help.
@@ -328,12 +328,17 @@ export function briefEvents(events, findings, { classify, breakdownOf, formatTim
  * it would anchor the answer to the thing we are trying to improve on.
  */
 function findingsBlock(findings, cap = FINDING_CAP) {
-  const list = findings || [];
+  // One line per kind of finding. A rule that fired on eleven requests used to
+  // spend the whole cap restating itself in eleven numbered lines, which both
+  // crowded out the other findings and told the reader the same thing eleven
+  // times — the least useful way to spend a prompt's budget.
+  const list = dedupeFindings(findings);
   const positives = list.filter((f) => f.severity === 'positive').slice(0, 1);
   const rest = list.filter((f) => f.severity !== 'positive');
   return [...rest, ...positives]
     .slice(0, cap)
-    .map((f, i) => `${i + 1}. [${f.severity}] ${f.title}. ${f.body}`)
+    .map((f, i) => `${i + 1}. [${f.severity}] ${f.title}. ${f.body}`
+      + (f.related?.count ? ` (${f.related.count} other request(s) hit this)` : ''))
     .join('\n');
 }
 

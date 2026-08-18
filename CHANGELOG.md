@@ -3,7 +3,7 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
-## 0.10.0 — 2026-08-17
+## 0.8.0 — 2026-08-17
 
 - **You can now ask Cursor Chat about one session, or one request.** The
   per-session breakdown has an **Ask Cursor Chat** button that builds a brief
@@ -120,7 +120,7 @@ All notable user-facing changes. Earlier releases predate this file; see the
   unmeasurable: a promotion could be running on the model and no estimate would
   ever reflect it.
 
-## 0.9.0 — 2026-08-16
+## 0.7.4 — 2026-08-16
 
 - **Findings now point at the request they're about, and follow you around.**
   Each one carries what the pattern cost and a link through to the request or
@@ -227,7 +227,7 @@ All notable user-facing changes. Earlier releases predate this file; see the
   each other while staying intact individually, and each column header sits
   over its own data instead of over the right edge every column shared.
 
-## 0.8.0 — 2026-08-16
+## 0.7.3 — 2026-08-16
 
 - **Added "Open in Browser."** A new "Open in browser ↗" link in the dashboard
   header (and a matching `Cursor Usage: Open in Browser` command) opens the

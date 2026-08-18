@@ -3364,5 +3364,81 @@ console.log('\nbrowser page (Open in Browser)');
   });
 }
 
+// ---------------------------------------------------------------------------
+// Review pass: things that were correct in isolation and wrong in place.
+// ---------------------------------------------------------------------------
+console.log('\nreview fixes');
+{
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+
+  test('a finding keeps its own heading inside the row detail and the session dialog', () => {
+    // Both containers label their sections with an uppercase 11px caption, and
+    // a bare `h4` descendant selector reaches the finding card's title too —
+    // which is a full sentence, and was being rendered in muted small caps.
+    for (const scope of ['.detail-grid', '.session-detail-body']) {
+      assert.match(css, new RegExp(`${scope.replace('.', '\\.')} h4 \\{[^}]*text-transform: uppercase`),
+        `${scope} still captions its own sections`);
+    }
+    const rule = css.match(/\.detail-grid \.finding-card h4,\s*\n\.session-detail-body \.finding-card h4 \{[^}]*\}/)?.[0];
+    assert.ok(rule, 'the finding card must win its heading back in both containers');
+    assert.match(rule, /text-transform: none/);
+    assert.match(rule, /font-size: 12px/);
+  });
+
+  test('a row with nothing flagged does not reserve half the cell for it', () => {
+    assert.match(main, /class="detail-grid\$\{flags\.length \? '' : ' no-findings'\}"/,
+      'the grid has to know whether it has a second column to lay out');
+    assert.ok(!/<div>\$\{flags\.length/.test(main),
+      'an always-emitted empty <div> is still a grid item');
+    assert.match(css, /\.detail-grid\.no-findings \{[^}]*grid-template-columns: minmax\(/);
+  });
+
+  test('the brief is priced against the session it is about, not its first request', () => {
+    const fn = main.slice(main.indexOf('function renderAskSize'), main.indexOf('function renderAskDialog'));
+    assert.ok(fn.includes('dominantEvent(events)'),
+      'a session that opened on one model and ran on another quoted a rate card nobody recognised');
+    assert.ok(!/ratesForEvent\(events\[0\]/.test(fn));
+  });
+
+  test('nothing sizes a request list by spreading it into Math.max', () => {
+    // Math.max(...array) throws RangeError once the array is long enough to
+    // blow the argument limit, which only ever happens to the heaviest users.
+    // The remaining spreads in main.js are over days in a range or over the
+    // at-most-four sessions being compared, both of which are bounded.
+    const insights = readFileSync(path.join(here, '..', 'src/webview/insights.js'), 'utf8');
+    const timeline = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
+    assert.ok(!/Math\.(max|min)\(\.\.\./.test(timeline), 'one bar per request — the list is as long as the session');
+    assert.ok(timeline.includes('maxOf(priced'), 'and the reducing helper is what replaced it');
+    assert.ok(main.includes('function maxOf('), 'the reducing helper has to exist');
+    const overhead = insights
+      .slice(insights.indexOf('function newChatOverhead'), insights.indexOf('export function buildInsights'))
+      .replace(/^\s*\/\/.*$/gm, '');
+    assert.ok(!/Math\.(max|min)\(\.\.\./.test(overhead), 'the cold-start floor reduces over every cold start in the period');
+  });
+
+  test('a session named after its dialog opened still gets its name', () => {
+    assert.ok(main.includes('function refreshOpenSessionTitle'),
+      'names arrive asynchronously and the dialog heading is not redrawn by anything else');
+    assert.match(main, /dialog\.dataset\.session = sessionId/,
+      'the dialog has to record which conversation it is showing');
+    const loader = main.slice(main.indexOf('async function loadSessionTitles'), main.indexOf('function refreshOpenSessionTitle'));
+    assert.ok(loader.includes('refreshOpenSessionTitle()'), 'and the loader has to call it');
+  });
+
+  test('the loopback server survives an error after it started listening', () => {
+    const server = readFileSync(path.join(here, '..', 'src/browserServer.ts'), 'utf8');
+    const start = server.slice(server.indexOf('private async start()'), server.indexOf('private get baseUrl'));
+    assert.match(start, /this\.server\.on\('error'/,
+      "the once('error') used for listen() has fired; an unhandled 'error' event is thrown");
+  });
+
+  test('a filename from the webview cannot point the save dialog elsewhere', () => {
+    const rpc = readFileSync(path.join(here, '..', 'src/rpcDispatcher.ts'), 'utf8');
+    assert.match(rpc, /RpcDispatcher\.safeFilename\(filename\)/, 'joinPath resolves ".." like any path join');
+    assert.match(rpc, /static safeFilename\(name: string\): string \{/);
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

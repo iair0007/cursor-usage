@@ -1807,6 +1807,19 @@ async function loadSessionTitles(ids) {
   // arrived but the column kept showing raw ids until a sort or a page change
   // happened to force a redraw.
   if (state.filtered.length) renderTable(state.filtered, summarize(state.filtered));
+  // A session opened straight from a request row is usually opened before its
+  // name has been looked up, and the dialog's own heading is not redrawn by
+  // anything above — so it kept the raw id for as long as it stayed open.
+  refreshOpenSessionTitle();
+}
+
+/** Re-labels the session dialog if its name arrived after it was opened. */
+function refreshOpenSessionTitle() {
+  const dialog = $('sessionDetailDialog');
+  const id = dialog?.dataset.session;
+  if (!dialog?.open || !id || id === UNATTRIBUTED_SESSION) return;
+  const name = state.sessions.titles.get(id);
+  if (name) $('sessionDetailTitle').textContent = name;
 }
 
 function fmtDuration(ms) {
@@ -2871,6 +2884,38 @@ function jumpToRequest(requestId) {
   });
 }
 
+/**
+ * The request whose model the session should be priced against: the one used
+ * most often, ties broken by the earlier request so the answer is stable.
+ */
+function dominantEvent(events) {
+  if (!events.length) return null;
+  const counts = new Map();
+  for (const e of events) counts.set(e.modelRaw, (counts.get(e.modelRaw) || 0) + 1);
+  let best = events[0];
+  for (const e of events) {
+    if ((counts.get(e.modelRaw) || 0) > (counts.get(best.modelRaw) || 0)) best = e;
+  }
+  return best;
+}
+
+/**
+ * Largest of a mapped list, without `Math.max(...array)`.
+ *
+ * The spread form throws RangeError once the array is long enough to blow the
+ * argument limit, and a 90-day period on a busy account reaches that — a
+ * crash that only ever happens to the heaviest users, which is the worst
+ * possible place to put one.
+ */
+function maxOf(list, pick) {
+  let best = -Infinity;
+  for (const item of list) {
+    const v = pick(item);
+    if (v > best) best = v;
+  }
+  return best;
+}
+
 /** The loaded requests of one session, oldest first — the order they were asked in. */
 function sessionEventsInOrder(sessionId) {
   return eventsForSession(sessionId).slice().sort((a, b) => a.timestampMs - b.timestampMs);
@@ -2900,7 +2945,7 @@ function sessionSpendBreakdown(events) {
 function renderSessionTimeline(events) {
   const priced = events.filter((e) => e.cost != null && e.cost > 0);
   if (!priced.length) return '<p class="bd-empty">No priced requests in this session.</p>';
-  const max = Math.max(...priced.map((e) => e.cost));
+  const max = maxOf(priced, (e) => e.cost);
   let compactions = 0;
   const bars = priced.map((event, index) => {
     const breakdown = breakdownForEvent(event);
@@ -3014,6 +3059,9 @@ function openSessionDetail(sessionId) {
     : '';
 
   $('sessionDetailTimeline').innerHTML = renderSessionTimeline(events);
+  // Which conversation the dialog is currently showing, so a name that arrives
+  // after it opened can still be put in the heading (see refreshOpenSessionTitle).
+  dialog.dataset.session = sessionId;
   state.ask.sessionId = sessionId;
   if (!dialog.open) dialog.showModal();
 }
@@ -3104,7 +3152,11 @@ function renderAskSize(text) {
   const { chars, tokens } = estimateBriefSize(text);
   if (!chars) { el.textContent = ''; return; }
   const events = state.ask.sessionId ? sessionEventsInOrder(state.ask.sessionId) : [];
-  const rates = events.length ? ratesForEvent(events[0].modelRaw, events[0]) : null;
+  // The session's most-used model, not its first request's: a session that
+  // opened on one model and ran on another quoted a rate card the user never
+  // recognised, and the first request is the least representative row there is.
+  const dominant = dominantEvent(events);
+  const rates = dominant ? ratesForEvent(dominant.modelRaw, dominant) : null;
   const dollars = rates?.input != null ? (tokens * rates.input) / 1_000_000 : null;
   el.textContent = `≈ ${fmt.num(tokens)} tokens (${fmt.num(chars)} characters)`
     + (dollars != null ? ` — about ${moneyFine(dollars)} to send as input on ${rates.label}.` : '.');
@@ -3230,15 +3282,15 @@ function renderTable(events, summary) {
       : '';
     return `${row}<tr class="row-detail" data-detail="${esc(e.id)}"><td colspan="12">
       <div class="detail-sticky">
-        <div class="detail-grid">
+        <div class="detail-grid${flags.length ? '' : ' no-findings'}">
           <div>
             <h4>What this cost was made of</h4>
             ${renderBreakdown(breakdownForEvent(e), e)}
             ${kindNote}
           </div>
-          <div>${flags.length
-            ? `<h4>What stands out</h4><div class="findings-grid">${renderFindingCards(flags, { linkRequest: false })}</div>`
-            : ''}</div>
+          ${flags.length
+            ? `<div><h4>What stands out</h4><div class="findings-grid">${renderFindingCards(flags, { linkRequest: false })}</div></div>`
+            : ''}
         </div>
       </div>
     </td></tr>`;
@@ -5661,6 +5713,10 @@ async function init() {
   // The plot scrolls sideways on a long session, which would leave the tip
   // pointing at wherever the bar used to be.
   timeline?.addEventListener('scroll', hideTimelineTip, true);
+  // The dialog body scrolls too, and the tip is positioned in viewport
+  // coordinates — so scrolling the panel behind it leaves it pointing at empty
+  // space. Captured on the dialog, since a scroll event does not bubble.
+  $('sessionDetailDialog')?.addEventListener('scroll', hideTimelineTip, true);
   $('sessionDetailDialog')?.addEventListener('close', hideTimelineTip);
 
   // Stacks on top of the session dialog rather than replacing it, so closing the

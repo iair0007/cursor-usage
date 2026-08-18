@@ -1100,7 +1100,18 @@ tfoot td {
   background: var(--panel);
   padding: 10px 12px;
 }
-.finding-card h4 { font-size: 12px; margin-bottom: 4px; }
+/* The dollar figure is the last child of the heading, and it used to be
+   floated there. A float escapes the heading's line box, so the moment a title
+   wrapped to two lines the figure dropped down beside the *body* paragraph and
+   read as an annotation on the wrong sentence. Flex keeps it on the title. */
+.finding-card h4 {
+  font-size: 12px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
 .finding-card p { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
 .finding-action { color: var(--accent); font-size: 12px; }
 .severity-high { border-left-color: var(--red); }
@@ -1603,7 +1614,7 @@ thead .tip:focus::after {
 }
 
 .finding-impact {
-  float: right;
+  flex: none;
   font-variant-numeric: tabular-nums;
   color: var(--red);
   font-weight: 600;
@@ -1709,6 +1720,9 @@ tr.row-open > td { border-bottom-color: transparent; }
    told to, which would undo the wrapping fix above on a narrow column. */
 .detail-grid > div { min-width: 0; }
 .detail-grid h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+/* A row with nothing flagged has nothing for the second column to hold, and an
+   empty half left the breakdown squeezed into 40% of a full-width cell. */
+.detail-grid.no-findings { grid-template-columns: minmax(240px, 640px); }
 @media (max-width: 820px) { .detail-grid { grid-template-columns: 1fr; } }
 
 /* Marks the rows Cursor generated to summarise the thread, so the request that
@@ -1735,6 +1749,20 @@ tr.row-open > td { border-bottom-color: transparent; }
 .finding-card h4,
 .finding-card p,
 .finding-action { overflow-wrap: anywhere; }
+
+/* The two containers above label their own sections with an uppercase 11px
+   caption, and that rule reaches every h4 inside them — including a finding
+   card's title, which is a full sentence and not a caption. Same specificity
+   as those rules and declared after them, so the card keeps its own heading
+   wherever it is rendered. */
+.detail-grid .finding-card h4,
+.session-detail-body .finding-card h4 {
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  margin: 0 0 4px;
+}
 
 @keyframes rowFlash {
   from { background: color-mix(in srgb, var(--accent) 28%, transparent); }

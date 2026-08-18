@@ -96,6 +96,12 @@ export class BrowserServer {
       // collides with anything else running locally.
       this.server.listen(0, '127.0.0.1', resolve);
     });
+    // The listener above is a `once` that has already fired (or never will), so
+    // without this the next 'error' the server emits has no handler at all —
+    // and an unhandled 'error' on an EventEmitter is thrown, taking the
+    // extension host down with it over something as ordinary as a browser tab
+    // dropping a socket.
+    this.server.on('error', (e: Error) => this.log(`Browser dashboard server error: ${e.message}`));
     const address = this.server.address();
     this.port = typeof address === 'object' && address ? address.port : 0;
     this.log(`Browser dashboard listening on http://127.0.0.1:${this.port}`);

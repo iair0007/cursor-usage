@@ -125,6 +125,29 @@ All notable user-facing changes. Earlier releases predate this file; see the
   threads open" is good advice until the threads are what ran the bill up; on a
   period whose dearest requests are mostly re-read context, that tip now says so
   instead.
+- **Fixed: a finding's dollar figure could land beside the wrong sentence.** It
+  was floated into the finding's heading, and a float leaves the heading's line
+  box — so as soon as a title wrapped to two lines the figure dropped down next
+  to the body paragraph and read as an annotation on that instead.
+- **Fixed: finding titles rendered as small-caps captions inside the request-row
+  detail and the session breakdown.** Both panels label their own sections that
+  way, and the rule was reaching the finding cards' titles too — which are full
+  sentences, and close to unreadable in uppercase.
+- **A request row with nothing flagged now gives its whole width to the cost
+  breakdown**, instead of holding an empty column open beside it.
+- **Fixed: the brief's cost estimate quoted the wrong rate card.** It priced
+  against the session's *first* request; a session that opened on one model and
+  ran on another named a model the user barely used. It uses the session's
+  most-used model now.
+- **Fixed: a session opened straight from a request row kept showing its raw id**
+  when its name arrived from Cursor's database a moment after the panel opened.
+- **Fixed: the timeline tooltip stayed put when the panel behind it scrolled.**
+- **Fixed: the dashboard could fail on a very large period.** Both the session
+  timeline and the new-chat-overhead baseline sized themselves by spreading the
+  whole request list into `Math.max`/`Math.min`, which throws once the list is
+  long enough — so it only ever broke for the heaviest users.
+- **Fixed: an error on the local browser server after it started listening could
+  take the extension host down with it.** It's logged now.
 
 ## 0.8.0 — 2026-08-16
 

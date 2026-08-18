@@ -222,7 +222,7 @@ export class RpcDispatcher {
   private async saveCsv(csv: string, filename: string): Promise<{ ok: boolean; path?: string }> {
     const defaultUri = vscode.Uri.joinPath(
       vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir()),
-      filename,
+      RpcDispatcher.safeFilename(filename),
     );
     const uri = await vscode.window.showSaveDialog({
       defaultUri,
@@ -232,6 +232,19 @@ export class RpcDispatcher {
     await vscode.workspace.fs.writeFile(uri, Buffer.from(csv, 'utf8'));
     void vscode.window.showInformationMessage(`Exported usage CSV to ${uri.fsPath}`);
     return { ok: true, path: uri.fsPath };
+  }
+
+  /**
+   * A file name, and only a file name.
+   *
+   * The webview supplies this, and `joinPath` resolves `..` the way any path
+   * join does — so a name carrying separators would point the save dialog at a
+   * directory nobody chose. The dialog still asks before anything is written,
+   * but the place it opens on should be the one this code picked.
+   */
+  private static safeFilename(name: string): string {
+    const base = name.replace(/[\\/]/g, '_').replace(/^\.+/, '').trim();
+    return base || 'cursor-usage.csv';
   }
 
   private offerTokenFix(): void {

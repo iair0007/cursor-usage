@@ -521,7 +521,10 @@ function newChatOverhead(priced, dollarsOf, t) {
   // The floor is what every new chat carries before you type: system prompt,
   // rules files and the tool definitions of every connected MCP server. The
   // cheapest cold start is the closest thing to measuring it directly.
-  const floor = Math.min(...colds.map((e) => e.inputTokens || 0));
+  // Reduced rather than `Math.min(...)`: the spread form throws RangeError once
+  // the array is long enough to blow the argument limit, and a 90-day period on
+  // a busy account gets there.
+  const floor = colds.reduce((lo, e) => Math.min(lo, e.inputTokens || 0), Infinity);
   const spent = colds.reduce((s, e) => {
     const b = dollarsOf(e);
     return s + (b ? b.input : 0);

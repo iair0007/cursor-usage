@@ -27,6 +27,7 @@
 // handling and the tests need no pricing table to run.
 
 import { sessionMetrics, sessionTotals } from './logic.js';
+import { spendSplit } from './insights.js';
 
 /**
  * What the receiving model has to be told before it can help.
@@ -482,12 +483,17 @@ export function buildSessionBrief({
   parts.push(...identity, '');
 
   if (spend) {
-    const contextPct = ((spend.cacheRead + spend.cacheWrite) / spend.total) * 100;
+    // Named precisely, because the reader is asked to lead its answer with the
+    // largest dollar item: the leftover after context is output *and* input,
+    // and calling the pair "the answers" hands the model a false premise about
+    // the one split the whole brief is arguing from.
+    const split = spendSplit(spend);
     parts.push(
       `## Where the ${money(totals.costDollars)} went`,
       `- ${splitLine(spend)}`,
-      `Context handling was ${pct(contextPct)} of this session; the answers themselves were `
-        + `${pct(100 - contextPct)}.`,
+      `Context handling${split.contextLabel ? ` (${split.contextLabel})` : ''} was `
+        + `${pct(split.contextPct)} of this session; the answers were ${pct(split.outputPct)} and the `
+        + `prompts I sent ${pct(split.inputPct)}.`,
       '',
     );
   }

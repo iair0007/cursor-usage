@@ -2890,7 +2890,13 @@ console.log('brief (handing one session or request to Cursor Chat)');
     assert.ok(text.includes('billed by the plan'), 'without this the dollars are ambiguous');
     assert.ok(text.includes('Migrate auth service'));
     assert.ok(/## Cost curve/.test(text));
-    assert.ok(/Context handling was \d+%/.test(text));
+    assert.ok(/Context handling.* was \d+%/.test(text));
+    // The leftover after context is output *and* input, and input is the
+    // prompt. Calling the pair "the answers" hands the reader a false premise
+    // about the one split the rest of the brief argues from.
+    assert.ok(!/the answers themselves were/.test(text),
+      'output and input must be reported separately, not merged into "the answers"');
+    assert.ok(/the answers were \d+% and the prompts I sent \d+%/.test(text));
     assert.ok(text.includes('$3.10 spent re-caching'), 'findings are quoted');
     assert.ok(text.includes(brf.BRIEF_TEMPLATES[0].prompt), 'the question is the point of the brief');
     assert.ok(/markers.*idle before #5/.test(text), 'the curve marks where the shape changed');
@@ -3052,7 +3058,7 @@ console.log('brief (handing one session or request to Cursor Chat)');
       session: { id: 'x' }, events: single, ...ctx, breakdownOf: () => null,
     });
     assert.ok(unpriced.includes('## Cost curve'));
-    assert.ok(!unpriced.includes('Context handling was'));
+    assert.ok(!unpriced.includes('Context handling'));
     assert.equal(brf.buildSessionBrief({ session, events: [], ...ctx }), '');
     assert.equal(brf.buildRequestBrief({ event: null, ...ctx }), '');
   });
@@ -3547,6 +3553,74 @@ console.log('\nsession charts and table');
     for (const cls of ['session-started', 'session-duration', 'session-requests', 'session-cost']) {
       assert.ok(main.includes(`class="${cls}"`), `the ${cls} column needs a class to be aligned by`);
     }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Saying only what the numbers support.
+// ---------------------------------------------------------------------------
+console.log('\nthe context/answer claim');
+{
+  const ins = await import('../src/webview/insights.js');
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+
+  const split = (b) => ins.spendSplit({ total: 100, ...b });
+
+  test('an activity that did not happen is not named', () => {
+    // cacheWrite is 0 for every request on some accounts, so "re-reading and
+    // re-caching the conversation" was describing something that never
+    // occurred — beside a row reading $0.
+    assert.equal(split({ cacheRead: 70, cacheWrite: 0, output: 20, input: 10 }).contextLabel,
+      're-reading the conversation');
+    assert.equal(split({ cacheRead: 40, cacheWrite: 30, output: 20, input: 10 }).contextLabel,
+      're-reading and re-caching the conversation');
+    assert.equal(split({ cacheRead: 0, cacheWrite: 60, output: 30, input: 10 }).contextLabel,
+      'writing the conversation to cache');
+    assert.equal(split({ cacheRead: 0, cacheWrite: 0, output: 70, input: 30 }).contextLabel, null,
+      'with no cache activity at all the clause is dropped, not left empty');
+  });
+
+  test('the prompt is never counted as the answer', () => {
+    // The leftover after context is output + input. Reported as "the answers
+    // themselves" it overstated the answer's share by nearly double on a
+    // session that was 14.5% output and 12.4% input.
+    const s = split({ cacheRead: 73, cacheWrite: 0, output: 15, input: 12 });
+    assert.equal(Math.round(s.contextPct), 73);
+    assert.equal(Math.round(s.outputPct), 15);
+    assert.equal(Math.round(s.inputPct), 12);
+    // The invariant is that the answer figure is output alone. Deriving it as
+    // "everything that wasn't context" is exactly the bug: that leftover is
+    // output + input.
+    for (const [name, src] of [['the session panel', main], ['the brief', brief]]) {
+      assert.ok(!/100 - (split\.)?contextPct/.test(src),
+        `${name} still derives the answer share as the leftover after context`);
+    }
+    assert.ok(main.includes('split.outputPct') && main.includes('split.inputPct'),
+      'the session panel reports output and input as their own figures');
+    assert.ok(brief.includes('split.outputPct') && brief.includes('split.inputPct'),
+      'and so does the brief');
+    assert.ok(main.includes('the prompts you sent'), 'and names input for what it is');
+    assert.ok(brief.includes('prompts I sent'));
+    assert.ok(!/as opposed to the answer itself/.test(html),
+      'the timeline caption called the whole unshaded part the answer');
+  });
+
+  test('an empty bucket reads as zero rather than as a rounding artefact', () => {
+    const fn = main.slice(main.indexOf('function moneyFine'), main.indexOf('function insightBadge'));
+    assert.match(fn, /if \(v === 0\) return '\$0';/);
+  });
+
+  test('a token count is read by presence, so a real zero is never overridden', () => {
+    const api = readFileSync(path.join(here, '..', 'src/api.ts'), 'utf8');
+    const fn = api.slice(api.indexOf('function pickTokens'), api.indexOf('let loggedTokenShape'));
+    assert.match(fn, /!== undefined/, 'a present-and-zero field is an answer, not a miss');
+    assert.ok(!/\|\|/.test(fn), 'truthiness here would swap a real 0 for an alias');
+    // Cache write reads 0 on every request for some accounts; there is no way
+    // to tell a reported zero from a key we never read without seeing the shape.
+    assert.match(api, /Usage event tokenUsage shape:/, 'the shape has to be diagnosable from the logs');
+    assert.match(api, /resetTokenShapeLog\(\);/, 'and re-reported on each load, not once per window');
   });
 }
 

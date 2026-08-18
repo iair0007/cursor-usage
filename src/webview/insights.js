@@ -131,6 +131,39 @@ export function contextShare(breakdown) {
 }
 
 /**
+ * The four buckets as shares, plus a name for what the context half actually did.
+ *
+ * Two things this exists to stop being said. The first is "re-reading and
+ * re-caching the conversation" on a session that never wrote a byte to cache —
+ * `cacheWrite` is 0 for every request on some accounts, and naming an activity
+ * that did not happen is the kind of small false statement that makes a reader
+ * stop trusting the arithmetic beside it.
+ *
+ * The second is worse: the leftover share used to be reported as "the answers
+ * themselves", but it is output *plus input*, and input is the prompt you
+ * sent. On a session that is 14.5% output and 12.4% input that phrasing
+ * overstates the answer's share by nearly double, and it is the number the
+ * whole "context handling vs real work" argument rests on.
+ */
+export function spendSplit(breakdown) {
+  if (!breakdown || !(breakdown.total > 0)) return null;
+  const share = (value) => (value / breakdown.total) * 100;
+  const read = breakdown.cacheRead > 0;
+  const write = breakdown.cacheWrite > 0;
+  return {
+    contextPct: share(breakdown.cacheRead + breakdown.cacheWrite),
+    outputPct: share(breakdown.output),
+    inputPct: share(breakdown.input),
+    // Null when neither happened, so callers drop the clause rather than
+    // print an empty pair of dashes.
+    contextLabel: read && write
+      ? 're-reading and re-caching the conversation'
+      : read ? 're-reading the conversation'
+        : write ? 'writing the conversation to cache' : null,
+  };
+}
+
+/**
  * Which of the four shapes a request has.
  *
  * `compaction` is the one worth naming: Cursor summarising the thread looks

@@ -167,6 +167,25 @@ All notable user-facing changes. Earlier releases predate this file; see the
   one; dollars and tokens share no scale, and overlaying them would suggest a
   relationship the numbers don't contain. Cursor publishes no context-size
   figure, so this is measured from the token counts and says so.
+- **Fixed: the session summary claimed work that never happened, and counted
+  your prompts as answers.** It read "X% was context handling — re-reading and
+  re-caching the conversation — and Y% was the answers themselves". Two things
+  wrong with that. It named re-caching on sessions that never wrote a byte to
+  cache, right beside a Cache write row reading $0. And the leftover Y% is
+  output *plus* input — input being the prompt you sent, not an answer — so on a
+  session that was 15% output and 12% input it reported the answers as 27%,
+  nearly double. Each half is now named for what it is, and only the cache
+  activity that actually happened is mentioned. The same wording was going into
+  the brief handed to Cursor Chat, where it was teaching the model a false
+  premise about the one split the whole analysis argues from.
+- **Cache write reads 0 on every request for some accounts.** Whether that is
+  Cursor reporting a real zero or this extension reading a key that isn't there
+  could not be told apart from the outside, so two things changed: token counts
+  are now read under several spellings (by presence, so a genuine 0 is never
+  overridden), and the shape of the usage payload's `tokenUsage` is written to
+  the log on each load — `Cursor Usage: Show Logs` — so it can be settled from
+  real data rather than guessed at.
+- A bucket that cost exactly nothing now shows `$0` rather than `$0.0000`.
 - **The sessions table no longer scrolls sideways.** A single long Models cell
   was setting the whole table's minimum width. Model names now wrap between
   each other while staying intact individually, and each column header sits

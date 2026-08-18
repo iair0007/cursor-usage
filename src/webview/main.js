@@ -60,6 +60,7 @@ import {
   findingsForRequest,
   findingsForSession,
   badgeSeverity,
+  spendSplit,
 } from './insights.js';
 import {
   BRIEF_NOTES,
@@ -2783,6 +2784,9 @@ const TIMELINE_LABEL_MAX = 14;
  */
 function moneyFine(v) {
   if (v == null) return '—';
+  // Exactly zero is a fact, not a measurement: "$0.0000" reads as a number too
+  // small to show, when what it means is that this bucket never happened.
+  if (v === 0) return '$0';
   if (Math.abs(v) >= 1) return `$${v.toFixed(2)}`;
   if (Math.abs(v) >= 0.01) return `$${v.toFixed(3)}`;
   return `$${v.toFixed(4)}`;
@@ -3100,14 +3104,18 @@ function openSessionDetail(sessionId) {
   $('sessionDetailMeta').textContent = meta.join(' · ');
 
   const spend = sessionSpendBreakdown(events);
-  const contextPct = spend && spend.total > 0
-    ? ((spend.cacheRead + spend.cacheWrite) / spend.total) * 100 : null;
+  const split = spendSplit(spend);
+  // Each half named for what it actually is. The leftover is output *and*
+  // input, and only the cache activities that happened get mentioned.
+  const lead = split ? `<p class="session-spend-lead">
+        <strong>${fmt.pct(split.contextPct)}</strong> of it was context handling${split.contextLabel
+    ? ` — ${split.contextLabel}` : ''}. The answers themselves were
+        <strong>${fmt.pct(split.outputPct)}</strong>, and the prompts you sent
+        <strong>${fmt.pct(split.inputPct)}</strong>.</p>` : '';
   $('sessionDetailSpend').innerHTML = `
     <section class="session-spend">
       <h4>Where this session's money went</h4>
-      ${contextPct != null ? `<p class="session-spend-lead">
-        <strong>${fmt.pct(contextPct)}</strong> of it was context handling — re-reading and re-caching the
-        conversation — and <strong>${fmt.pct(100 - contextPct)}</strong> was the answers themselves.</p>` : ''}
+      ${lead}
       ${renderBreakdown(spend)}
     </section>`;
 

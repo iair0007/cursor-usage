@@ -121,8 +121,52 @@ export function pickConversationId(e: any): string | undefined {
   return id ? id : undefined;
 }
 
+/**
+ * A token count under whichever of its spellings this payload uses.
+ *
+ * Keyed on *presence*, never on truthiness: a field that is present and
+ * genuinely 0 is an answer, and falling through to an alias there would
+ * invent tokens the account was never charged for. Only a missing key moves
+ * on to the next spelling.
+ *
+ * The alternates exist because every other id on this endpoint has turned out
+ * to have several spellings (see pickConversationId), and the upstream
+ * provider APIs Cursor proxies name this field differently again —
+ * Anthropic's is `cache_creation_input_tokens`. If Cursor is passing one of
+ * those through, this reads it; if it genuinely reports 0, this changes
+ * nothing.
+ */
+function pickTokens(tu: any, ...names: string[]): number {
+  for (const name of names) {
+    if (tu?.[name] !== undefined) return num(tu[name]) ?? 0;
+  }
+  return 0;
+}
+
+/**
+ * Logged once per load rather than per event: the key names this endpoint
+ * actually uses for token counts.
+ *
+ * There is no way to tell from the outside whether a bucket that reads 0 for
+ * every request is Cursor reporting a real zero or this code reading a key
+ * that isn't there — and cache write reads 0 for every request on at least
+ * some accounts. The same `describePayloadShape` diagnostic the budget and
+ * quota lookups carry, for the same reason: it turns "suspicious" into
+ * something a user can paste into an issue.
+ */
+let loggedTokenShape = false;
+export function resetTokenShapeLog(): void {
+  loggedTokenShape = false;
+}
+function logTokenShape(tu: any): void {
+  if (loggedTokenShape || !tu) return;
+  loggedTokenShape = true;
+  log(`Usage event tokenUsage shape: ${describePayloadShape(tu).slice(0, 400)}`);
+}
+
 export function toRawEvent(e: any): RawUsageEvent {
   const tu = e.tokenUsage || null;
+  logTokenShape(tu);
   return {
     id: String(e.id ?? e.eventId ?? `${e.timestamp}-${e.model ?? 'unknown'}`),
     timestamp: e.timestamp ?? e.timestampEpoch ?? 0,
@@ -134,10 +178,13 @@ export function toRawEvent(e: any): RawUsageEvent {
     cursorTokenFee: num(e.cursorTokenFee ?? tu?.cursorTokenFee),
     tokenUsage: tu
       ? {
-          inputTokens: num(tu.inputTokens) ?? 0,
-          outputTokens: num(tu.outputTokens) ?? 0,
-          cacheReadTokens: num(tu.cacheReadTokens) ?? 0,
-          cacheWriteTokens: num(tu.cacheWriteTokens) ?? 0,
+          inputTokens: pickTokens(tu, 'inputTokens', 'input_tokens'),
+          outputTokens: pickTokens(tu, 'outputTokens', 'output_tokens'),
+          cacheReadTokens: pickTokens(tu, 'cacheReadTokens', 'cache_read_tokens', 'cacheReadInputTokens'),
+          cacheWriteTokens: pickTokens(
+            tu, 'cacheWriteTokens', 'cache_write_tokens',
+            'cacheCreationInputTokens', 'cache_creation_input_tokens',
+          ),
           totalCents: num(tu.totalCents) ?? undefined,
         }
       : null,
@@ -178,6 +225,7 @@ export async function fetchDashboardUsage(
   startMs: number,
   endMs: number,
 ): Promise<RawUsageEvent[]> {
+  resetTokenShapeLog();
   const events: RawUsageEvent[] = [];
   const seenIds = new Set<string>();
   let page = 1;
@@ -223,6 +271,7 @@ export async function fetchAdminUsage(
   endMs: number,
 ): Promise<RawUsageEvent[]> {
   const auth = Buffer.from(`${apiKey}:`).toString('base64');
+  resetTokenShapeLog();
   const events: RawUsageEvent[] = [];
   const seenIds = new Set<string>();
   let page = 1;

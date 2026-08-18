@@ -1077,6 +1077,11 @@ export function normalize(raw, pricing, opts = {}) {
   const outputTokens = num(tu.outputTokens);
   const cacheReadTokens = num(tu.cacheReadTokens);
   const cacheWriteTokens = num(tu.cacheWriteTokens);
+  // Cursor stopped sending this count in August 2026. An omitted bucket and a
+  // measured zero must not print the same figure, so the distinction travels
+  // with the event. Absent flag means reported: every fixture and every older
+  // payload carried the count.
+  const cacheWriteReported = tu.cacheWriteReported !== false;
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
 
   const isTokenBased = Boolean(raw.isTokenBasedCall);
@@ -1166,6 +1171,7 @@ export function normalize(raw, pricing, opts = {}) {
     billingRegime,
     planMeteredCost,
     baselineDiscountPct,
+    cacheWriteReported,
     cacheSavings,
     noCacheCost,
     pricingLabel: rates?.label || null,

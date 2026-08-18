@@ -3749,6 +3749,72 @@ console.log('\none card per lesson');
   });
 }
 
+console.log('\nan omitted bucket is not a zero');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
+  const api = readFileSync(path.join(here, '..', 'src/api.ts'), 'utf8');
+  // The top-level fixture table; these tests are about presence, not rates.
+  const raw = (tokenUsage) => ({
+    id: 'r1', timestamp: Date.now(), model: 'claude-sonnet-5-thinking-medium',
+    isTokenBasedCall: true, chargedCents: 12, tokenUsage,
+  });
+
+  test('a payload carrying the count is reported, zero or not', () => {
+    for (const n of [30806, 0]) {
+      const e = normalize(raw({ inputTokens: 10, cacheWriteTokens: n, cacheWriteReported: true }), pricing);
+      assert.equal(e.cacheWriteReported, true, `cacheWriteTokens: ${n} is a measurement`);
+      assert.equal(e.cacheWriteTokens, n);
+    }
+  });
+
+  test('a payload without the count is marked unreported, and still counts as 0', () => {
+    const e = normalize(raw({ inputTokens: 10, cacheWriteReported: false }), pricing);
+    assert.equal(e.cacheWriteReported, false);
+    assert.equal(e.cacheWriteTokens, 0, 'arithmetic still needs a number');
+  });
+
+  test('an event from before the flag existed is treated as reported', () => {
+    const e = normalize(raw({ inputTokens: 10, cacheWriteTokens: 5 }), pricing);
+    assert.equal(e.cacheWriteReported, true);
+  });
+
+  test('the API records presence separately from value', () => {
+    const fn = api.slice(api.indexOf('function hasToken'), api.indexOf('let loggedTokenShape'));
+    assert.match(fn, /!== undefined/);
+    assert.match(api, /cacheWriteReported: hasToken\(/);
+  });
+
+  test('a range is only unknown when every request in it lacks the count', () => {
+    const fn = main.slice(main.indexOf('function cacheWriteUnreported'), main.indexOf('/** A finding marker'));
+    assert.match(fn, /\.every\(/, 'one reporting request makes the total real, if partial');
+    assert.match(fn, /list\.length > 0/, 'an empty list is not "unreported"');
+  });
+
+  test('the request log prints a dash rather than a zero nobody measured', () => {
+    assert.match(main, /e\.cacheWriteReported === false \? UNREPORTED : fmt\.num\(e\.cacheWriteTokens\)/);
+  });
+
+  test('the cost breakdown gives the row no dollar figure and says why', () => {
+    const fn = main.slice(main.indexOf('function renderBreakdown'), main.indexOf('/** Moves the user to a request'));
+    assert.match(fn, /missing \? UNREPORTED : moneyFine/);
+    assert.match(fn, /missing \? UNREPORTED : fmt\.pct/);
+    assert.match(fn, /stopped reporting cache-write tokens/);
+  });
+
+  test('the CSV leaves the cell empty instead of writing 0', () => {
+    const fn = main.slice(main.indexOf('function exportCsv'), main.indexOf('function csvText') > 0
+      ? main.indexOf('function csvText') : main.length);
+    assert.match(fn, /cacheWriteReported === false \? '' : e\.cacheWriteTokens/);
+  });
+
+  test('the brief says absent rather than zero, so the model cannot misread it', () => {
+    assert.match(brief, /not reported by Cursor/);
+    // "rewrote not reported by Cursor tokens to cache" is not a sentence.
+    assert.match(brief, /cacheWriteReported\(event\)\s*\n?\s*\?/, 'the idle-resume clause is dropped, not filled');
+  });
+}
+
 console.log('\nthe suite itself');
 {
   const suite = readFileSync(path.join(here, 'run-tests.mjs'), 'utf8');

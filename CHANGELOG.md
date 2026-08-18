@@ -5,6 +5,18 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.8.0 — 2026-08-17
 
+- **A cache-write count Cursor never sent now reads "unknown", not 0.** Cursor
+  stopped including `cacheWriteTokens` in its usage events in August 2026 —
+  cache *reads* keep arriving, and a cache cannot be read unless it was written,
+  so those tokens are real and simply unreported. The dashboard was printing
+  `0` and `$0.0000` for them, which claims a measurement nobody made. Presence
+  is now tracked separately from value: the request log shows a dash, the cost
+  breakdown gives the row no dollar figure and says why, the CSV leaves the cell
+  empty rather than writing a zero, and the brief handed to Cursor Chat says
+  "not reported by Cursor" so the model cannot reason from it. A range is only
+  marked unknown when every request in it lacks the count — one reporting
+  request makes the total real, if partial — and an account still receiving the
+  field is unaffected.
 - **Promotions are measured against what your account actually pays.** Cursor
   reports a standing enterprise reduction on each event while the list value
   stays gross, so every model on such an account looked permanently discounted

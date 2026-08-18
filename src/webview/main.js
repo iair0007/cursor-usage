@@ -2800,6 +2800,24 @@ function moneyFine(v) {
   return `$${v.toFixed(4)}`;
 }
 
+/**
+ * Cursor stopped sending a cache-write count in August 2026, and an omitted
+ * bucket is not a measured zero — cache reads kept arriving, and a cache cannot
+ * be read unless it was written, so those tokens happened and simply were not
+ * reported. Printing "0" for them claims a measurement nobody made.
+ *
+ * True only when *every* request in view came without the count: a range that
+ * straddles the cutoff still has a real, if partial, total, and calling that
+ * unknown would throw away figures Cursor did send.
+ */
+const UNREPORTED = '—';
+const UNREPORTED_TITLE = 'Cursor did not report a cache-write count for this request — unknown, not zero.';
+
+function cacheWriteUnreported(events) {
+  const list = Array.isArray(events) ? events : (events ? [events] : []);
+  return list.length > 0 && list.every((e) => e && e.cacheWriteReported === false);
+}
+
 /** A finding marker for a request row or a session row. */
 function insightBadge(findings) {
   const severity = badgeSeverity(findings);
@@ -2810,7 +2828,7 @@ function insightBadge(findings) {
 }
 
 /** What a request's cost was made of: a proportional bar plus the figures. */
-function renderBreakdown(breakdown, event) {
+function renderBreakdown(breakdown, event, opts = {}) {
   if (!breakdown || !(breakdown.total > 0)) {
     // Two different failures used to share one sentence, and the sentence was
     // wrong for the second one: a request that moved no tokens has nothing to
@@ -2825,13 +2843,25 @@ function renderBreakdown(breakdown, event) {
     .map((key) => `<span class="bd-seg bd-${key}" style="width:${(breakdown[key] / breakdown.total) * 100}%"
         title="${esc(BUCKET_LABELS[key])}: ${moneyFine(breakdown[key])}"></span>`)
     .join('');
-  const rows = BUCKET_ORDER.map((key) => `
-    <li>
+  // A bucket Cursor never reported has no dollar figure to give: its tokens
+  // were billed inside the total, they just aren't attributed. Showing "$0"
+  // beside them would say this cost nothing.
+  const unreported = opts.cacheWriteUnreported ?? cacheWriteUnreported(event);
+  const rows = BUCKET_ORDER.map((key) => {
+    const missing = key === 'cacheWrite' && unreported;
+    return `
+    <li${missing ? ` title="${esc(UNREPORTED_TITLE)}"` : ''}>
       <span class="bd-key"><i class="bd-dot bd-${key}"></i>${esc(BUCKET_LABELS[key])}</span>
-      <span class="bd-val">${moneyFine(breakdown[key])}</span>
-      <span class="bd-pct">${fmt.pct((breakdown[key] / breakdown.total) * 100)}</span>
-    </li>`).join('');
+      <span class="bd-val">${missing ? UNREPORTED : moneyFine(breakdown[key])}</span>
+      <span class="bd-pct">${missing ? UNREPORTED : fmt.pct((breakdown[key] / breakdown.total) * 100)}</span>
+    </li>`;
+  }).join('');
   const notes = [
+    unreported
+      ? 'Cursor stopped reporting cache-write tokens in August 2026. Those tokens are inside '
+        + 'the charge above — a cache cannot be read unless it was written — but Cursor no longer '
+        + 'says how many, so this row cannot be priced.'
+      : '',
     breakdown.scaled
       ? 'Split across the real charge for this request, which was below list price that day.'
       : '',
@@ -3099,7 +3129,7 @@ function openSessionDetail(sessionId) {
     <section class="session-spend">
       <h4>Where this session's money went</h4>
       ${lead}
-      ${renderBreakdown(spend)}
+      ${renderBreakdown(spend, null, { cacheWriteUnreported: cacheWriteUnreported(events) })}
     </section>`;
 
   const findings = findingsForSession(state.insights, sessionId);
@@ -3326,7 +3356,8 @@ function renderTable(events, summary) {
       <td class="tokens">${fmt.num(e.inputTokens)}</td>
       <td class="tokens">${fmt.num(e.outputTokens)}</td>
       <td class="tokens">${fmt.num(e.cacheReadTokens)}</td>
-      <td class="tokens">${fmt.num(e.cacheWriteTokens)}</td>
+      <td class="tokens"${e.cacheWriteReported === false ? ` title="${esc(UNREPORTED_TITLE)}"` : ''}>${
+  e.cacheWriteReported === false ? UNREPORTED : fmt.num(e.cacheWriteTokens)}</td>
       <td class="tokens">${fmt.num(e.totalTokens)}</td>
       <td><button type="button" class="btn-link btn-compare" data-id="${esc(e.id)}">Compare</button></td>
     </tr>`;
@@ -3978,7 +4009,9 @@ function exportCsv() {
     e.inputTokens,
     e.outputTokens,
     e.cacheReadTokens,
-    e.cacheWriteTokens,
+    // Blank, not 0: a count Cursor never sent is absent data, and a zero here
+    // would be indistinguishable from a request that genuinely wrote no cache.
+    e.cacheWriteReported === false ? '' : e.cacheWriteTokens,
     e.totalTokens,
     e.planMeteredCost ?? '',
     e.billingRegime,
@@ -4160,6 +4193,7 @@ function computeAnalyzeData(events, summary, thresholds = state.analyzeThreshold
     modelRows,
     tokens,
     totalTok,
+    cacheWriteUnreported: cacheWriteUnreported(events),
     cache: { withCache: withCache.length, coldStarts: coldStarts.length, cacheHitRate, avgCacheRead, totalSavings: summary.totalSavings },
     expensive,
     dailyRows,
@@ -4456,7 +4490,9 @@ function buildBriefSectionCache(data) {
     `- Cache hit rate: ${fmt.pct(cache.cacheHitRate)} (${fmt.num(cache.withCache)} requests)`,
     `- Cold starts: ${fmt.num(cache.coldStarts)}`,
     `- Total cache savings (est.): ${fmt.money(cache.totalSavings)}`,
-    `- Token mix: input ${fmt.num(tokens.input)}, output ${fmt.num(tokens.output)}, cache read ${fmt.num(tokens.cacheRead)}, cache write ${fmt.num(tokens.cacheWrite)} (${fmt.num(totalTok)} total)`,
+    `- Token mix: input ${fmt.num(tokens.input)}, output ${fmt.num(tokens.output)}, `
+      + `cache read ${fmt.num(tokens.cacheRead)}, cache write ${data.cacheWriteUnreported
+        ? 'not reported by Cursor' : fmt.num(tokens.cacheWrite)} (${fmt.num(totalTok)} total)`,
   ].join('\n');
 }
 
@@ -4468,7 +4504,9 @@ function buildBriefSectionTokenMix(data) {
     `- Input: ${fmt.num(tokens.input)} (${pct(tokens.input)})`,
     `- Output: ${fmt.num(tokens.output)} (${pct(tokens.output)})`,
     `- Cache read: ${fmt.num(tokens.cacheRead)} (${pct(tokens.cacheRead)})`,
-    `- Cache write: ${fmt.num(tokens.cacheWrite)} (${pct(tokens.cacheWrite)})`,
+    `- Cache write: ${data.cacheWriteUnreported
+      ? 'not reported by Cursor (omitted from the usage API since August 2026)'
+      : `${fmt.num(tokens.cacheWrite)} (${pct(tokens.cacheWrite)})`}`,
   ].join('\n');
 }
 
@@ -5318,7 +5356,8 @@ function runCompareFromRequest() {
       <div><dt>Model used ${tip('The model Cursor billed for this request. Auto means Cursor chose the model automatically.')}</dt><dd>${esc(event.model)}${discountBadge(discountForEvent(event.modelRaw, event.timestampMs))}</dd></div>
       <div><dt>Actual token cost ${tip('What Cursor charged for model/API tokens on this request. Does not include flat usage fees on some plans, and always the token value rather than the Billed figure — the comparison below prices tokens, so its baseline has to as well.')}</dt><dd>${fmt.money(actualCost)}</dd></div>
       <div><dt>Input / output ${tip('Token counts from your request — replayed as-is when estimating other models.')}</dt><dd>${fmt.num(tokens.input)} / ${fmt.num(tokens.output)}</dd></div>
-      <div><dt>Cache read / write ${tip('Prompt cache tokens from this request. Savings estimates assume similar cache behavior on other models.')}</dt><dd>${fmt.num(tokens.cacheRead)} / ${fmt.num(tokens.cacheWrite)}</dd></div>
+      <div><dt>Cache read / write ${tip('Prompt cache tokens from this request. Savings estimates assume similar cache behavior on other models.')}</dt><dd>${fmt.num(tokens.cacheRead)} / ${cacheWriteUnreported(event)
+      ? `<span title="${esc(UNREPORTED_TITLE)}">${UNREPORTED}</span>` : fmt.num(tokens.cacheWrite)}</dd></div>
       <div><dt>Total tokens ${tip('Sum of input, output, cache read, and cache write tokens.')}</dt><dd>${fmt.num(event.totalTokens)}</dd></div>`;
   }
 

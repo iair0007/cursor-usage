@@ -83,6 +83,15 @@ All notable user-facing changes. Earlier releases predate this file; see the
   built-in one rather than a published one.
 - Briefs carry token counts, timings, costs and the conversation's name. Nothing
   you wrote is in them, because none of it is ever read.
+- The session sub-plot is labelled for what it measures. It was captioned as the
+  size of the conversation, which the data cannot support: an agent request
+  re-sends the whole prefix on every internal turn, so the figure is context
+  size × turns taken — which is why it routinely ran to eight digits, several
+  times past any model's context window. A short request then plotted low on an
+  unchanged thread and read as the context having shrunk with no summary in
+  sight. It is now "Tokens sent per request", and the caption says a short bar is
+  a short request while only a striped bar is the thread itself getting smaller.
+  Cursor publishes no context-window figure, so nothing here can show one.
 - Findings are one card per kind, and a surface shows three of them. A rule that
   fired on a dozen requests used to render a dozen cards carrying the same
   explanation and the same closing tip, which buried the findings that were

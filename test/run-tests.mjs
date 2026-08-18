@@ -3516,8 +3516,8 @@ console.log('\nsession charts and table');
     assert.match(css, /\.bd-seg:last-child \{ box-shadow: none; \}/);
   });
 
-  test('context is measured from what went up, never from what came back', () => {
-    const fn = main.slice(main.indexOf('function contextTokens'), main.indexOf('function renderSessionTimeline'));
+  test('the sub-plot is measured from what went up, never from what came back', () => {
+    const fn = main.slice(main.indexOf('function tokensSent'), main.indexOf('function renderSessionTimeline'));
     for (const field of ['inputTokens', 'cacheReadTokens', 'cacheWriteTokens']) {
       assert.ok(fn.includes(field), `context has to include ${field}`);
     }
@@ -3527,9 +3527,19 @@ console.log('\nsession charts and table');
 
   test('the context plot is a second chart, never a second axis on the first', () => {
     const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
-    assert.ok(fn.includes('maxOf(priced, contextTokens)'),
+    assert.ok(fn.includes('maxOf(priced, tokensSent)'),
       'the context plot is scaled by its own maximum — dollars and tokens share no unit');
     assert.ok(fn.includes('tl-ctx-plot') && fn.includes('tl-ctx-bar'));
+    // The sub-plot sums the whole request, and an agent request re-sends the
+    // prefix on every internal turn — so the figure is context × turns and
+    // runs well past any model's window. Calling it the conversation's size
+    // makes a short request look like a thread that shrank on its own.
+    assert.ok(!/Context sent|tokens of context/.test(fn),
+      'the sub-plot must not be labelled as the size of the conversation');
+    assert.match(fn, /context size × turns/, 'and has to say what it actually is');
+    // "context size" is allowed only inside that phrase — anywhere else it is
+    // the old claim creeping back.
+    assert.equal(fn.match(/context size/g).length, fn.match(/context size × turns/g).length);
     // Same x for both rows: the geometry comes from .tl-plot, which .tl-ctx-plot
     // extends rather than redeclares, so the columns cannot drift apart.
     assert.match(fn, /class="tl-plot tl-ctx-plot"/);

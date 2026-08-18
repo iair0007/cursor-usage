@@ -2977,20 +2977,24 @@ function sessionSpendBreakdown(events) {
 }
 
 /**
- * How big the conversation had grown by a given request.
+ * Everything that went *up* with one request: the new prompt, the context
+ * re-read from cache, and the context written to it. Output is excluded —
+ * that came back down.
  *
- * Cursor's usage API reports no context-window figure, so this is measured
- * rather than read: everything that went *up* with the request — the new
- * prompt, the context re-read from cache, and the context written to it. The
- * answer is deliberately excluded; output is what came back, and folding it in
- * would make a long reply look like a big conversation.
+ * Emphatically NOT the size of the conversation, which is what this plot first
+ * claimed to show. Cursor reports no context-window figure, and this cannot
+ * stand in for one: an agent request re-sends the whole prefix on every
+ * internal turn, so what lands here is context size × turns taken. That is why
+ * the figure routinely runs to eight digits — far past any model's window —
+ * and why a short request plots low next to a long one on the very same
+ * conversation. The chart is labelled for what it measures.
  */
-function contextTokens(event) {
+function tokensSent(event) {
   return (event.inputTokens || 0) + (event.cacheReadTokens || 0) + (event.cacheWriteTokens || 0);
 }
 
 /**
- * Two plots, one x-axis: cost per request, and the context behind it.
+ * Two plots, one x-axis: cost per request, and the tokens sent to earn it.
  *
  * Deliberately not one chart with two scales. Dollars and tokens have no
  * common unit, and a second y-axis is the one chart form that reliably invents
@@ -3051,14 +3055,14 @@ function renderSessionTimeline(events) {
     : '';
   // Second plot, same x. Sized on its own maximum because it is its own chart
   // with its own unit — the shared thing is the request order, never the scale.
-  const maxCtx = maxOf(priced, contextTokens);
+  const maxCtx = maxOf(priced, tokensSent);
   const ctxBars = priced.map((event, index) => {
-    const tokens = contextTokens(event);
+    const tokens = tokensSent(event);
     const height = maxCtx > 0 ? Math.max(2, (tokens / maxCtx) * 100) : 2;
     const isCompaction = classifyRequest(event, state.analyzeThresholds) === 'compaction';
     const lines = [
       `#${index + 1} · ${fmt.date(event.timestampMs)}`,
-      `${fmt.num(tokens)} tokens of context sent`,
+      `${fmt.num(tokens)} tokens sent`,
       `in ${fmt.num(event.inputTokens)} · cache read ${fmt.num(event.cacheReadTokens)}`
         + ` · cache write ${fmt.num(event.cacheWriteTokens)}`,
       ...(isCompaction ? ['Cursor summarised the conversation here'] : []),
@@ -3071,18 +3075,19 @@ function renderSessionTimeline(events) {
         aria-label="${esc(lines.join('. '))}"></button>`;
   }).join('');
 
-  const peakCtx = priced[priced.findIndex((e) => contextTokens(e) === maxCtx)];
+  const peakCtx = priced[priced.findIndex((e) => tokensSent(e) === maxCtx)];
   const ctxPlot = `
     <div class="tl-sub">
       <div class="tl-sub-head">
-        <h5>Context sent</h5>
-        <span class="tl-sub-note">peak ${fmt.num(maxCtx)} tokens${peakCtx
+        <h5>Tokens sent per request</h5>
+        <span class="tl-sub-note">most sent ${fmt.num(maxCtx)} tokens${peakCtx
           ? ` at #${priced.indexOf(peakCtx) + 1}` : ''}</span>
       </div>
       <div class="tl-plot tl-ctx-plot">${ctxBars}</div>
-      <p class="tl-legend">Everything that went up with each request — your prompt plus the
-        conversation re-read from cache. Cursor doesn't publish a context size, so this is
-        measured from the token counts, and the answer that came back is not counted.</p>
+      <p class="tl-legend">Your prompt plus the conversation re-read from cache, on every internal
+        turn the agent took — so this is context size × turns, not the size of the conversation.
+        A short bar is a short request, not a smaller thread: only a striped bar is the thread
+        itself getting smaller. Cursor publishes no context-window figure.</p>
     </div>`;
 
   return `<div class="tl-plot">${bars}</div>${foot}${legend}${ctxPlot}`;

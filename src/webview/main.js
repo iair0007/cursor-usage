@@ -1382,7 +1382,7 @@ function windowDays(window) {
  * costing more than the other is a fact about the work, not a regression, and
  * painting it amber would invent a verdict the numbers don't support.
  */
-function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
+function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down', { pct: withPct = true } = {}) {
   if (format(current) === format(baseline)) return '<span class="delta delta-flat">no change</span>';
   const delta = current - baseline;
   const up = delta > 0;
@@ -1400,7 +1400,9 @@ function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
   const magnitude = belowUnit ? `<${format(smallestUnit)}` : `${sign}${exactMagnitude}`;
 
   let pct = ' (new)';
-  if (baseline > 0) {
+  if (!withPct) {
+    pct = '';
+  } else if (baseline > 0) {
     const exact = Math.abs((delta / baseline) * 100);
     // A visible dollar move whose percentage rounds to zero is "<1%", never "0%".
     pct = exact < 0.5 ? ' (<1%)' : ` (${sign}${exact.toFixed(0)}%)`;
@@ -1592,6 +1594,12 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
     tagNew = 'new',
     tagGone = 'stopped',
     betterWhen = 'down',
+    // What the last column is called, and which way it reads. A period
+    // comparison has a time direction, so "Change" is unambiguous there; two
+    // sessions do not, and the table above this one in that dialog spells the
+    // direction out — so this one has to as well, in the same words.
+    changeLabel = 'Change',
+    changeSub = '',
     // The sessions dialog's two-column comparison reuses this table wholesale
     // for its model breakdown, and needs it to carry the same alignment and
     // sticky-header rules as the metrics table above it — rules scoped to
@@ -1607,6 +1615,15 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
   }, {});
   const curCount = countBy(currentEvents);
   const baseCount = countBy(baselineEvents);
+  // Whether the side touched the model at all, taken from the events rather
+  // than from a cost or a counted-request tally: "never used it" and "used it
+  // and it came to nothing" are different statements, and only the events can
+  // tell them apart. The matrix shown for three or more sessions has always
+  // drawn this distinction; the two-session table printed "$0.00 · 0 req"
+  // against a model one side never ran.
+  const modelsIn = (events) => new Set(events.map((e) => e.model));
+  const curModels = modelsIn(currentEvents);
+  const baseModels = modelsIn(baselineEvents);
   const deltas = modelCostDeltas(curCost, baseCost);
   if (!deltas.length) return '';
 
@@ -1615,17 +1632,26 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
     const bN = baseCount[d.model] || 0;
     const cAvg = cN ? d.current / cN : 0;
     const bAvg = bN ? d.baseline / bN : 0;
-    const tag = d.baseline === 0
+    const inCur = curModels.has(d.model);
+    const inBase = baseModels.has(d.model);
+    const tag = !inBase
       ? ` <span class="compare-tag">${esc(tagNew)}</span>`
-      : d.current === 0 ? ` <span class="compare-tag compare-tag-gone">${esc(tagGone)}</span>` : '';
+      : !inCur ? ` <span class="compare-tag compare-tag-gone">${esc(tagGone)}</span>` : '';
+    const cell = (used, total, n, avg) => (used
+      ? `<td>${fmt.money(total)}<span class="compare-sub">${fmt.num(n)} req · ${fmt.money(avg)}/req</span></td>`
+      : '<td class="cell-absent">—</td>');
     // Rows that didn't move are kept for completeness but stop competing for
     // attention with the ones that did.
     const quiet = Math.abs(d.delta) < 0.005 ? ' class="compare-row-quiet"' : '';
     return `<tr${quiet}>
-        <th scope="row">${esc(d.model)}${tag}${rangeDiscountBadge(d.model)}</th>
-        <td>${fmt.money(d.current)}<span class="compare-sub">${fmt.num(cN)} req · ${fmt.money(cAvg)}/req</span></td>
-        <td>${fmt.money(d.baseline)}<span class="compare-sub">${fmt.num(bN)} req · ${fmt.money(bAvg)}/req</span></td>
-        <td>${deltaCell(d.current, d.baseline, fmt.money, betterWhen)}</td>
+        <th scope="row"><span class="compare-model-label"><span class="compare-model-name"
+          title="${esc(d.model)}">${esc(d.model)}</span>${tag}${rangeDiscountBadge(d.model)}</span></th>
+        ${cell(inCur, d.current, cN, cAvg)}
+        ${cell(inBase, d.baseline, bN, bAvg)}
+        <td>${deltaCell(d.current, d.baseline, fmt.money, betterWhen,
+    // A percentage against a side that never ran the model is not a
+    // measurement — "100% less" says only what the tag beside it already says.
+    { pct: inCur && inBase })}</td>
       </tr>`;
   }).join('');
 
@@ -1637,7 +1663,8 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
           <th scope="col">Model</th>
           <th scope="col">${esc(currentLabel)}</th>
           <th scope="col">${esc(baselineLabel)}</th>
-          <th scope="col">Change</th>
+          <th scope="col"><span class="compare-col-label">${esc(changeLabel)}</span>${changeSub
+  ? `<span class="compare-col-days">${esc(changeSub)}</span>` : ''}</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -2401,6 +2428,11 @@ function renderSessionModelTable(ctxs, pair) {
       heading: 'Which models each session used',
       tagNew: 'only in A',
       tagGone: 'only in B',
+      // The metrics table directly above says "Difference / A against B". Two
+      // sessions have no inherent order, so an unqualified "Change" left the
+      // sign meaning whichever direction the reader assumed.
+      changeLabel: 'Difference',
+      changeSub: 'A against B',
       extraClass: 'sessions-compare-table',
     });
   }

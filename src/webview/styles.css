@@ -752,6 +752,30 @@ tfoot td {
   letter-spacing: 0;
 }
 
+/* The row label holds a model name and, sometimes, a tag and a discount badge.
+   In the sessions dialog the column is a fixed 180-odd pixels, so on a long
+   name — "claude-sonnet-5-thinking-high" plus "Discounted on Aug 16" — the
+   badge ran straight out of the cell and over the figure in the next column.
+   Wrapping rather than truncating: the badge drops to its own line only when
+   the name has taken the width, so the wide period-comparison table keeps them
+   side by side. The name itself never breaks mid-identifier — it clips, with
+   the whole of it on the title. */
+.compare-model-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+}
+.compare-model-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compare-model-label .compare-tag,
+.compare-model-label .discount-tag { margin-left: 0; }
+
 .compare-tag {
   display: inline-block;
   margin-left: 6px;
@@ -934,7 +958,12 @@ tfoot td {
    metric row in the top table and a model row in the one below it line up —
    two tables of different content would otherwise auto-size their columns
    independently and drift out of register with each other. */
-.sessions-compare-table th:first-child { width: 180px; }
+/* Wide enough for the longest model name Cursor actually bills under —
+   "claude-sonnet-5-thinking-medium" measures 224px in the editor's monospace
+   face — plus the cell's own padding. Below this the name clips, and the
+   reasoning effort is the part that falls off the end: "…-thinking-" tells you
+   nothing, and medium and high are different rows at different prices. */
+.sessions-compare-table th:first-child { width: 246px; }
 .sessions-compare-table { table-layout: fixed; }
 .sessions-compare-table td { min-width: 96px; }
 /* Four named columns have to fit without the last one falling off the edge, so

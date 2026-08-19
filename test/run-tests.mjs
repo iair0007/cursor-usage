@@ -3769,6 +3769,67 @@ console.log('\none card per lesson');
   });
 }
 
+console.log('\nthe session comparison table');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+  const fn = main.slice(main.indexOf('function renderModelDeltaTable'), main.indexOf('/** The inline from/to editor'));
+
+  test('the difference column says which way it reads', () => {
+    // Two sessions have no inherent order, so "Change" left the sign meaning
+    // whichever direction the reader assumed. The metrics table directly above
+    // already spells it out; these now agree word for word.
+    assert.match(main, /changeLabel: 'Difference'/);
+    assert.match(main, /changeSub: 'A against B'/);
+    assert.match(main, /<span class="compare-col-days">A against B<\/span>/,
+      'the metrics table it has to match');
+  });
+
+  test('a period comparison keeps its own wording — it has a time direction', () => {
+    assert.match(fn, /changeLabel = 'Change'/);
+    assert.match(fn, /changeSub = ''/);
+  });
+
+  test('a model only one side ran shows a dash, not $0.00 across 0 requests', () => {
+    // "never used it" and "used it and it came to nothing" are different
+    // statements. The matrix shown for three or more sessions always drew this
+    // distinction; the two-session table did not.
+    assert.match(fn, /const modelsIn = \(events\) => new Set\(events\.map\(\(e\) => e\.model\)\)/,
+      'presence comes from the events, not from a cost or a counted-request tally');
+    assert.match(fn, /'<td class="cell-absent">—<\/td>'/);
+    assert.match(fn, /const tag = !inBase/, 'the tag keys on presence too');
+  });
+
+  test('no percentage is offered against a side that never ran the model', () => {
+    assert.match(fn, /\{ pct: inCur && inBase \}/);
+    const cell = main.slice(main.indexOf('function deltaCell'), main.indexOf('function renderModelDeltaTable'));
+    assert.match(cell, /pct: withPct = true/);
+    assert.match(cell, /if \(!withPct\) \{\s*\n?\s*pct = '';/);
+  });
+
+  test('the row label contains its own content instead of running into the figures', () => {
+    assert.match(fn, /<span class="compare-model-label">/);
+    assert.match(fn, /<span class="compare-model-name"/);
+    assert.match(fn, /title="\$\{esc\(d\.model\)\}"/, 'a clipped name keeps the whole of it on the title');
+    const label = css.match(/\.compare-model-label \{[^}]*\}/)[0];
+    assert.match(label, /flex-wrap: wrap/, 'the badge drops below the name only when it has to');
+    assert.match(label, /min-width: 0/, 'without this a flex item refuses to shrink and overflows');
+    const name = css.match(/\.compare-model-name \{[^}]*\}/)[0];
+    for (const rule of ['overflow: hidden', 'text-overflow: ellipsis', 'white-space: nowrap']) {
+      assert.ok(name.includes(rule), `the name needs "${rule}" so it clips rather than breaking mid-identifier`);
+    }
+  });
+
+  test('the label column fits the longest model name Cursor bills under', () => {
+    // Measured in the browser at 224px for "claude-sonnet-5-thinking-medium",
+    // plus the cell's 10px padding either side. Narrower and the reasoning
+    // effort is what falls off the end — and medium and high are different
+    // rows at different prices.
+    const width = Number(css.match(/\.sessions-compare-table th:first-child \{ width: (\d+)px; \}/)[1]);
+    assert.ok(width >= 244, `label column is ${width}px, too narrow for a 224px name plus padding`);
+  });
+}
+
 console.log('\ngetting from an expensive request to its session');
 {
   const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');

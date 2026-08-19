@@ -5,6 +5,19 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.8.0 — 2026-08-17
 
+- Three fixes to the session comparison's model table. A long model name plus a
+  discount badge overflowed the fixed-width label column and ran over the figure
+  in the next column — badges now wrap below the name when it has taken the
+  width, the name clips rather than breaking mid-identifier, and the column is
+  wide enough for the longest name Cursor actually bills under, so the reasoning
+  effort is no longer the part that falls off the end. A model only one session
+  used showed "$0.00 · 0 req" against the session that never ran it, which reads
+  as "used it and it came to nothing"; it now shows a dash, as the three-session
+  matrix always has, and drops the "−100%" that said nothing the "only in B" tag
+  did not. And the last column is named "Difference / A against B" instead of
+  "Change" — two sessions have no inherent order, so an unqualified "Change"
+  left the sign meaning whichever direction the reader assumed. Period
+  comparisons, which do have a direction, are unchanged.
 - Analyze's most-expensive-requests table names the session each request came
   from, and the name opens it. A dollar figure against a model and a timestamp
   says what a request cost but nothing about what it was for; the conversation

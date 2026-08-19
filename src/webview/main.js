@@ -15,6 +15,7 @@
 import Chart from 'chart.js/auto';
 import {
   parsePricing,
+  describePricingScrape,
   matchPricing,
   estimateTokenCost,
   detectDiscounts,
@@ -3901,6 +3902,9 @@ async function load() {
     // Written every load, because "no discount found" has several very
     // different causes and none of them are visible from the panel.
     void rpc('log', { text: describeDiscountRun(state.detectedDiscounts, state.all.length) }).catch(() => {});
+    // Same reason: a built-in Auto rate looks exactly like a scraped one from
+    // the panel, and only the page itself says which the user is looking at.
+    void rpc('log', { text: describePricingScrape(state.pricing) }).catch(() => {});
     // Not signed in is not "zero usage" — keep the placeholders in that case.
     state.loaded = usage.authMode !== 'none';
     state.page = 1;

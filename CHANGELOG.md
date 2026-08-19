@@ -5,6 +5,22 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.8.0 — 2026-08-17
 
+- **Auto is no longer badged "Discounted" for being Auto.** Cursor reports two
+  figures per request, and for bare Auto they describe different rate cards: the
+  token value is what those tokens are worth on whatever model Auto routed to,
+  while the charge follows Auto's own flat rate, "regardless of which model is
+  used". Reading the gap as a promotion put a permanent discount badge on Auto
+  at a different size every day (44%, 46%, 48%, and one day too scattered to
+  call) — it was tracking the routing, not a sale. Auto is now measured against
+  Auto's own published rate, which is a comparison of like with like: on a
+  sample of 13 real Auto requests it comes out at 0% off, matching the charge to
+  the published rate exactly. A genuine promotion on Auto is still detected.
+- The Auto rate is found on the pricing page in more shapes — including a row
+  named for what it prices ("All models") under an Auto heading — and when it
+  still isn't found, the log now lists the tables the page did have, with their
+  headers. A built-in Auto rate is indistinguishable from a scraped one on
+  screen, so the only way to tell whether the row moved, was renamed, or stopped
+  being a table was to look at the page.
 - **A token count Cursor never sent now reads "unknown", not 0.** An omitted
   bucket and a measured zero arrive identically, and the dashboard was printing
   `0` and `$0.0000` for both — claiming a measurement nobody made. Presence is

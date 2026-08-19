@@ -183,7 +183,13 @@ export function parsePricing(md) {
   const models = [];
   const seenNames = new Set();
   const lines = text.split('\n').map((l) => l.trim());
+  // Every table header seen, and the heading each sat under. Kept for the
+  // diagnostic below: when the Auto rate goes missing the useful question is
+  // what the page *did* contain, and that is invisible from the panel.
+  const tablesSeen = [];
+  let heading = '';
   for (let i = 0; i < lines.length - 1; i++) {
+    if (lines[i].startsWith('#')) heading = lines[i].replace(/^#+\s*/, '');
     if (!lines[i].startsWith('|') || !isTableSeparatorRow(lines[i + 1])) continue;
     const headerCells = splitRowCells(lines[i]);
     const rows = [];
@@ -192,9 +198,14 @@ export function parsePricing(md) {
       rows.push(splitRowCells(lines[j]));
       j++;
     }
-    for (const m of parseModelTableRows(headerCells, rows)) {
+    const parsed = parseModelTableRows(headerCells, rows);
+    tablesSeen.push({ heading, headers: headerCells, rows: rows.length, priced: parsed.length });
+    for (const m of parsed) {
       if (seenNames.has(m.name)) continue;
       seenNames.add(m.name);
+      // Which section it came from, so an Auto row named something else can
+      // still be recognised by the heading above it.
+      m.section = heading;
       models.push(m);
     }
     i = j - 1;
@@ -208,7 +219,13 @@ export function parsePricing(md) {
   // rates entirely, and with them its cache-savings figure.
   if (auto.input == null) {
     const autoRow = models.find((m) => m.name.includes('auto') && m.name.includes('cost'))
-      || models.find((m) => m.name === 'auto');
+      || models.find((m) => m.name === 'auto')
+      // Last resort: the only priced row under a heading that is about Auto.
+      // Covers the row being named for what it prices ("All models", "Any
+      // model") rather than for Auto itself, without letting a model whose own
+      // name merely contains "auto" stand in for the bundle.
+      || models.find((m) => normModel(m.section).includes('auto')
+        && models.filter((x) => x.section === m.section).length === 1);
     if (autoRow?.input != null) {
       auto.input = autoRow.input;
       auto.cacheWrite = autoRow.cacheWrite ?? autoRow.input;
@@ -243,7 +260,14 @@ export function parsePricing(md) {
     };
   }
 
-  return { auto, models, aliasIndex: buildAliasIndex(models), fallback: false, autoFallback };
+  return {
+    auto,
+    models,
+    aliasIndex: buildAliasIndex(models),
+    fallback: false,
+    autoFallback,
+    tablesSeen,
+  };
 }
 
 /**
@@ -252,6 +276,20 @@ export function parsePricing(md) {
  * estimating need to know the difference, or they read the substitution as a
  * real price. `cacheWritePublished` records which of the two this is.
  */
+/**
+ * Whether this row is billed at Auto's own flat rate rather than a model's.
+ *
+ * Bare Auto and Cost mode keep the bundled rate whatever they route to; Balance
+ * and Intelligence bill at the routed model's rate, which is why Cursor names
+ * that model in the row. Shared with discount detection so the two cannot
+ * disagree about which rate card a request belongs to.
+ */
+export function isBundledAuto(model) {
+  const n = normModel(model);
+  return n === 'auto' || n === 'default' || n === 'cursor-auto'
+    || (n.includes('auto') && n.includes('cost'));
+}
+
 export function matchPricing(model, pricing) {
   const n = normModel(model);
   const autoRates = () => (pricing.auto.input != null ? {
@@ -275,10 +313,7 @@ export function matchPricing(model, pricing) {
   // a named Balance/Intelligence row, where the model beside it is the answer.
   // Matching on the word "auto" anywhere used to price every one of them at the
   // bundled rate — roughly half what a routed Grok request really costs.
-  const autoRouted = n.includes('auto');
-  const bundledAuto = n === 'auto' || n === 'default' || n === 'cursor-auto'
-    || (autoRouted && n.includes('cost'));
-  if (bundledAuto) {
+  if (isBundledAuto(model)) {
     const rates = autoRates();
     if (rates) return rates;
   }
@@ -332,7 +367,7 @@ export function matchPricing(model, pricing) {
     };
   }
   // Auto-routed traffic whose model the table cannot name any better.
-  if (autoRouted) return autoRates();
+  if (n.includes('auto')) return autoRates();
   return null;
 }
 
@@ -583,7 +618,16 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     const baseline = baselineFactor(e);
     const list = e.listTokenCost != null ? e.listTokenCost * baseline : null;
     const billed = e.billedTokenCost;
-    if (list != null && billed != null && list >= cfg.minExpectedCost) {
+    // Bare Auto is the one row where Cursor's two figures describe different
+    // rate cards. `totalCents` is what the tokens are worth on the model Auto
+    // routed to; the charge follows Auto's own flat rate, "regardless of which
+    // model is used". Their gap is the Auto bundle's structural saving, not a
+    // promotion — and it moves with the routing rather than with any sale,
+    // which is why it read as a different discount every day (44%, 46%, 48%,
+    // and one day too scattered to call) and put a "Discounted" badge on Auto
+    // permanently. Auto is measured further down instead, against Auto's own
+    // published rate, which is a comparison of like with like.
+    if (list != null && billed != null && list >= cfg.minExpectedCost && !isBundledAuto(e.modelRaw)) {
       diagnostics.considered++;
       const bucketKey = `${n}|${day}`;
       if (!buckets.has(bucketKey)) {
@@ -606,19 +650,13 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       continue;
     }
 
-    // Bare Auto routes to a model Cursor does not name, so its billed value
-    // cannot be checked against any single rate row. Only the fallback below
-    // needs one.
-    //
-    // A Balance or Intelligence row is the opposite case and must not be swept
-    // up with it: Cursor names the model it routed to ("Cursor Grok 4.5 (Auto
-    // Balanced)") precisely because the request was billed at that model's own
-    // rate, and matchPricing already resolves it to that catalog row. Skipping
-    // it on the word "auto" made every routed request permanently undetectable
-    // on an account where Cursor omits tokenUsage.totalCents — the promotion
-    // could be running and nothing here would ever measure it.
-    if (!n || n === 'unknown' || n === 'default' || (n.includes('auto') && !autoRouting(e.modelRaw))) {
-      skip('Auto or unnamed model, and no list value to compare against');
+    // Nothing here is skipped for being Auto any more. Every flavour of it has
+    // a rate row that matchPricing can name — bare Auto and Cost mode price
+    // against Auto's own published rate, Balance and Intelligence against the
+    // model Cursor named in the row — so the check that matters is whether a
+    // rate was found at all, which happens a few lines down.
+    if (!n || n === 'unknown') {
+      skip('unnamed model, and no list value to compare against');
       continue;
     }
 
@@ -754,6 +792,29 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
   }
 
   return { discounts, observed, diagnostics };
+}
+
+/**
+ * What the pricing scrape found, for the log.
+ *
+ * The Auto rate going missing is the one scrape failure with a visible
+ * consequence — every Auto request loses its rates — and from the panel a
+ * built-in rate is indistinguishable from a scraped one. When Auto is missing
+ * this prints the tables the page actually had, which is the only thing that
+ * says whether the row moved, was renamed, or stopped being a table at all.
+ */
+export function describePricingScrape(pricing) {
+  if (!pricing) return 'Pricing: nothing parsed.';
+  if (pricing.fallback) return 'Pricing: nothing parsed from the page — using built-in rates for every model.';
+  const head = `Pricing: ${pricing.models.length} model row(s) parsed`;
+  if (!pricing.autoFallback) return `${head}, Auto rate read from the page.`;
+  const tables = (pricing.tablesSeen || []).map(
+    (t) => `    "${t.heading || '(no heading)'}" [${t.headers.join(' | ')}] ${t.rows} row(s), ${t.priced} priced`,
+  );
+  return [
+    `${head}, but no Auto rate — using the built-in one.`,
+    ...(tables.length ? ['  Tables on the page:', ...tables] : ['  No markdown tables found on the page.']),
+  ].join('\n');
 }
 
 /**

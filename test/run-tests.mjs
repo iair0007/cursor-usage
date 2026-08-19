@@ -35,6 +35,7 @@ const {
   estimateTokenCost,
   cacheSavingsFor,
   describeDiscountRun,
+  describePricingScrape,
   detectDiscounts,
   discountImpact,
   discountPeriods,
@@ -465,9 +466,22 @@ test('sub-cent requests are ignored — rounding moves them more than a promo wo
   assert.deepEqual(discounts, {});
   assert.equal(observed.size, 0);
 });
-test('Auto is skipped — its billed value belongs to a model Cursor does not name', () => {
-  const autos = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelRaw: 'auto' }));
-  assert.deepEqual(detectDiscounts(autos, pricing).discounts, {});
+// Auto is priced from its own published row, which is the comparison of like
+// with like — the rate a request billed as Auto is actually charged at.
+const AUTO_LIST = estimateTokenCost(matchPricing('auto', pricing), GROK_TOKENS);
+
+test('paying exactly the published Auto rate is no discount', () => {
+  const autos = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 1), modelRaw: 'auto', modelTokenCost: AUTO_LIST, listTokenCost: null, billedTokenCost: null }));
+  const { discounts, observed } = detectDiscounts(autos, pricing);
+  assert.deepEqual(discounts, {}, 'the Auto bundle being cheaper than a frontier model is not a sale');
+  assert.ok(observed.has('auto|2026-08-13'), 'measured, and the answer was "no sale"');
+});
+
+test('a real promotion on Auto is still found, against Auto\'s own rate', () => {
+  const autos = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 1), modelRaw: 'auto', modelTokenCost: AUTO_LIST * 0.5, listTokenCost: null, billedTokenCost: null }));
+  assert.equal(detectDiscounts(autos, pricing).discounts.auto['2026-08-13'].pct, 50);
 });
 // An enterprise agreement is a standing reduction on every request, reported
 // on the event as enterpriseUsageDiscountPercent while totalCents stays at
@@ -644,11 +658,17 @@ test('paying exactly the list value is no discount', () => {
   assert.deepEqual(discounts, {});
   assert.ok(observed.has('cursor-grok-4-6-high|2026-08-13'), 'measured, and the answer was no');
 });
-test('Auto is measurable this way — no rate row is needed', () => {
-  // The rate table can never price Auto, since Cursor does not say what it
-  // routed to. Its own two figures do not care.
-  const { discounts } = detectDiscounts([exactEvent(0, 0.5, 0.25, '2026-08-13', 'auto')], pricing);
-  assert.equal(discounts.auto['2026-08-13'].pct, 50);
+test("Auto's own two figures are not comparable, so they are not compared", () => {
+  // For bare Auto they describe different rate cards: totalCents is what the
+  // tokens are worth on whatever model Auto routed to, while the charge follows
+  // Auto's flat rate "regardless of which model is used". Their gap is the Auto
+  // bundle's structural saving, and reading it as a sale badged Auto
+  // "Discounted" every day at a different percentage.
+  const { discounts } = detectDiscounts(
+    [0, 1, 2, 3].map((i) => exactEvent(i, 0.5, 0.25, '2026-08-13', 'auto')),
+    pricing,
+  );
+  assert.deepEqual(discounts, {}, 'a routed-model list value proves nothing about Auto');
 });
 test('the measured figure wins over anything the rate table would have said', () => {
   // Rates here would price these tokens at nothing like $0.86, and it does not
@@ -3746,6 +3766,54 @@ console.log('\none card per lesson');
     const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
     const fn = brief.slice(brief.indexOf('function findingsBlock'), brief.indexOf('function ratesBlock'));
     assert.match(fn, /dedupeFindings\(findings\)/);
+  });
+}
+
+console.log('\nthe Auto rate, and saying which one is on screen');
+{
+  const MODELS_MD = ['## Model pricing', '',
+    '| Model | Input | Cache write | Cache read | Output |',
+    '| :--- | :--- | :--- | :--- | :--- |',
+    '| Claude 4.5 Sonnet | $3.00 | $3.75 | $0.30 | $15.00 |', ''].join('\n');
+  const withAuto = (rowName) => parsePricing(['## Auto Cost', '',
+    '| Name | Input | Cache Write | Cache Read | Output |',
+    '| :--- | :--- | :--- | :--- | :--- |',
+    `| ${rowName} | $1.25 | $1.25 | $0.25 | $6 |`, '', MODELS_MD].join('\n'));
+
+  test('the published Auto row is read, including a whole-dollar rate', () => {
+    const p = withAuto('Auto Cost');
+    assert.deepEqual(p.auto, { input: 1.25, cacheWrite: 1.25, cacheRead: 0.25, output: 6 });
+    assert.equal(p.autoFallback, false, 'this is a scrape, not the built-in rate');
+  });
+
+  test('an Auto row named for what it prices is still found by its heading', () => {
+    // "All models", "Any model" — the row need not carry the word Auto when the
+    // section above it does, and it is the only priced row there.
+    const p = withAuto('All models');
+    assert.equal(p.auto.input, 1.25);
+    assert.equal(p.autoFallback, false);
+  });
+
+  test('a model whose own name contains "auto" never stands in for the bundle', () => {
+    const p = parsePricing(['## Model pricing', '',
+      '| Model | Input | Cache write | Cache read | Output |',
+      '| :--- | :--- | :--- | :--- | :--- |',
+      '| Autocoder 2 | $3.00 | $3.75 | $0.30 | $15.00 |',
+      '| Claude 4.5 Sonnet | $3.00 | $3.75 | $0.30 | $15.00 |'].join('\n'));
+    assert.equal(p.autoFallback, true, 'two priced rows in that section — not an Auto table');
+  });
+
+  test('when the Auto rate is missing, the log says what the page did have', () => {
+    const p = parsePricing(['## Auto Cost', '', '<AutoPricingTable />', '', MODELS_MD].join('\n'));
+    assert.equal(p.autoFallback, true);
+    const said = describePricingScrape(p);
+    assert.match(said, /no Auto rate — using the built-in one/);
+    assert.match(said, /Model pricing/, 'the tables it did find are the whole point of the line');
+    assert.match(said, /Model \| Input/, 'with their headers, so a renamed column is visible');
+  });
+
+  test('a healthy scrape says so in one line', () => {
+    assert.match(describePricingScrape(withAuto('Auto Cost')), /Auto rate read from the page/);
   });
 }
 

@@ -1762,6 +1762,25 @@ function sessionLabel(id) {
 }
 
 /**
+ * The conversation a request belongs to, as a link into its session.
+ *
+ * Shared by the request log and Analyze's expensive-request table: the same
+ * question ("where did this come from?") gets the same answer and the same
+ * affordance in both, and a name that resolves late resolves in both at once.
+ */
+function sessionCellFor(sessionId) {
+  if (!sessionId) {
+    return '<span class="session-none" title="The usage API reported no conversation for this request">—</span>';
+  }
+  // Same label the session list uses: an unnamed conversation is shortened
+  // rather than printed in full, so one column doesn't read as a 24-character
+  // id while the other reads as "conv_0000…0023".
+  const label = sessionLabel(sessionId);
+  return `<button type="button" class="btn-link session-link${label.isId ? ' is-id' : ''}"
+      data-session="${esc(sessionId)}" title="${esc(sessionId)}">${esc(label.text)}</button>`;
+}
+
+/**
  * Asks the extension host to name the conversations on screen.
  *
  * Only for ids we haven't already resolved or asked about, and only for what's
@@ -3368,11 +3387,7 @@ function renderTable(events, summary) {
     // Same label the session list uses: an unnamed conversation is shortened
     // rather than printed in full, so one column doesn't read as a 24-character
     // id while the other reads as "conv_0000…0023".
-    const label = sessionId ? sessionLabel(sessionId) : null;
-    const sessionCell = sessionId
-      ? `<button type="button" class="btn-link session-link${label.isId ? ' is-id' : ''}"
-          data-session="${esc(sessionId)}" title="${esc(sessionId)}">${esc(label.text)}</button>`
-      : '<span class="session-none" title="The usage API reported no conversation for this request">—</span>';
+    const sessionCell = sessionCellFor(sessionId);
     const open = state.expandedRequests.has(e.id);
     const kind = classifyRequest(e, state.analyzeThresholds);
     // A compaction is not a request the user made, and it is the one row people
@@ -4450,18 +4465,23 @@ function renderAnalyzeExpensivePanel(expensive) {
     <tr>
       <td>${fmt.date(e.timestampMs)}</td>
       <td>${esc(e.model)}${discountBadge(discountForEvent(e.modelRaw, e.timestampMs))}</td>
+      <td class="session-cell">${sessionCellFor(e.conversationId || null)}</td>
       <td class="num">${fmt.money(e.cost)}</td>
       <td class="num">${fmt.num(e.cacheReadTokens)}</td>
       <td class="num">${fmt.num(e.totalTokens)}</td>
       <td><button type="button" class="btn-link btn-compare" data-id="${esc(e.id)}">Compare</button></td>
     </tr>`).join('');
+  // The names come from a local database, so they arrive after the first paint
+  // — the same lookup the request log does, for the ids this table shows.
+  void loadSessionTitles(expensive.map((e) => e.conversationId).filter(Boolean));
 
   $('analyzeExpensivePanel').innerHTML = `
     <h3>Most expensive requests</h3>
-    <p class="panel-desc">Open Simulator to replay token profile against other models</p>
+    <p class="panel-desc">Open a session to see what the request was part of, or Simulator to replay
+      its token profile against other models</p>
     <table class="analyze-table">
-      <thead><tr><th>Time</th><th>Model</th><th class="num">Cost</th><th class="num">Cache read</th><th class="num">Total tok</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6">No cost data</td></tr>'}</tbody>
+      <thead><tr><th>Time</th><th>Model</th><th>Session</th><th class="num">Cost</th><th class="num">Cache read</th><th class="num">Total tok</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7">No cost data</td></tr>'}</tbody>
     </table>`;
 }
 
@@ -5831,11 +5851,10 @@ async function init() {
       openCompare(compare.dataset.id);
       return;
     }
-    const session = ev.target.closest('.session-link');
-    if (session) {
-      openSessionDetail(session.dataset.session);
-      return;
-    }
+    // A session link opens the dialog through the delegated handler further
+    // down, which serves every table that renders one. Here it only has to not
+    // *also* toggle the row open behind the dialog.
+    if (ev.target.closest('.session-link')) return;
     // Anywhere else on the row opens the breakdown — the disclosure arrow is
     // the affordance, but a whole row is a much easier target than a glyph.
     const row = ev.target.closest('tr[data-request]');
@@ -5862,7 +5881,7 @@ async function init() {
       jumpToRequest(toRequest.dataset.request);
       return;
     }
-    const toSession = ev.target.closest('.finding-session, .session-open');
+    const toSession = ev.target.closest('.finding-session, .session-open, .session-link');
     if (toSession) openSessionDetail(toSession.dataset.session);
   });
 

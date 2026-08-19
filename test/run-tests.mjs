@@ -3769,6 +3769,51 @@ console.log('\none card per lesson');
   });
 }
 
+console.log('\ngetting from an expensive request to its session');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+
+  test('the expensive-request table carries the session it came from', () => {
+    const fn = main.slice(main.indexOf('function renderAnalyzeExpensivePanel'),
+      main.indexOf('function renderThresholdInputs'));
+    assert.match(fn, /sessionCellFor\(e\.conversationId \|\| null\)/);
+    assert.match(fn, /<th>Session<\/th>/);
+    // Seven columns now, and the empty-state row has to span all of them or it
+    // sits under one header instead of the table.
+    assert.equal((fn.match(/<th[ >]/g) || []).length, 7, '<thead> is not a column');
+    assert.match(fn, /colspan="7"/);
+  });
+
+  test('the names are fetched for this table too, not just the request log', () => {
+    // They come from a local database and arrive after the first paint; without
+    // this every row reads as a raw conversation id.
+    const fn = main.slice(main.indexOf('function renderAnalyzeExpensivePanel'),
+      main.indexOf('function renderThresholdInputs'));
+    assert.match(fn, /loadSessionTitles\(expensive\.map/);
+  });
+
+  test('both tables build the cell the same way', () => {
+    // One helper, so the log and Analyze cannot drift into different labels or
+    // a different affordance for the same question.
+    assert.equal((main.match(/class="btn-link session-link/g) || []).length, 1,
+      'the markup lives in sessionCellFor and nowhere else');
+    assert.equal((main.match(/sessionCellFor\(/g) || []).length, 3, 'defined once, called from both tables');
+  });
+
+  test('a session link opens the dialog from wherever it is rendered', () => {
+    assert.match(main, /\.finding-session, \.session-open, \.session-link/);
+  });
+
+  test('clicking one in the log opens the session without also toggling the row', () => {
+    // Two listeners see the click. The row handler has to bow out, and it must
+    // not open the dialog itself or the delegated handler opens it twice.
+    const fn = main.slice(main.indexOf("$('tableBody')?.addEventListener"), main.indexOf('// Findings carry their own links'));
+    assert.match(fn, /if \(ev\.target\.closest\('\.session-link'\)\) return;/);
+    assert.ok(!/closest\('\.session-link'\)[\s\S]{0,120}openSessionDetail/.test(fn),
+      'the row handler must not open the dialog as well');
+  });
+}
+
 console.log('\nthe Auto rate, and saying which one is on screen');
 {
   const MODELS_MD = ['## Model pricing', '',

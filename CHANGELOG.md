@@ -5,6 +5,12 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.8.0 — 2026-08-17
 
+- Analyze's most-expensive-requests table names the session each request came
+  from, and the name opens it. A dollar figure against a model and a timestamp
+  says what a request cost but nothing about what it was for; the conversation
+  behind it is the context that makes the number worth acting on. Same cell and
+  same label as the request log — one helper builds both — so a name that
+  resolves late resolves in both at once.
 - **Auto is no longer badged "Discounted" for being Auto.** Cursor reports two
   figures per request, and for bare Auto they describe different rate cards: the
   token value is what those tokens are worth on whatever model Auto routed to,

@@ -3754,64 +3754,86 @@ console.log('\nan omitted bucket is not a zero');
   const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
   const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
   const api = readFileSync(path.join(here, '..', 'src/api.ts'), 'utf8');
-  // The top-level fixture table; these tests are about presence, not rates.
   const raw = (tokenUsage) => ({
     id: 'r1', timestamp: Date.now(), model: 'claude-sonnet-5-thinking-medium',
     isTokenBasedCall: true, chargedCents: 12, tokenUsage,
   });
 
-  test('a payload carrying the count is reported, zero or not', () => {
+  test('a payload carrying a count is reported, zero or not', () => {
     for (const n of [30806, 0]) {
-      const e = normalize(raw({ inputTokens: 10, cacheWriteTokens: n, cacheWriteReported: true }), pricing);
-      assert.equal(e.cacheWriteReported, true, `cacheWriteTokens: ${n} is a measurement`);
+      const e = normalize(raw({ inputTokens: 10, cacheWriteTokens: n, unreportedBuckets: [] }), pricing);
+      assert.deepEqual(e.unreportedBuckets, [], `cacheWriteTokens: ${n} is a measurement`);
       assert.equal(e.cacheWriteTokens, n);
     }
   });
 
-  test('a payload without the count is marked unreported, and still counts as 0', () => {
-    const e = normalize(raw({ inputTokens: 10, cacheWriteReported: false }), pricing);
-    assert.equal(e.cacheWriteReported, false);
-    assert.equal(e.cacheWriteTokens, 0, 'arithmetic still needs a number');
+  test('a bucket with no count is listed, and still counts as 0 for arithmetic', () => {
+    const e = normalize(raw({ inputTokens: 10, unreportedBuckets: ['cacheWrite'] }), pricing);
+    assert.deepEqual(e.unreportedBuckets, ['cacheWrite']);
+    assert.equal(e.cacheWriteTokens, 0, 'the sums still need a number');
   });
 
-  test('an event from before the flag existed is treated as reported', () => {
+  test('an event from before the flag existed is treated as fully reported', () => {
     const e = normalize(raw({ inputTokens: 10, cacheWriteTokens: 5 }), pricing);
-    assert.equal(e.cacheWriteReported, true);
+    assert.deepEqual(e.unreportedBuckets, []);
   });
 
-  test('the API records presence separately from value', () => {
-    const fn = api.slice(api.indexOf('function hasToken'), api.indexOf('let loggedTokenShape'));
-    assert.match(fn, /!== undefined/);
-    assert.match(api, /cacheWriteReported: hasToken\(/);
+  test('presence is computed for every bucket, not just the one that broke', () => {
+    // Which field an upstream change drops next is not worth predicting.
+    const fn = api.slice(api.indexOf('const TOKEN_ALIASES'), api.indexOf('function unreportedOf'));
+    for (const bucket of ['input:', 'output:', 'cacheRead:', 'cacheWrite:']) {
+      assert.ok(fn.includes(bucket), `${bucket} needs an alias list of its own`);
+    }
+    assert.match(api, /unreportedBuckets: unreportedOf\(tu\)/);
   });
 
-  test('a range is only unknown when every request in it lacks the count', () => {
-    const fn = main.slice(main.indexOf('function cacheWriteUnreported'), main.indexOf('/** A finding marker'));
-    assert.match(fn, /\.every\(/, 'one reporting request makes the total real, if partial');
-    assert.match(fn, /list\.length > 0/, 'an empty list is not "unreported"');
+  test('a bucket is unknown only when every request in view omitted it', () => {
+    const fn = main.slice(main.indexOf('function unreportedBuckets'), main.indexOf('const BUCKET_TOKEN_FIELD'));
+    assert.match(fn, /shared\.delete\(key\)/, 'one reporting request makes the total real, if partial');
+    assert.match(fn, /if \(!list\.length\) return new Set\(\)/, 'an empty list is not "unknown"');
   });
 
-  test('the request log prints a dash rather than a zero nobody measured', () => {
-    assert.match(main, /e\.cacheWriteReported === false \? UNREPORTED : fmt\.num\(e\.cacheWriteTokens\)/);
+  test('every token cell in the log can show a dash', () => {
+    for (const bucket of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+      assert.ok(main.includes(`tokenCell(e, '${bucket}')`), `${bucket} goes through tokenCell`);
+    }
+    const fn = main.slice(main.indexOf('function tokenCell'), main.indexOf('function insightBadge'));
+    assert.match(fn, /missing \? UNREPORTED : fmt\.num/);
   });
 
-  test('the cost breakdown gives the row no dollar figure and says why', () => {
+  test('the cost breakdown drops the figure for any missing bucket and says which', () => {
     const fn = main.slice(main.indexOf('function renderBreakdown'), main.indexOf('/** Moves the user to a request'));
+    assert.match(fn, /const missing = unreported\.has\(key\)/, 'any bucket, not one hardcoded');
     assert.match(fn, /missing \? UNREPORTED : moneyFine/);
     assert.match(fn, /missing \? UNREPORTED : fmt\.pct/);
-    assert.match(fn, /stopped reporting cache-write tokens/);
+    assert.match(fn, /Cursor sent no \$\{\[\.\.\.unreported\]/, 'the note names what is actually missing');
   });
 
-  test('the CSV leaves the cell empty instead of writing 0', () => {
-    const fn = main.slice(main.indexOf('function exportCsv'), main.indexOf('function csvText') > 0
-      ? main.indexOf('function csvText') : main.length);
-    assert.match(fn, /cacheWriteReported === false \? '' : e\.cacheWriteTokens/);
+  test('no user-facing copy dates or explains the outage', () => {
+    // It may come back, and the next gap may be a different bucket for a
+    // different reason. The interface describes the payload in front of it;
+    // when it broke belongs in the changelog.
+    for (const [name, src] of [['main.js', main], ['brief.js', brief]]) {
+      const copy = src.split('\n').filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'));
+      assert.ok(!/August 2026/.test(copy.join('\n')), `${name} must not date the outage in user-facing text`);
+      assert.ok(!/stopped reporting|no longer says/.test(copy.join('\n')),
+        `${name} must not narrate a cause that may not hold next time`);
+    }
   });
 
-  test('the brief says absent rather than zero, so the model cannot misread it', () => {
-    assert.match(brief, /not reported by Cursor/);
+  test('the CSV leaves any missing count blank instead of writing 0', () => {
+    const fn = main.slice(main.indexOf('function csvToken'), main.indexOf('function exportCsv'));
+    assert.match(fn, /includes\(bucket\) \? '' :/);
+    for (const bucket of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+      assert.ok(main.includes(`csvToken(e, '${bucket}')`), `${bucket} goes through csvToken`);
+    }
+  });
+
+  test('the brief says absent in words, so the model cannot reason from a zero', () => {
+    assert.match(brief, /not reported by Cursor \(unknown, not zero\)/);
+    assert.match(main, /not reported by Cursor \(unknown, not zero\)/);
     // "rewrote not reported by Cursor tokens to cache" is not a sentence.
-    assert.match(brief, /cacheWriteReported\(event\)\s*\n?\s*\?/, 'the idle-resume clause is dropped, not filled');
+    assert.match(brief, /reported\(event, 'cacheWrite'\)/, 'the idle-resume clause is dropped, not filled');
   });
 }
 

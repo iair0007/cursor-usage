@@ -5,18 +5,19 @@ All notable user-facing changes. Earlier releases predate this file; see the
 
 ## 0.8.0 — 2026-08-17
 
-- **A cache-write count Cursor never sent now reads "unknown", not 0.** Cursor
-  stopped including `cacheWriteTokens` in its usage events in August 2026 —
-  cache *reads* keep arriving, and a cache cannot be read unless it was written,
-  so those tokens are real and simply unreported. The dashboard was printing
-  `0` and `$0.0000` for them, which claims a measurement nobody made. Presence
-  is now tracked separately from value: the request log shows a dash, the cost
-  breakdown gives the row no dollar figure and says why, the CSV leaves the cell
+- **A token count Cursor never sent now reads "unknown", not 0.** An omitted
+  bucket and a measured zero arrive identically, and the dashboard was printing
+  `0` and `$0.0000` for both — claiming a measurement nobody made. Presence is
+  now tracked separately from value, for all four buckets rather than the one
+  that prompted it: the request log shows a dash, the cost breakdown gives the
+  row no dollar figure and names which count is missing, the CSV leaves the cell
   empty rather than writing a zero, and the brief handed to Cursor Chat says
-  "not reported by Cursor" so the model cannot reason from it. A range is only
-  marked unknown when every request in it lacks the count — one reporting
-  request makes the total real, if partial — and an account still receiving the
-  field is unaffected.
+  "not reported by Cursor (unknown, not zero)" so the model cannot reason from
+  it. A bucket is only marked unknown when every request in view omitted it —
+  one reporting request keeps the total real, if partial — and nothing in the
+  interface names a date or a cause, so a count that starts arriving again
+  simply stops being flagged. (What prompted this: Cursor stopped sending
+  `cacheWriteTokens` around 13 August 2026, while cache *reads* kept coming.)
 - **Promotions are measured against what your account actually pays.** Cursor
   reports a standing enterprise reduction on each event while the list value
   stays gross, so every model on such an account looked permanently discounted

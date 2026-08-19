@@ -1081,7 +1081,11 @@ export function normalize(raw, pricing, opts = {}) {
   // measured zero must not print the same figure, so the distinction travels
   // with the event. Absent flag means reported: every fixture and every older
   // payload carried the count.
-  const cacheWriteReported = tu.cacheWriteReported !== false;
+  // Which token buckets arrived with no count at all. An omitted bucket and a
+  // measured zero both read 0 here, and the difference is the whole point:
+  // one is a measurement, the other is its absence. Empty for any payload that
+  // carried every count, which is every fixture and every older event.
+  const unreportedBuckets = Array.isArray(tu.unreportedBuckets) ? [...tu.unreportedBuckets] : [];
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
 
   const isTokenBased = Boolean(raw.isTokenBasedCall);
@@ -1171,7 +1175,7 @@ export function normalize(raw, pricing, opts = {}) {
     billingRegime,
     planMeteredCost,
     baselineDiscountPct,
-    cacheWriteReported,
+    unreportedBuckets,
     cacheSavings,
     noCacheCost,
     pricingLabel: rates?.label || null,

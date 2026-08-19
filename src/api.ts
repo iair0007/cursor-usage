@@ -24,8 +24,11 @@ export interface RawUsageEvent {
     outputTokens?: number;
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
-    /** False when the payload carried no cache-write count at all — see hasToken. */
-    cacheWriteReported?: boolean;
+    /**
+     * Bucket names ('input' | 'output' | 'cacheRead' | 'cacheWrite') the
+     * payload carried no count for at all — see unreportedOf.
+     */
+    unreportedBuckets?: string[];
     totalCents?: number;
     /**
      * A standing per-account reduction (enterprise agreement), as a percentage.
@@ -154,18 +157,32 @@ function pickTokens(tu: any, ...names: string[]): number {
 }
 
 /**
- * Whether the payload carried this count at all, under any of its spellings.
+ * The token buckets this payload carried no count for, under any spelling.
  *
  * A bucket Cursor omits and a bucket Cursor reports as 0 both arrive here as
  * 0, and the dashboard cannot honestly show the same figure for both: one is a
- * measurement, the other is the absence of one. Cursor stopped sending
- * `cacheWriteTokens` in August 2026 — cache *reads* kept coming, and a cache
- * cannot be read unless it was written — so the tokens are real and simply
- * unreported. Carried through so the UI can say so instead of printing a zero
- * nobody measured.
+ * measurement, the other is the absence of one.
+ *
+ * Deliberately computed for all four rather than the one bucket that prompted
+ * it (cache write went missing in August 2026, while cache reads kept coming).
+ * Which field an upstream change drops next is not something worth predicting,
+ * and a rule that covers every bucket needs no revisiting when the next one
+ * goes — or when this one comes back.
  */
-function hasToken(tu: any, ...names: string[]): boolean {
-  return names.some((name) => tu?.[name] !== undefined);
+const TOKEN_ALIASES: Record<string, string[]> = {
+  input: ['inputTokens', 'input_tokens'],
+  output: ['outputTokens', 'output_tokens'],
+  cacheRead: ['cacheReadTokens', 'cache_read_tokens', 'cacheReadInputTokens'],
+  cacheWrite: [
+    'cacheWriteTokens', 'cache_write_tokens',
+    'cacheCreationInputTokens', 'cache_creation_input_tokens',
+  ],
+};
+
+function unreportedOf(tu: any): string[] {
+  return Object.entries(TOKEN_ALIASES)
+    .filter(([, names]) => !names.some((name) => tu?.[name] !== undefined))
+    .map(([bucket]) => bucket);
 }
 
 /**
@@ -203,17 +220,11 @@ export function toRawEvent(e: any): RawUsageEvent {
     cursorTokenFee: num(e.cursorTokenFee ?? tu?.cursorTokenFee),
     tokenUsage: tu
       ? {
-          inputTokens: pickTokens(tu, 'inputTokens', 'input_tokens'),
-          outputTokens: pickTokens(tu, 'outputTokens', 'output_tokens'),
-          cacheReadTokens: pickTokens(tu, 'cacheReadTokens', 'cache_read_tokens', 'cacheReadInputTokens'),
-          cacheWriteTokens: pickTokens(
-            tu, 'cacheWriteTokens', 'cache_write_tokens',
-            'cacheCreationInputTokens', 'cache_creation_input_tokens',
-          ),
-          cacheWriteReported: hasToken(
-            tu, 'cacheWriteTokens', 'cache_write_tokens',
-            'cacheCreationInputTokens', 'cache_creation_input_tokens',
-          ),
+          inputTokens: pickTokens(tu, ...TOKEN_ALIASES.input),
+          outputTokens: pickTokens(tu, ...TOKEN_ALIASES.output),
+          cacheReadTokens: pickTokens(tu, ...TOKEN_ALIASES.cacheRead),
+          cacheWriteTokens: pickTokens(tu, ...TOKEN_ALIASES.cacheWrite),
+          unreportedBuckets: unreportedOf(tu),
           totalCents: num(tu.totalCents) ?? undefined,
           enterpriseUsageDiscountPercent: tu.enterpriseUsageDiscountPercent !== undefined
             ? num(tu.enterpriseUsageDiscountPercent) ?? undefined

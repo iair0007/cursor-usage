@@ -280,7 +280,7 @@ export function briefEvents(events, findings, { classify, breakdownOf, formatTim
       // The re-cache size is the point of this line, so when Cursor did not
       // report it the clause is dropped rather than filled with a placeholder
       // that would read as a quantity.
-      const rewrote = cacheWriteReported(event)
+      const rewrote = reported(event, 'cacheWrite')
         ? ` and rewrote ${tok(event.cacheWriteTokens)} tokens to cache`
         : '';
       out.push({
@@ -337,13 +337,21 @@ export function briefEvents(events, findings, { classify, breakdownOf, formatTim
  * by a model that will happily reason from "cache write 0" to "this session
  * cached nothing" — so where the count is absent, say absent.
  */
-function cacheWriteReported(events) {
+/**
+ * Whether Cursor sent a count for this bucket on every request in view.
+ *
+ * The brief is read by a model, and a model handed "cache write 0" will reason
+ * from it — "this session cached nothing" — so a bucket Cursor omitted has to
+ * say absent, in words. Named by bucket rather than hardcoded to cache write:
+ * which count goes missing is not worth predicting.
+ */
+function reported(events, bucket) {
   const list = Array.isArray(events) ? events : [events];
-  return !list.length || !list.every((e) => e && e.cacheWriteReported === false);
+  return !list.length || !list.every((e) => (e?.unreportedBuckets || []).includes(bucket));
 }
 
-function writeCount(events, value, count) {
-  return cacheWriteReported(events) ? count(value) : 'not reported by Cursor';
+function writeCount(events, bucket, value, count) {
+  return reported(events, bucket) ? count(value) : 'not reported by Cursor (unknown, not zero)';
 }
 
 function findingsBlock(findings, cap = FINDING_CAP) {
@@ -497,9 +505,10 @@ export function buildSessionBrief({
   const rates = ratesBlock(events, ratesOf);
   if (rates) identity.push(rates);
   identity.push(
-    `- Tokens: in ${count(totals.inputTokens)} · out ${count(totals.outputTokens)}`
-      + ` · cache read ${count(totals.cacheReadTokens)}`
-      + ` · cache write ${writeCount(events, totals.cacheWriteTokens, count)}`,
+    `- Tokens: in ${writeCount(events, 'input', totals.inputTokens, count)}`
+      + ` · out ${writeCount(events, 'output', totals.outputTokens, count)}`
+      + ` · cache read ${writeCount(events, 'cacheRead', totals.cacheReadTokens, count)}`
+      + ` · cache write ${writeCount(events, 'cacheWrite', totals.cacheWriteTokens, count)}`,
   );
   if (metrics.cacheHitRate != null) {
     identity.push(`- ${pct(metrics.cacheHitRate)} of tokens served from cache`
@@ -612,9 +621,10 @@ export function buildRequestBrief({
     '## The request',
     `- ${time(event.timestampMs)} · ${event.model} · ${money(event.cost ?? 0)} `
       + `${session.costBasis || 'billed by the plan'}`,
-    `- Tokens: in ${count(event.inputTokens)} · out ${count(event.outputTokens)}`
-      + ` · cache read ${count(event.cacheReadTokens)}`
-      + ` · cache write ${writeCount(event, event.cacheWriteTokens, count)}`,
+    `- Tokens: in ${writeCount(event, 'input', event.inputTokens, count)}`
+      + ` · out ${writeCount(event, 'output', event.outputTokens, count)}`
+      + ` · cache read ${writeCount(event, 'cacheRead', event.cacheReadTokens, count)}`
+      + ` · cache write ${writeCount(event, 'cacheWrite', event.cacheWriteTokens, count)}`,
   ];
   if (breakdown && breakdown.total > 0) own.push(`- Cost split: ${splitLine(breakdown)}`);
   own.push(`- Shape: ${shape}`);

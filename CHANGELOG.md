@@ -3,11 +3,11 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
-## Unreleased
+## 0.8.0 — 2026-08-20
 
-A full review pass over the browser-dashboard branch. Everything below rendered
-or read wrongly without ever throwing, which is why nothing in the suite caught
-any of it; each fix carries a regression test.
+A full review pass over this release before publishing it. Everything below
+rendered or read wrongly without ever throwing, which is why nothing in the
+suite caught any of it; each fix carries a regression test.
 
 - **The banner explaining how your plan bills now appears when you open the
   request log.** It was drawn only as a tail of the KPI render, and switching to
@@ -50,7 +50,7 @@ any of it; each fix carries a regression test.
   readonly brief previews are named too, instead of reading as an anonymous
   multi-line text field.
 
-## 0.8.0 — 2026-08-17
+### Browser dashboard, sessions, and everything else new in this release
 
 - Three fixes to the session comparison's model table. A long model name plus a
   discount badge overflowed the fixed-width label column and ran over the figure

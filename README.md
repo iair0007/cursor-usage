@@ -209,7 +209,7 @@ npm run watch     # rebuild on change
 npm run package   # build a local .vsix (Extensions: Install from VSIX…)
 ```
 
-Layout: `src/extension.ts` (activation), `src/auth.ts` + `src/authCore.ts` (session resolution), `src/api.ts` (cursor.com client), `src/service.ts` (shared data layer), `src/panel.ts` + `src/html.ts` (webview + RPC bridge), `src/statusBar.ts`, `src/webview/` (dashboard UI).
+Layout: `src/extension.ts` (activation), `src/auth.ts` + `src/authCore.ts` (session resolution), `src/api.ts` (cursor.com client), `src/service.ts` (shared data layer), `src/conversations.ts` (session names, read locally from Cursor's own database), `src/panel.ts` + `src/html.ts` (webview markup), `src/rpcDispatcher.ts` (the RPC methods both transports serve), `src/browserServer.ts` (the loopback HTTP server behind "Open in Browser"), `src/statusBar.ts`, `src/webview/` (dashboard UI: `main.js` the app, `logic.js` pricing/session math, `insights.js` the findings engine, `brief.js` the Cursor Chat briefs).
 
 Releases are automated: bumping `version` in `package.json` on `main` triggers the [publish workflow](https://github.com/iair0007/cursor-usage/blob/main/.github/workflows/publish.yml), which builds the `.vsix` and publishes it to Open VSX.
 

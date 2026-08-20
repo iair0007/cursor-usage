@@ -4134,6 +4134,29 @@ console.log('\nthe review pass over the dashboard chrome');
       'and refresh() is the one place that sets it');
   });
 
+  test('every modal says what it is, and the preview fields have a name', () => {
+    // A <dialog> opened with showModal() takes its accessible name from
+    // aria-labelledby and nothing else, so all three announced as bare
+    // "dialog". The heading ids they point at were already in the markup —
+    // sessionsDialogTitle had been sitting there unreferenced by anything.
+    for (const [dialog, heading] of [
+      ['sessionsDialog', 'sessionsDialogTitle'],
+      ['sessionDetailDialog', 'sessionDetailTitle'],
+      ['askCursorDialog', 'askTitle'],
+    ]) {
+      const open = html.slice(html.indexOf(`<dialog id="${dialog}"`));
+      assert.match(open.slice(0, open.indexOf('>') + 1), new RegExp(`aria-labelledby="${heading}"`),
+        `${dialog} must name itself`);
+      assert.ok(html.includes(`id="${heading}"`), `${heading} must exist to be named by`);
+    }
+    // Both brief previews are readonly textareas whose only label was the
+    // <summary> of the <details> around them.
+    for (const id of ['analyzeBriefPreview', 'askPreview']) {
+      const el = html.slice(html.indexOf(`<textarea id="${id}"`));
+      assert.match(el.slice(0, el.indexOf('>') + 1), /aria-label=/, `${id} needs an accessible name`);
+    }
+  });
+
   test('a comparison row of zeroes earns its place the way the errored row does', () => {
     const fn = main.slice(main.indexOf('function sessionMetricDefs'), main.indexOf('function sessionCompareContext'));
     const cold = fn.slice(fn.indexOf("label: 'Cold starts'"));

@@ -43,6 +43,12 @@ any of it; each fix carries a regression test.
   Overview, the Analyze tab and the brief all share is computed once per load.
   The request log likewise reuses the summary rather than re-deriving it every
   time a row is expanded.
+- Screen readers get told what each dialog is. All three modals announced as a
+  bare "dialog" — a `<dialog>` opened with `showModal()` takes its name from
+  `aria-labelledby` and nothing else — and the heading ids they now point at
+  were already in the markup, one of them referenced by nothing at all. The two
+  readonly brief previews are named too, instead of reading as an anonymous
+  multi-line text field.
 
 ## 0.8.0 — 2026-08-17
 

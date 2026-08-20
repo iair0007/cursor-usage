@@ -3,6 +3,306 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## 0.8.0 — 2026-08-17
+
+- Three fixes to the session comparison's model table. A long model name plus a
+  discount badge overflowed the fixed-width label column and ran over the figure
+  in the next column — badges now wrap below the name when it has taken the
+  width, the name clips rather than breaking mid-identifier, and the column is
+  wide enough for the longest name Cursor actually bills under, so the reasoning
+  effort is no longer the part that falls off the end. A model only one session
+  used showed "$0.00 · 0 req" against the session that never ran it, which reads
+  as "used it and it came to nothing"; it now shows a dash, as the three-session
+  matrix always has, and drops the "−100%" that said nothing the "only in B" tag
+  did not. And the last column is named "Difference / A against B" instead of
+  "Change" — two sessions have no inherent order, so an unqualified "Change"
+  left the sign meaning whichever direction the reader assumed. Period
+  comparisons, which do have a direction, are unchanged.
+- Analyze's most-expensive-requests table names the session each request came
+  from, and the name opens it. A dollar figure against a model and a timestamp
+  says what a request cost but nothing about what it was for; the conversation
+  behind it is the context that makes the number worth acting on. Same cell and
+  same label as the request log — one helper builds both — so a name that
+  resolves late resolves in both at once.
+- **Auto is no longer badged "Discounted" for being Auto.** Cursor reports two
+  figures per request, and for bare Auto they describe different rate cards: the
+  token value is what those tokens are worth on whatever model Auto routed to,
+  while the charge follows Auto's own flat rate, "regardless of which model is
+  used". Reading the gap as a promotion put a permanent discount badge on Auto
+  at a different size every day (44%, 46%, 48%, and one day too scattered to
+  call) — it was tracking the routing, not a sale. Auto is now measured against
+  Auto's own published rate, which is a comparison of like with like: on a
+  sample of 13 real Auto requests it comes out at 0% off, matching the charge to
+  the published rate exactly. A genuine promotion on Auto is still detected.
+- The Auto rate is found on the pricing page in more shapes — including a row
+  named for what it prices ("All models") under an Auto heading — and when it
+  still isn't found, the log now lists the tables the page did have, with their
+  headers. A built-in Auto rate is indistinguishable from a scraped one on
+  screen, so the only way to tell whether the row moved, was renamed, or stopped
+  being a table was to look at the page.
+- **A token count Cursor never sent now reads "unknown", not 0.** An omitted
+  bucket and a measured zero arrive identically, and the dashboard was printing
+  `0` and `$0.0000` for both — claiming a measurement nobody made. Presence is
+  now tracked separately from value, for all four buckets rather than the one
+  that prompted it: the request log shows a dash, the cost breakdown gives the
+  row no dollar figure and names which count is missing, the CSV leaves the cell
+  empty rather than writing a zero, and the brief handed to Cursor Chat says
+  "not reported by Cursor (unknown, not zero)" so the model cannot reason from
+  it. A bucket is only marked unknown when every request in view omitted it —
+  one reporting request keeps the total real, if partial — and nothing in the
+  interface names a date or a cause, so a count that starts arriving again
+  simply stops being flagged. (What prompted this: Cursor stopped sending
+  `cacheWriteTokens` around 13 August 2026, while cache *reads* kept coming.)
+- **Promotions are measured against what your account actually pays.** Cursor
+  reports a standing enterprise reduction on each event while the list value
+  stays gross, so every model on such an account looked permanently discounted
+  by that amount — a 7% agreement sat a hair under the 8% promotion floor, and
+  pushed every real sale that much deeper: a 33% sale was reported as 37.7%, a
+  50% one as 53.5%. Detection now subtracts the agreement first, so the figure
+  matches what Cursor's own usage page shows. Accounts without an agreement are
+  measured exactly as before.
+- Removed the tokens-per-request row from the session timeline. Cost is very
+  nearly a linear function of tokens sent (r = 0.99 on real usage), so it drew
+  the same shape as the plot above it, and the stacked cost bar already shows
+  which bucket the tokens landed in. It also could not do the job it was added
+  for: Cursor publishes no context-window figure, and a per-request token sum is
+  context size × turns taken, not the size of the conversation.
+- **You can now ask Cursor Chat about one session, or one request.** The
+  per-session breakdown has an **Ask Cursor Chat** button that builds a brief
+  about that conversation and hands it over. Pick *find where starting a fresh
+  chat would have saved money*, *identify avoidable spend, ranked by dollar
+  impact*, *create a cheaper plan for doing the same work*, or write your own
+  question. Switch the scope to a single request and it briefs that one instead.
+- **It opens Cursor Chat with the brief already in the box — and stops there.**
+  Nothing is sent until you read it and press Enter. This goes through Cursor's
+  own prompt deeplink, which answers with a confirmation before a chat exists, so
+  there is no path here that can spend money on a prompt you haven't seen. Where
+  that isn't available — an older build, a remote session, a brief past the
+  deeplink's size cap — it falls back to copying and opening chat for you to
+  paste, and the button says which of those actually happened rather than
+  claiming the best case.
+- **The brief is built to be small, because the analysis costs tokens too.** It
+  never lists your requests one per line. Instead it reports the session's
+  spending as six equal slices — so a 300-request session costs the same to
+  describe as a 12-request one, while the growth curve, the step down at a
+  compaction and the spike all survive. Anything a finding already explains
+  isn't said a second time, which also stops the same dollars being counted
+  twice. A 47-request session comes out around 900 tokens.
+- **It tells you what it will cost before you send it.** The dialog shows the
+  brief's size in tokens and roughly what that's worth as input on the model you
+  actually used.
+- **The brief teaches the model Cursor's cache economics up front**, which is
+  what gets a useful answer in one round trip instead of three. Without it a
+  model reads "68% of your spend was cache reads" as good news. It's also told
+  not to ask what you were working on, since the extension never reads that and
+  nobody can tell it.
+- A request brief looks one request back and three forward. The state a request
+  starts in is already covered by the idle gap and the session's median; what
+  nothing else can tell you is whether a huge re-cache was earned back over the
+  turns that followed or thrown away when the thread was abandoned.
+- **The session timeline now shows each request's cost on hover**, and marks the
+  turns Cursor generated to summarise the conversation with a striped bar and a
+  legend. The bars carried this detail before, but only in the browser's own
+  tooltip, which waits about a second and can't be reached from the keyboard.
+- **The request that did the summarising is now findable.** It carries a
+  `summary` chip in the request log, and the "summarising worked, then the
+  context grew back" finding gained a second link straight to it — the finding is
+  anchored to the request that spent the money, which is not the summary, so
+  until now nothing in the product pointed at it.
+- **New findings for things that changed partway through a session**, all derived
+  from token counts and timestamps as ever:
+  - *Switching model* — prices the requests after the switch against the rate card
+    of the model you left. Both figures cover identical token counts, so a session
+    whose context grew across the switch doesn't blame the new model for growth it
+    had nothing to do with. Reported the other way round too when a switch saved
+    money.
+  - *Raising the reasoning effort* — Cursor bills every effort level of a model on
+    one published row, so this can't be a price comparison: re-pricing the same
+    tokens would return zero by construction. It's measured in what actually
+    changes, which is how much the model writes.
+  - *A price that moved under you* — the same model billed differently against the
+    same published rate, which is usually a promotion starting or ending. Measured
+    from what was charged rather than from the discount table, whose entries are
+    per-day and so would only ever catch a session that ran across midnight.
+- **Fixed: findings in an expanded request row ran off the right of the screen.**
+  The request log needs `white-space: nowrap` for its twelve columns of timestamps
+  and token counts, and that inherits — so in the one cell that holds sentences it
+  turned each finding into a single unbreakable line. Worse, that line's width fed
+  back into the table's own minimum width, so the detail row wasn't merely sitting
+  in a wide table, it was what made the table wide.
+- **The session timeline now prices every bar.** It used to print only a "peak"
+  caption, centred under the middle of the plot — so on a three-request session
+  it sat above the *smallest* bar and read as that bar's label. Each bar now
+  carries its own cost, and on longer sessions, where bars are too narrow for
+  that, the caption names the request the peak belongs to.
+- **Fixed: Auto could lose its pricing entirely and report itself as an unknown
+  model.** Auto is priced from a single field, and the fallback that covers a
+  failed scrape only fired when *nothing* on the pricing page parsed. So a page
+  that still listed every named model but had moved or renamed the Auto row left
+  Auto with no rates — no cost breakdown, no cache-savings figure, and "this
+  model isn't in the pricing table" against the most-used model in the product.
+  Auto now falls back on its own, and says when the rate on screen is the
+  built-in one rather than a published one.
+- Briefs carry token counts, timings, costs and the conversation's name. Nothing
+  you wrote is in them, because none of it is ever read.
+- Fixed a red CI run. Two test blocks imported `src/webview/insights.js`
+  directly; it reaches `src/shared/usageLogic.ts` through `logic.js`, and only
+  Node 22 strips those types on the way in — CI runs Node 20, which throws
+  `ERR_UNKNOWN_FILE_EXTENSION`. They go through the suite's bundling helper now,
+  like every other module, and a test fails the suite if a raw import comes
+  back.
+- The test runner waits for async tests before printing the summary. One
+  `test(...)` call with an async body was not awaited, so it settled after the
+  exit code had been decided — a failure inside it would have left CI green.
+  Async tests are tracked and awaited whether or not the call site remembers.
+- The session sub-plot is labelled for what it measures. It was captioned as the
+  size of the conversation, which the data cannot support: an agent request
+  re-sends the whole prefix on every internal turn, so the figure is context
+  size × turns taken — which is why it routinely ran to eight digits, several
+  times past any model's context window. A short request then plotted low on an
+  unchanged thread and read as the context having shrunk with no summary in
+  sight. It is now "Tokens sent per request", and the caption says a short bar is
+  a short request while only a striped bar is the thread itself getting smaller.
+  Cursor publishes no context-window figure, so nothing here can show one.
+- Findings are one card per kind, and a surface shows three of them. A rule that
+  fired on a dozen requests used to render a dozen cards carrying the same
+  explanation and the same closing tip, which buried the findings that were
+  actually different somewhere below the fold. The costliest instance is the one
+  on show — it is the one worth opening — and it carries a count of the others
+  and their combined dollars, so nothing is hidden and no total shrinks. The rest
+  are behind one "show more" button, and the brief handed to Cursor Chat says
+  each finding once for the same reason.
+- Discount detection no longer skips an Auto-routed request that names the model
+  it was routed to. Balance and Intelligence bill at the routed model's own rate
+  — which is exactly why Cursor spells it out as "Cursor Grok 4.5 (Auto
+  Balanced)" — and the pricing lookup already resolves those rows to the right
+  model. Detection was still discarding them on the word "auto", alongside bare
+  Auto, whose model genuinely cannot be named. On an account where Cursor omits
+  the per-request list value, that left every routed request permanently
+  unmeasurable: a promotion could be running on the model and no estimate would
+  ever reflect it.
+
+## 0.7.4 — 2026-08-16
+
+- **Findings now point at the request they're about, and follow you around.**
+  Each one carries what the pattern cost and a link through to the request or
+  the session, and the same finding shows up wherever you're looking — on the
+  Overview, on the session it belongs to, and as a marker on the row itself.
+- **Every request can now show what its cost was made of.** Click a row in the
+  request log to split it into cache read, cache write, output and input. On a
+  long agent turn this is usually the whole story: the answer is a few cents and
+  the rest is re-reading context. The parts always add up to the cost shown
+  beside them, discounts included.
+- **The request log names the conversation each request came from**, and links
+  to it — so an expensive row no longer means going hunting for which chat it
+  belonged to. Conversations Cursor has no name for are shortened the same way
+  the session list shortens them, rather than printing a raw id in full.
+- **New per-session view.** Opens from the session list, a request row, or a
+  finding. Shows where that session's money went by token bucket, the findings
+  anchored to it, and a bar per request in the order you asked them, with the
+  context share shaded — so a session that got expensive as it went looks
+  expensive.
+- **New detectors**, all derived from token counts and timestamps only:
+  - *Stale resume* — coming back to a thread after hours means the prompt cache
+    has expired, and the whole accumulated context is re-written at full price
+    before any work happens. Reports what that re-caching cost.
+  - *Context blowup* — a request whose cache reads are far above the rest of its
+    session, and which is almost entirely re-read context.
+  - *Summarising worked* / *the context grew back* — Cursor compacting a
+    conversation is now recognised, and judged on what happened next: cache
+    reads that stayed down, or a thread that re-inflated anyway.
+  - *Spend concentration* — when a handful of requests are most of the period.
+  - *What every new chat costs before you type* — measured from your cold
+    starts. That baseline is your system prompt, rules files and the tool
+    definitions of every connected MCP server.
+- **Fixed: conversation compactions were being counted as cold starts.** They
+  read no cache, so the old test caught them — which inflated the cold-start
+  count and produced backwards advice, since summarising a thread is the
+  opposite of starting one. They're told apart on cache writes now.
+- **Cache findings no longer argue against themselves.** "Keep long agent
+  threads open" is good advice until the threads are what ran the bill up; on a
+  period whose dearest requests are mostly re-read context, that tip now says so
+  instead.
+- **Fixed: a finding's dollar figure could land beside the wrong sentence.** It
+  was floated into the finding's heading, and a float leaves the heading's line
+  box — so as soon as a title wrapped to two lines the figure dropped down next
+  to the body paragraph and read as an annotation on that instead.
+- **Fixed: finding titles rendered as small-caps captions inside the request-row
+  detail and the session breakdown.** Both panels label their own sections that
+  way, and the rule was reaching the finding cards' titles too — which are full
+  sentences, and close to unreadable in uppercase.
+- **A request row with nothing flagged now gives its whole width to the cost
+  breakdown**, instead of holding an empty column open beside it.
+- **Fixed: the brief's cost estimate quoted the wrong rate card.** It priced
+  against the session's *first* request; a session that opened on one model and
+  ran on another named a model the user barely used. It uses the session's
+  most-used model now.
+- **Fixed: a session opened straight from a request row kept showing its raw id**
+  when its name arrived from Cursor's database a moment after the panel opened.
+- **Fixed: the timeline tooltip stayed put when the panel behind it scrolled.**
+- **Fixed: the dashboard could fail on a very large period.** Both the session
+  timeline and the new-chat-overhead baseline sized themselves by spreading the
+  whole request list into `Math.max`/`Math.min`, which throws once the list is
+  long enough — so it only ever broke for the heaviest users.
+- **Fixed: an error on the local browser server after it started listening could
+  take the extension host down with it.** It's logged now.
+- **The four token buckets are now four genuinely different colours.** Cache read
+  and cache write were two steps of the same orange — as adjacent bands of one
+  bar, close enough that neither the chart nor its legend could be read — and
+  input was a grey so desaturated it looked like missing data. The replacement
+  set was picked by running candidates through a colour-blindness and contrast
+  validator rather than by eye, and it's held to the strictest gate: every pair
+  distinguishable, not just the ones that touch in the bar, since the legend
+  stacks all four. Segments are separated by a hairline gap as well, so two
+  fills meeting never blend into one band. Dark themes get their own steps —
+  until now a dark IDE was drawing the light palette.
+- **The session view has a second chart: the context behind each request.** One
+  bar per request under the cost plot, same columns in the same order, showing
+  everything that went *up* — your prompt plus the conversation re-read from
+  cache. It's what makes a compaction legible: the summary shows as a tall
+  striped column, then the context steps down and stays down until the thread
+  grows back. Deliberately a second chart rather than a second line on the cost
+  one; dollars and tokens share no scale, and overlaying them would suggest a
+  relationship the numbers don't contain. Cursor publishes no context-size
+  figure, so this is measured from the token counts and says so.
+- **Fixed: the session summary claimed work that never happened, and counted
+  your prompts as answers.** It read "X% was context handling — re-reading and
+  re-caching the conversation — and Y% was the answers themselves". Two things
+  wrong with that. It named re-caching on sessions that never wrote a byte to
+  cache, right beside a Cache write row reading $0. And the leftover Y% is
+  output *plus* input — input being the prompt you sent, not an answer — so on a
+  session that was 15% output and 12% input it reported the answers as 27%,
+  nearly double. Each half is now named for what it is, and only the cache
+  activity that actually happened is mentioned. The same wording was going into
+  the brief handed to Cursor Chat, where it was teaching the model a false
+  premise about the one split the whole analysis argues from.
+- **Cache write reads 0 on every request for some accounts.** Whether that is
+  Cursor reporting a real zero or this extension reading a key that isn't there
+  could not be told apart from the outside, so two things changed: token counts
+  are now read under several spellings (by presence, so a genuine 0 is never
+  overridden), and the shape of the usage payload's `tokenUsage` is written to
+  the log on each load — `Cursor Usage: Show Logs` — so it can be settled from
+  real data rather than guessed at.
+- A bucket that cost exactly nothing now shows `$0` rather than `$0.0000`.
+- **The sessions table no longer scrolls sideways.** A single long Models cell
+  was setting the whole table's minimum width. Model names now wrap between
+  each other while staying intact individually, and each column header sits
+  over its own data instead of over the right edge every column shared.
+
+## 0.7.3 — 2026-08-16
+
+- **Added "Open in Browser."** A new "Open in browser ↗" link in the dashboard
+  header (and a matching `Cursor Usage: Open in Browser` command) opens the
+  same dashboard in your default browser instead of the IDE panel. It's
+  served by a small local HTTP server on `127.0.0.1` — same local data
+  access as the webview, same extension host underneath, just reachable from
+  a real browser tab. Every call that returns usage data is gated by a random
+  per-session token, and the server is bound to loopback only, so nothing else
+  on the machine (or network) can reach it. The tab keeps working across a
+  reload, and **follows your OS light/dark preference** — there's no editor
+  theme to inherit out there. **Export CSV** downloads through the browser
+  rather than opening a save dialog back in the IDE, where you wouldn't see it.
+
 ## 0.7.2 — 2026-08-15
 
 - **Added a narrated walkthrough video** to the README and the website: a

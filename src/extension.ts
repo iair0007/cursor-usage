@@ -3,6 +3,7 @@ import { setApiLogger } from './api';
 import { storeAdminApiKey, storeManualSessionToken, clearStoredCredentials } from './auth';
 import { clearConversationTitleCache } from './conversations';
 import { DashboardPanel } from './panel';
+import { BrowserServer } from './browserServer';
 import { UsageService } from './service';
 import { UsageStatusBar } from './statusBar';
 
@@ -21,6 +22,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cursorUsage.openDashboard', () => {
       DashboardPanel.show(context, service, statusBar, log);
     }),
+
+    vscode.commands.registerCommand('cursorUsage.openInBrowser', () => {
+      void BrowserServer.show(context, service, statusBar, log);
+    }),
+
+    // The loopback server (if one was ever started) has no reason to outlive
+    // the extension host — VS Code disposes this alongside everything else
+    // on deactivate/reload.
+    { dispose: () => BrowserServer.stop() },
 
     vscode.commands.registerCommand('cursorUsage.showLogs', () => {
       output.show(true);

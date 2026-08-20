@@ -4,10 +4,18 @@
 // Differences from the web app: data arrives over a postMessage RPC bridge to
 // the extension host (no HTTP server), Chart.js is bundled locally, prefs use
 // the webview state API, and CSV export / clipboard go through VS Code.
+//
+// This same bundle is also served as a plain static file by the local
+// browser server (browserServer.ts) so the dashboard can be opened in a real
+// browser tab. `inVsCode` below is the only branch point: outside VS Code
+// there's no `acquireVsCodeApi`, so the RPC bridge falls back to fetching
+// `/api/rpc` on the same origin, and persisted UI prefs fall back to
+// localStorage instead of the webview state API.
 
 import Chart from 'chart.js/auto';
 import {
   parsePricing,
+  describePricingScrape,
   matchPricing,
   estimateTokenCost,
   detectDiscounts,
@@ -46,8 +54,53 @@ import {
   SESSION_SORT_DEFAULT_DIR,
   UNATTRIBUTED_SESSION,
 } from './logic.js';
+import {
+  buildInsights,
+  dedupeFindings,
+  FINDING_CARD_LIMIT,
+  costBreakdown,
+  classifyRequest,
+  findingsForRequest,
+  findingsForSession,
+  badgeSeverity,
+  spendSplit,
+} from './insights.js';
+import {
+  BRIEF_NOTES,
+  BRIEF_TEMPLATES,
+  buildSessionBrief,
+  buildRequestBrief,
+  estimateBriefSize,
+} from './brief.js';
 
-const vscode = acquireVsCodeApi();
+const inVsCode = typeof acquireVsCodeApi === 'function';
+const vscode = inVsCode ? acquireVsCodeApi() : null;
+
+const BROWSER_TOKEN_KEY = 'cursorUsageDashboardToken';
+
+/**
+ * The RPC token for a standalone browser tab.
+ *
+ * The extension host opens the tab at `/?token=…` and the token moves straight
+ * into sessionStorage: it survives a reload (which the URL would not, since it
+ * is cleaned immediately) and it dies with the tab. It is deliberately not
+ * inlined into the page — a `<script>` block carrying it would be blocked by
+ * the page's own `script-src 'self'`, which is exactly what should happen to
+ * inline script.
+ */
+function readBrowserToken() {
+  const url = new URL(window.location.href);
+  const fromUrl = url.searchParams.get('token');
+  if (fromUrl) {
+    try { sessionStorage.setItem(BROWSER_TOKEN_KEY, fromUrl); } catch { /* private mode */ }
+    // Off the address bar, out of the history entry, and out of any Referer.
+    window.history.replaceState(null, '', url.pathname);
+    return fromUrl;
+  }
+  try { return sessionStorage.getItem(BROWSER_TOKEN_KEY) || ''; } catch { return ''; }
+}
+
+const browserToken = inVsCode ? null : readBrowserToken();
 
 // ---------------------------------------------------------------------------
 // RPC bridge to the extension host
@@ -61,8 +114,16 @@ let rpcSeq = 0;
  * posts back an rpc-result (a bug on that side, or a message that got lost),
  * this rejects after `timeoutMs` instead of leaving callers (and the loading
  * spinner) hanging forever with no explanation.
+ *
+ * In VS Code this goes over the webview's postMessage bridge; in a plain
+ * browser tab (opened via "Open in Browser") it POSTs to `/api/rpc` on the
+ * same origin instead, since there's no extension host on the other end of
+ * a postMessage to talk to.
  */
 function rpc(method, params, timeoutMs = 25000) {
+  if (!inVsCode) {
+    return rpcOverHttp(method, params, timeoutMs);
+  }
   return new Promise((resolve, reject) => {
     const id = ++rpcSeq;
     const timer = setTimeout(() => {
@@ -77,26 +138,65 @@ function rpc(method, params, timeoutMs = 25000) {
   });
 }
 
-window.addEventListener('message', (ev) => {
-  const msg = ev.data;
-  if (msg?.type === 'rpc-result') {
-    const p = rpcPending.get(msg.id);
-    if (!p) return;
-    rpcPending.delete(msg.id);
-    if (msg.error) {
-      const err = new Error(msg.error);
-      err.authError = Boolean(msg.authError);
-      p.reject(err);
-    } else {
-      p.resolve(msg.result);
-    }
-  } else if (msg?.type === 'refresh') {
-    load();
+async function rpcOverHttp(method, params, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch('/api/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Cursor-Usage-Token': browserToken },
+      body: JSON.stringify({ method, params }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    throw new Error(e?.name === 'AbortError'
+      ? `"${method}" timed out waiting for a response from the extension.`
+      : `"${method}" failed: ${e?.message || e}`);
+  } finally {
+    clearTimeout(timer);
   }
-});
+  // Not every response is a JSON envelope: a rejected token or a wrong path is
+  // answered by the server itself, and calling .json() on those turns a clear
+  // problem into "Unexpected token 'F' in JSON at position 0".
+  if (res.status === 403) {
+    throw new Error('This dashboard tab is no longer authorised — run "Cursor Usage: Open in Browser" '
+      + 'again from the IDE to get a fresh link.');
+  }
+  if (!res.ok) {
+    throw new Error(`"${method}" failed: the extension answered ${res.status}.`);
+  }
+  const msg = await res.json().catch(() => ({ error: `"${method}" returned a malformed response.` }));
+  if (msg.error) {
+    const err = new Error(msg.error);
+    err.authError = Boolean(msg.authError);
+    throw err;
+  }
+  return msg.result;
+}
+
+if (inVsCode) {
+  window.addEventListener('message', (ev) => {
+    const msg = ev.data;
+    if (msg?.type === 'rpc-result') {
+      const p = rpcPending.get(msg.id);
+      if (!p) return;
+      rpcPending.delete(msg.id);
+      if (msg.error) {
+        const err = new Error(msg.error);
+        err.authError = Boolean(msg.authError);
+        p.reject(err);
+      } else {
+        p.resolve(msg.result);
+      }
+    } else if (msg?.type === 'refresh') {
+      load();
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
-// Persistence — webview state instead of localStorage
+// Persistence — webview state (or localStorage in a browser tab)
 // ---------------------------------------------------------------------------
 
 /**
@@ -104,19 +204,38 @@ window.addEventListener('message', (ev) => {
  * the panel being hidden (and is synchronous, which every caller here relies
  * on), but it dies with the panel — so preferences stored only there reset
  * every time the dashboard was closed and reopened. The extension host's
- * globalState is the durable copy; setState is the fast local mirror.
+ * globalState is the durable copy; setState (or, in a browser tab,
+ * localStorage) is the fast local mirror.
  *
  * Reads stay synchronous: hydratePrefs() pulls the durable copy in before
  * init() touches any of it.
  */
-const persisted = vscode.getState() || {};
+const localState = {
+  getState() {
+    try {
+      return JSON.parse(localStorage.getItem('cursorUsageDashboardState') || 'null');
+    } catch {
+      return null;
+    }
+  },
+  setState(value) {
+    try {
+      localStorage.setItem('cursorUsageDashboardState', JSON.stringify(value));
+    } catch {
+      // Private browsing / storage disabled — the durable copy in globalState
+      // (via prefsSet below) still keeps preferences across reloads.
+    }
+  },
+};
+const stateApi = inVsCode ? vscode : localState;
+const persisted = stateApi.getState() || {};
 const storage = {
   getItem(key) {
     return Object.prototype.hasOwnProperty.call(persisted, key) ? persisted[key] : null;
   },
   setItem(key, value) {
     persisted[key] = String(value);
-    vscode.setState(persisted);
+    stateApi.setState(persisted);
     // Per key rather than whole-object, so a slow write can't clobber a
     // different preference saved while it was in flight. Best-effort: losing a
     // preference write is not worth failing a user action over.
@@ -155,6 +274,22 @@ const ANALYZE_THRESHOLD_DEFAULTS = {
 const state = {
   all: [],
   filtered: [],
+  /**
+   * Anchored findings for the current filter, rebuilt by refresh().
+   *
+   * Held on state rather than recomputed per view so the Overview, the session
+   * list and the request log are all reading the same list — a tip that shows
+   * up in one place and not another is worse than no tip at all.
+   */
+  insights: [],
+  /** Request ids whose detail row is open in the log. */
+  expandedRequests: new Set(),
+  /**
+   * Finding grids the user has expanded past the first few cards, keyed by
+   * surface ("analyze", "session:<id>"). Held here rather than in the DOM so
+   * the choice survives the re-render every filter change causes.
+   */
+  expandedFindings: new Set(),
   /** True once a load has settled, so views can tell "no data" from "not fetched yet". */
   loaded: false,
   pricing: null,
@@ -203,6 +338,19 @@ const state = {
   /** What to hand focus back to when the Simulator intro dialog closes. */
   simIntroReturnFocus: null,
   analyzeTemplateId: 'overview',
+  /**
+   * What the "Ask Cursor Chat" dialog is currently pointed at.
+   *
+   * `scope` is 'session' or 'request'; `requestId` is only read in request scope,
+   * and defaults to the session's dearest request because that is the one anybody
+   * opening this dialog came to ask about.
+   */
+  ask: {
+    scope: 'session',
+    sessionId: null,
+    requestId: null,
+    templateId: null,
+  },
   charts: {},
   chartsReady: false,
   datePreset: '30d',
@@ -846,6 +994,25 @@ function discountForEvent(modelRaw, timestampMs) {
   return resolveDiscount(modelRaw, dayKey(timestampMs), discountContext());
 }
 
+/**
+ * The rates a request was actually priced at, promotion included.
+ *
+ * The insights engine takes this rather than looking pricing up itself, so a
+ * cost breakdown on a discounted day splits the real charge rather than the
+ * list price and disagrees with the total beside it.
+ */
+function ratesForEvent(modelRaw, event) {
+  const published = matchPricing(modelRaw, state.pricing);
+  if (!published) return null;
+  const discount = discountForEvent(modelRaw, event?.timestampMs ?? Date.now());
+  return discount ? applyDiscountToRates(published, discount.pct) : published;
+}
+
+/** Cost split by token bucket for one request, or null when the model isn't priced. */
+function breakdownForEvent(event) {
+  return costBreakdown(event, ratesForEvent(event.modelRaw, event));
+}
+
 const DISCOUNT_TIPS = {
   // Deliberately does not call this "the promotion". It is what you were
   // charged against what Cursor says these tokens list for — an announced
@@ -1215,7 +1382,7 @@ function windowDays(window) {
  * costing more than the other is a fact about the work, not a regression, and
  * painting it amber would invent a verdict the numbers don't support.
  */
-function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
+function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down', { pct: withPct = true } = {}) {
   if (format(current) === format(baseline)) return '<span class="delta delta-flat">no change</span>';
   const delta = current - baseline;
   const up = delta > 0;
@@ -1233,7 +1400,9 @@ function deltaCell(current, baseline, format = fmt.money, betterWhen = 'down') {
   const magnitude = belowUnit ? `<${format(smallestUnit)}` : `${sign}${exactMagnitude}`;
 
   let pct = ' (new)';
-  if (baseline > 0) {
+  if (!withPct) {
+    pct = '';
+  } else if (baseline > 0) {
     const exact = Math.abs((delta / baseline) * 100);
     // A visible dollar move whose percentage rounds to zero is "<1%", never "0%".
     pct = exact < 0.5 ? ' (<1%)' : ` (${sign}${exact.toFixed(0)}%)`;
@@ -1425,6 +1594,12 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
     tagNew = 'new',
     tagGone = 'stopped',
     betterWhen = 'down',
+    // What the last column is called, and which way it reads. A period
+    // comparison has a time direction, so "Change" is unambiguous there; two
+    // sessions do not, and the table above this one in that dialog spells the
+    // direction out — so this one has to as well, in the same words.
+    changeLabel = 'Change',
+    changeSub = '',
     // The sessions dialog's two-column comparison reuses this table wholesale
     // for its model breakdown, and needs it to carry the same alignment and
     // sticky-header rules as the metrics table above it — rules scoped to
@@ -1440,6 +1615,15 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
   }, {});
   const curCount = countBy(currentEvents);
   const baseCount = countBy(baselineEvents);
+  // Whether the side touched the model at all, taken from the events rather
+  // than from a cost or a counted-request tally: "never used it" and "used it
+  // and it came to nothing" are different statements, and only the events can
+  // tell them apart. The matrix shown for three or more sessions has always
+  // drawn this distinction; the two-session table printed "$0.00 · 0 req"
+  // against a model one side never ran.
+  const modelsIn = (events) => new Set(events.map((e) => e.model));
+  const curModels = modelsIn(currentEvents);
+  const baseModels = modelsIn(baselineEvents);
   const deltas = modelCostDeltas(curCost, baseCost);
   if (!deltas.length) return '';
 
@@ -1448,17 +1632,26 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
     const bN = baseCount[d.model] || 0;
     const cAvg = cN ? d.current / cN : 0;
     const bAvg = bN ? d.baseline / bN : 0;
-    const tag = d.baseline === 0
+    const inCur = curModels.has(d.model);
+    const inBase = baseModels.has(d.model);
+    const tag = !inBase
       ? ` <span class="compare-tag">${esc(tagNew)}</span>`
-      : d.current === 0 ? ` <span class="compare-tag compare-tag-gone">${esc(tagGone)}</span>` : '';
+      : !inCur ? ` <span class="compare-tag compare-tag-gone">${esc(tagGone)}</span>` : '';
+    const cell = (used, total, n, avg) => (used
+      ? `<td>${fmt.money(total)}<span class="compare-sub">${fmt.num(n)} req · ${fmt.money(avg)}/req</span></td>`
+      : '<td class="cell-absent">—</td>');
     // Rows that didn't move are kept for completeness but stop competing for
     // attention with the ones that did.
     const quiet = Math.abs(d.delta) < 0.005 ? ' class="compare-row-quiet"' : '';
     return `<tr${quiet}>
-        <th scope="row">${esc(d.model)}${tag}${rangeDiscountBadge(d.model)}</th>
-        <td>${fmt.money(d.current)}<span class="compare-sub">${fmt.num(cN)} req · ${fmt.money(cAvg)}/req</span></td>
-        <td>${fmt.money(d.baseline)}<span class="compare-sub">${fmt.num(bN)} req · ${fmt.money(bAvg)}/req</span></td>
-        <td>${deltaCell(d.current, d.baseline, fmt.money, betterWhen)}</td>
+        <th scope="row"><span class="compare-model-label"><span class="compare-model-name"
+          title="${esc(d.model)}">${esc(d.model)}</span>${tag}${rangeDiscountBadge(d.model)}</span></th>
+        ${cell(inCur, d.current, cN, cAvg)}
+        ${cell(inBase, d.baseline, bN, bAvg)}
+        <td>${deltaCell(d.current, d.baseline, fmt.money, betterWhen,
+    // A percentage against a side that never ran the model is not a
+    // measurement — "100% less" says only what the tag beside it already says.
+    { pct: inCur && inBase })}</td>
       </tr>`;
   }).join('');
 
@@ -1470,7 +1663,8 @@ function renderModelDeltaTable(currentEvents, baselineEvents, opts) {
           <th scope="col">Model</th>
           <th scope="col">${esc(currentLabel)}</th>
           <th scope="col">${esc(baselineLabel)}</th>
-          <th scope="col">Change</th>
+          <th scope="col"><span class="compare-col-label">${esc(changeLabel)}</span>${changeSub
+  ? `<span class="compare-col-days">${esc(changeSub)}</span>` : ''}</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -1595,6 +1789,25 @@ function sessionLabel(id) {
 }
 
 /**
+ * The conversation a request belongs to, as a link into its session.
+ *
+ * Shared by the request log and Analyze's expensive-request table: the same
+ * question ("where did this come from?") gets the same answer and the same
+ * affordance in both, and a name that resolves late resolves in both at once.
+ */
+function sessionCellFor(sessionId) {
+  if (!sessionId) {
+    return '<span class="session-none" title="The usage API reported no conversation for this request">—</span>';
+  }
+  // Same label the session list uses: an unnamed conversation is shortened
+  // rather than printed in full, so one column doesn't read as a 24-character
+  // id while the other reads as "conv_0000…0023".
+  const label = sessionLabel(sessionId);
+  return `<button type="button" class="btn-link session-link${label.isId ? ' is-id' : ''}"
+      data-session="${esc(sessionId)}" title="${esc(sessionId)}">${esc(label.text)}</button>`;
+}
+
+/**
  * Asks the extension host to name the conversations on screen.
  *
  * Only for ids we haven't already resolved or asked about, and only for what's
@@ -1604,7 +1817,10 @@ function sessionLabel(id) {
  */
 async function loadSessionTitles(ids) {
   const { titles, titlesPending } = state.sessions;
-  const wanted = ids.filter(
+  // Deduped: a page of the request log is mostly a handful of conversations
+  // repeated, and asking for the same id 20 times in one call is 20 times the
+  // payload for the same answer.
+  const wanted = [...new Set(ids)].filter(
     (id) => id !== UNATTRIBUTED_SESSION && !titles.has(id) && !titlesPending.has(id),
   );
   if (!wanted.length) return;
@@ -1638,7 +1854,28 @@ async function loadSessionTitles(ids) {
       if (title) learned = true;
     }
   }
-  if (learned && state.appView === 'analyze' && state.analyzePanel === 'sessions') renderSessions();
+  if (!learned) return;
+  if (state.appView === 'analyze' && state.analyzePanel === 'sessions') renderSessions();
+  // The request log names sessions too, and it is redrawn here whichever view
+  // is on screen: switching tabs only unhides the table, it does not rebuild
+  // it. The first page of names is usually requested while the user is still
+  // on the Overview, so gating this on the current view meant the names had
+  // arrived but the column kept showing raw ids until a sort or a page change
+  // happened to force a redraw.
+  if (state.filtered.length) renderTable(state.filtered, summarize(state.filtered));
+  // A session opened straight from a request row is usually opened before its
+  // name has been looked up, and the dialog's own heading is not redrawn by
+  // anything above — so it kept the raw id for as long as it stayed open.
+  refreshOpenSessionTitle();
+}
+
+/** Re-labels the session dialog if its name arrived after it was opened. */
+function refreshOpenSessionTitle() {
+  const dialog = $('sessionDetailDialog');
+  const id = dialog?.dataset.session;
+  if (!dialog?.open || !id || id === UNATTRIBUTED_SESSION) return;
+  const name = state.sessions.titles.get(id);
+  if (name) $('sessionDetailTitle').textContent = name;
 }
 
 function fmtDuration(ms) {
@@ -1877,14 +2114,19 @@ function renderSessionList(root, pagerRoot, sessions, periodCost) {
             aria-label="Compare session ${esc(name.text)}" />
           ${picked ? `<span class="session-slot">${SESSION_SLOTS[slot]}</span>` : ''}
         </td>
-        <th scope="row" class="session-name${name.isId ? ' is-id' : ''}" title="${esc(t.sessionId)}">${esc(name.text)}</th>
-        <td>${esc(fmt.date(t.firstMs))}</td>
-        <td>${esc(fmtDuration(m.durationMs))}</td>
-        <td>${fmt.num(t.requests)}${t.erroredRequests
+        <th scope="row" class="session-name${name.isId ? ' is-id' : ''}" title="${esc(t.sessionId)}">
+          <button type="button" class="btn-link session-open" data-session="${esc(t.sessionId)}">${esc(name.text)}</button>
+          ${insightBadge(findingsForSession(state.insights, t.sessionId))}
+        </th>
+        <td class="session-started">${esc(fmt.date(t.firstMs))}</td>
+        <td class="session-duration">${esc(fmtDuration(m.durationMs))}</td>
+        <td class="session-requests">${fmt.num(t.requests)}${t.erroredRequests
           ? `<span class="compare-sub">+${fmt.num(t.erroredRequests)} errored</span>` : ''}</td>
-        <td>${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req${
+        <td class="session-cost">${fmt.money(t.costDollars)}<span class="compare-sub">${fmt.money(m.costPerRequest)}/req${
           periodCost > 0 ? ` · ${fmt.pct((t.costDollars / periodCost) * 100)} of period` : ''}</span></td>
-        <td class="session-models">${t.models.slice(0, 3).map((x) => esc(displayModel(x))).join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
+        <td class="session-models">${t.models.slice(0, 3)
+          .map((x) => `<span class="session-model">${esc(displayModel(x))}</span>`)
+          .join(', ')}${t.models.length > 3 ? ` +${t.models.length - 3}` : ''}</td>
       </tr>`;
   }).join('');
 
@@ -2186,6 +2428,11 @@ function renderSessionModelTable(ctxs, pair) {
       heading: 'Which models each session used',
       tagNew: 'only in A',
       tagGone: 'only in B',
+      // The metrics table directly above says "Difference / A against B". Two
+      // sessions have no inherent order, so an unqualified "Change" left the
+      // sign meaning whichever direction the reader assumed.
+      changeLabel: 'Difference',
+      changeSub: 'A against B',
       extraClass: 'sessions-compare-table',
     });
   }
@@ -2567,6 +2814,585 @@ function renderKpis(summary) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Insights: one set of findings, surfaced wherever the user happens to be
+// ---------------------------------------------------------------------------
+
+const BUCKET_LABELS = {
+  cacheRead: 'Cache read',
+  cacheWrite: 'Cache write',
+  output: 'Output',
+  input: 'Input',
+};
+const BUCKET_ORDER = ['cacheRead', 'cacheWrite', 'output', 'input'];
+
+/**
+ * Bars that still get their own price label underneath.
+ *
+ * Well under the ~60 at which .tl-plot starts scrolling horizontally: the label
+ * row is a sibling of the plot, so once the plot scrolls the two would slide out
+ * of alignment with each other.
+ */
+const TIMELINE_LABEL_MAX = 14;
+
+/**
+ * Money at the precision the figure deserves.
+ *
+ * fmt.money rounds to cents, which turns most of a per-request breakdown into
+ * a column of "$0.00" — the input side of a cached request really is fractions
+ * of a cent, and rounding it away loses the point being made.
+ */
+function moneyFine(v) {
+  if (v == null) return '—';
+  // Exactly zero is a fact, not a measurement: "$0.0000" reads as a number too
+  // small to show, when what it means is that this bucket never happened.
+  if (v === 0) return '$0';
+  if (Math.abs(v) >= 1) return `$${v.toFixed(2)}`;
+  if (Math.abs(v) >= 0.01) return `$${v.toFixed(3)}`;
+  return `$${v.toFixed(4)}`;
+}
+
+/**
+ * Token buckets Cursor sent no count for, across the requests in view.
+ *
+ * An omitted bucket is not a measured zero, and printing "0" for one claims a
+ * measurement nobody made. Nothing here names a bucket, a date, or a cause:
+ * this describes the payload in front of it, so a bucket that starts arriving
+ * again simply stops being listed, and one that goes missing later is covered
+ * without a code change. What broke once at a particular time is history for
+ * the changelog, not something to assert in the interface.
+ *
+ * A bucket is unknown only when *every* request in view omitted it — a range
+ * straddling the change still has a real, if partial, total, and calling that
+ * unknown would discard figures Cursor did send.
+ */
+const UNREPORTED = '—';
+const UNREPORTED_TITLE = "Cursor didn't send a count for this — unknown, not zero.";
+
+function unreportedBuckets(events) {
+  const list = Array.isArray(events) ? events : (events ? [events] : []);
+  if (!list.length) return new Set();
+  let shared = null;
+  for (const event of list) {
+    const missing = new Set(event?.unreportedBuckets || []);
+    if (shared === null) shared = missing;
+    else for (const key of [...shared]) if (!missing.has(key)) shared.delete(key);
+    if (!shared.size) break;
+  }
+  return shared || new Set();
+}
+
+/** The event field behind each bucket in BUCKET_ORDER. */
+const BUCKET_TOKEN_FIELD = {
+  cacheRead: 'cacheReadTokens',
+  cacheWrite: 'cacheWriteTokens',
+  output: 'outputTokens',
+  input: 'inputTokens',
+};
+
+/** One figure in the simulator's request summary, dashed when Cursor sent no count. */
+function simTokenFigure(event, bucket, value) {
+  return (event?.unreportedBuckets || []).includes(bucket)
+    ? `<span title="${esc(UNREPORTED_TITLE)}">${UNREPORTED}</span>`
+    : fmt.num(value);
+}
+
+/** One token cell in the request log, dashed when Cursor sent no count. */
+function tokenCell(event, bucket) {
+  const missing = (event.unreportedBuckets || []).includes(bucket);
+  return `<td class="tokens"${missing ? ` title="${esc(UNREPORTED_TITLE)}"` : ''}>${
+    missing ? UNREPORTED : fmt.num(event[BUCKET_TOKEN_FIELD[bucket]])}</td>`;
+}
+
+/** A finding marker for a request row or a session row. */
+function insightBadge(findings) {
+  const severity = badgeSeverity(findings);
+  if (!severity) return '';
+  const label = findings.map((f) => f.title).join(' · ');
+  return `<span class="insight-badge insight-${severity}" title="${esc(label)}" aria-label="${esc(label)}">`
+    + `${severity === 'positive' ? '✓' : '!'}</span>`;
+}
+
+/** What a request's cost was made of: a proportional bar plus the figures. */
+function renderBreakdown(breakdown, event, opts = {}) {
+  if (!breakdown || !(breakdown.total > 0)) {
+    // Two different failures used to share one sentence, and the sentence was
+    // wrong for the second one: a request that moved no tokens has nothing to
+    // split, whatever the pricing table says about its model.
+    const noTokens = event && !(event.totalTokens > 0);
+    return `<p class="bd-empty">${noTokens
+      ? 'This request moved no tokens, so there is nothing to break down.'
+      : "This model isn't in the pricing table, so its cost can't be broken down."}</p>`;
+  }
+  const segments = BUCKET_ORDER
+    .filter((key) => breakdown[key] > 0)
+    .map((key) => `<span class="bd-seg bd-${key}" style="width:${(breakdown[key] / breakdown.total) * 100}%"
+        title="${esc(BUCKET_LABELS[key])}: ${moneyFine(breakdown[key])}"></span>`)
+    .join('');
+  // A bucket Cursor never reported has no dollar figure to give: whatever it
+  // covered is billed inside the total, it just isn't attributed. Showing "$0"
+  // beside it would say that part cost nothing.
+  const unreported = opts.unreported ?? unreportedBuckets(event);
+  const rows = BUCKET_ORDER.map((key) => {
+    const missing = unreported.has(key);
+    return `
+    <li${missing ? ` title="${esc(UNREPORTED_TITLE)}"` : ''}>
+      <span class="bd-key"><i class="bd-dot bd-${key}"></i>${esc(BUCKET_LABELS[key])}</span>
+      <span class="bd-val">${missing ? UNREPORTED : moneyFine(breakdown[key])}</span>
+      <span class="bd-pct">${missing ? UNREPORTED : fmt.pct((breakdown[key] / breakdown.total) * 100)}</span>
+    </li>`;
+  }).join('');
+  const notes = [
+    // Says what is missing and what follows from it. No date and no cause: the
+    // note describes this payload, so it goes on its own if the counts return,
+    // and reads correctly for whichever bucket is absent next time.
+    unreported.size
+      ? `Cursor sent no ${[...unreported].map((k) => BUCKET_LABELS[k].toLowerCase()).join(' or ')} `
+        + `count for ${event ? 'this request' : 'these requests'}, so ${unreported.size === 1
+          ? "that row can't be priced. Whatever it covered is"
+          : "those rows can't be priced. Whatever they covered is"} still inside the total above `
+        + '— the split just cannot show it.'
+      : '',
+    breakdown.scaled
+      ? 'Split across the real charge for this request, which was below list price that day.'
+      : '',
+    breakdown.estimated
+      ? "Cursor's pricing page didn't publish an Auto rate this time, so these proportions use the built-in one — the total is still what you were charged."
+      : '',
+  ].filter(Boolean).map((n) => `<p class="bd-note">${n}</p>`).join('');
+  return `<div class="breakdown"><div class="bd-bar">${segments}</div><ul class="bd-list">${rows}</ul>${notes}</div>`;
+}
+
+/**
+ * Finding cards.
+ *
+ * The jump link is what makes the same finding useful from three different
+ * places: on the Overview it is the only way to reach the request being talked
+ * about, and inside a session view it moves the user to the exact row.
+ */
+function renderFindingCards(findings, opts = {}) {
+  return findings.map((f) => {
+    const impact = f.impact > 0
+      ? `<span class="finding-impact" title="What this pattern cost">${fmt.money(f.impact)}</span>`
+      : '';
+    const links = [];
+    if (opts.linkRequest !== false && f.anchor?.requestId) {
+      links.push(`<button type="button" class="btn-link finding-jump" data-request="${esc(f.anchor.requestId)}">Show me the request →</button>`);
+    }
+    // Some findings are about one request but caused by another — a thread that
+    // regrew after a summary is the case. The summary is what the reader wants
+    // to see next, and it is not the anchor.
+    if (f.anchor?.summaryRequestId) {
+      links.push(`<button type="button" class="btn-link finding-jump" data-request="${esc(f.anchor.summaryRequestId)}">Show me the summary →</button>`);
+    }
+    if (opts.linkSession !== false && f.anchor?.sessionId && f.anchor.sessionId !== UNATTRIBUTED_SESSION) {
+      links.push(`<button type="button" class="btn-link finding-session" data-session="${esc(f.anchor.sessionId)}">Open the session →</button>`);
+    }
+    // What dedupeFindings folded into this card. Without it, collapsing the
+    // repeats would quietly drop their dollars from the only place the reader
+    // could see them — the point is to say the same thing once, not to report
+    // less money.
+    const scope = opts.relatedScope || 'this range';
+    const related = f.related?.count
+      ? `<p class="finding-related">${fmt.num(f.related.count)} other request${f.related.count === 1 ? '' : 's'} in `
+        + `${esc(scope)} hit this${f.related.dollars > 0 ? `, adding ${fmt.money(f.related.dollars)}` : ''}.</p>`
+      : '';
+    return `<article class="finding-card severity-${f.severity}">
+      <h4>${esc(f.title)}${impact}</h4>
+      <p>${esc(f.body)}</p>
+      ${related}
+      <span class="finding-action">→ ${esc(f.action)}</span>
+      ${links.length ? `<div class="finding-links">${links.join('')}</div>` : ''}
+    </article>`;
+  }).join('');
+}
+
+/**
+ * A capped grid of findings, with the remainder behind one button.
+ *
+ * `expanded` is held per surface in state rather than in the DOM, so the
+ * choice survives the re-render that every filter change triggers.
+ */
+function renderFindingGrid(findings, { expanded, toggle, ...opts }) {
+  const ranked = dedupeFindings(findings);
+  const shown = expanded ? ranked : ranked.slice(0, FINDING_CARD_LIMIT);
+  const hidden = ranked.length - shown.length;
+  const more = ranked.length > FINDING_CARD_LIMIT
+    ? `<button type="button" class="btn-text findings-more" data-findings-toggle="${esc(toggle)}">${
+      expanded ? 'Show fewer' : `Show ${fmt.num(hidden)} more finding${hidden === 1 ? '' : 's'}`}</button>`
+    : '';
+  return renderFindingCards(shown, opts) + more;
+}
+
+/** Moves the user to a request in the log and opens its detail. */
+function jumpToRequest(requestId) {
+  const index = state.filtered.findIndex((e) => e.id === requestId);
+  if (index < 0) return;
+  $('sessionDetailDialog')?.close();
+  $('sessionsDialog')?.close();
+  setAppView('usage');
+  setPanel('requests');
+  state.page = Math.floor(index / state.pageSize) + 1;
+  state.expandedRequests.add(requestId);
+  renderTable(state.filtered, summarize(state.filtered));
+  // After paint, so the row being scrolled to exists.
+  requestAnimationFrame(() => {
+    const row = [...document.querySelectorAll('#tableBody tr[data-request]')]
+      .find((tr) => tr.dataset.request === requestId);
+    if (!row) return;
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    row.classList.add('row-flash');
+    setTimeout(() => row.classList.remove('row-flash'), 1600);
+  });
+}
+
+/**
+ * The request whose model the session should be priced against: the one used
+ * most often, ties broken by the earlier request so the answer is stable.
+ */
+function dominantEvent(events) {
+  if (!events.length) return null;
+  const counts = new Map();
+  for (const e of events) counts.set(e.modelRaw, (counts.get(e.modelRaw) || 0) + 1);
+  let best = events[0];
+  for (const e of events) {
+    if ((counts.get(e.modelRaw) || 0) > (counts.get(best.modelRaw) || 0)) best = e;
+  }
+  return best;
+}
+
+/**
+ * Largest of a mapped list, without `Math.max(...array)`.
+ *
+ * The spread form throws RangeError once the array is long enough to blow the
+ * argument limit, and a 90-day period on a busy account reaches that — a
+ * crash that only ever happens to the heaviest users, which is the worst
+ * possible place to put one.
+ */
+function maxOf(list, pick) {
+  let best = -Infinity;
+  for (const item of list) {
+    const v = pick(item);
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+/** The loaded requests of one session, oldest first — the order they were asked in. */
+function sessionEventsInOrder(sessionId) {
+  return eventsForSession(sessionId).slice().sort((a, b) => a.timestampMs - b.timestampMs);
+}
+
+/** Where one session's money went, by token bucket. */
+function sessionSpendBreakdown(events) {
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  let priced = 0;
+  for (const event of events) {
+    const breakdown = breakdownForEvent(event);
+    if (!breakdown) continue;
+    priced += 1;
+    for (const key of BUCKET_ORDER) totals[key] += breakdown[key];
+    totals.total += breakdown.total;
+  }
+  return priced ? totals : null;
+}
+
+/**
+ * Cost per request, in order, each bar stacked by where the money went.
+ *
+ * There was a second plot here — tokens sent per request — and it was removed
+ * rather than fixed. Cost is very nearly a linear function of tokens sent
+ * (r = 0.99 on real usage), so the two rows drew the same shape twice, and the
+ * stacked bars already say which bucket the tokens landed in. It also could not
+ * do the job it was added for: Cursor publishes no context-window figure, and a
+ * per-request token sum is context size × turns taken, not the size of the
+ * conversation. A chart that duplicates its neighbour and needs a paragraph
+ * explaining what it is not is noise.
+ */
+function renderSessionTimeline(events) {
+  const priced = events.filter((e) => e.cost != null && e.cost > 0);
+  if (!priced.length) return '<p class="bd-empty">No priced requests in this session.</p>';
+  const max = maxOf(priced, (e) => e.cost);
+  let compactions = 0;
+  const bars = priced.map((event, index) => {
+    const breakdown = breakdownForEvent(event);
+    const contextPct = breakdown && breakdown.total > 0
+      ? ((breakdown.cacheRead + breakdown.cacheWrite) / breakdown.total) * 100
+      : 0;
+    const height = max > 0 ? Math.max(3, (event.cost / max) * 100) : 3;
+    const flags = findingsForRequest(state.insights, event.id);
+    const isCompaction = classifyRequest(event, state.analyzeThresholds) === 'compaction';
+    if (isCompaction) compactions += 1;
+    // Carried as data rather than a `title`, because the native tooltip waits
+    // about a second before appearing and can't be reached from the keyboard.
+    // renderTimelineTip below builds the visible one from these.
+    const lines = [
+      `#${index + 1} · ${fmt.date(event.timestampMs)}`,
+      `${fmt.money(event.cost)}${breakdown ? ` · ${fmt.pct(contextPct)} context handling` : ''}`,
+      esc(event.model),
+      ...(isCompaction ? ['Cursor summarised the conversation here'] : []),
+      ...flags.map((f) => f.title),
+    ];
+    return `<button type="button" class="tl-bar${flags.length ? ' tl-flagged' : ''}${isCompaction ? ' tl-compaction' : ''}"
+        data-request="${esc(event.id)}" style="--bar-h:${height}%;--ctx-h:${contextPct}%"
+        data-tl-tip="${esc(lines.join('\n'))}"
+        aria-label="${esc(lines.join('. '))}"><span class="tl-context"></span></button>`;
+  }).join('');
+
+  // A price under every bar, while they are wide enough to carry one. Past this
+  // the labels collide and the axis row does the job instead — but it now names
+  // which request the peak belongs to. It never did, and with three bars the
+  // centred "peak" caption landed over the smallest one and read as its label.
+  const peakAt = priced.findIndex((e) => e.cost === max) + 1;
+  const foot = priced.length <= TIMELINE_LABEL_MAX
+    ? `<div class="tl-labels">${priced
+      .map((e) => `<span>${moneyFine(e.cost)}</span>`).join('')}</div>`
+    : `<div class="tl-axis"><span>first request</span>`
+      + `<span>peak ${fmt.money(max)} at #${peakAt}</span><span>last request</span></div>`;
+  const legend = compactions
+    ? `<p class="tl-legend"><span class="tl-key tl-compaction"></span>${compactions === 1
+      ? 'The striped bar is where Cursor summarised the conversation'
+      : `The ${fmt.num(compactions)} striped bars are where Cursor summarised the conversation`} — not a request you made.</p>`
+    : '';
+  return `<div class="tl-plot">${bars}</div>${foot}${legend}`;
+}
+
+/**
+ * The timeline's tooltip: one element, moved and refilled as bars are hovered.
+ *
+ * Fixed rather than absolute because `.tl-plot` scrolls horizontally, and an
+ * `overflow-x: auto` box clips on both axes — an absolutely positioned tip would
+ * be cut off by the plot it belongs to. It also has to live inside the dialog:
+ * a modal renders in the top layer, so a tooltip parented to <body> would sit
+ * behind it however high its z-index.
+ */
+function showTimelineTip(bar) {
+  const el = $('tlTip');
+  if (!el || !bar?.dataset.tlTip) return;
+  el.textContent = bar.dataset.tlTip;
+  el.hidden = false;
+  const rect = bar.getBoundingClientRect();
+  const tip = el.getBoundingClientRect();
+  // Above the bar by default, below it when there's no room — a short bar near
+  // the top of the plot has nothing above it to pop into.
+  const above = rect.top - tip.height - 8;
+  el.style.top = `${above > 8 ? above : rect.bottom + 8}px`;
+  const left = rect.left + rect.width / 2 - tip.width / 2;
+  el.style.left = `${Math.max(8, Math.min(left, window.innerWidth - tip.width - 8))}px`;
+}
+
+function hideTimelineTip() {
+  const el = $('tlTip');
+  if (el) el.hidden = true;
+}
+
+/** Opens the per-session breakdown for one conversation. */
+function openSessionDetail(sessionId) {
+  const dialog = $('sessionDetailDialog');
+  if (!dialog) return;
+  const events = sessionEventsInOrder(sessionId);
+  if (!events.length) return;
+
+  const name = state.sessions.titles.get(sessionId);
+  const totals = sessionTotals(events)[0];
+  const metrics = totals ? sessionMetrics(totals) : null;
+  $('sessionDetailTitle').textContent = sessionId === UNATTRIBUTED_SESSION
+    ? 'Requests with no conversation'
+    : (name || sessionId);
+  const meta = [
+    `${fmt.num(events.length)} request${events.length === 1 ? '' : 's'}`,
+    metrics ? fmtDuration(metrics.durationMs) : null,
+    `${fmt.money(events.reduce((s, e) => s + (e.cost ?? 0), 0))} ${costModeNoun()}`,
+    fmt.date(events[0].timestampMs),
+  ].filter(Boolean);
+  $('sessionDetailMeta').textContent = meta.join(' · ');
+
+  const spend = sessionSpendBreakdown(events);
+  const split = spendSplit(spend);
+  // Each half named for what it actually is. The leftover is output *and*
+  // input, and only the cache activities that happened get mentioned.
+  const lead = split ? `<p class="session-spend-lead">
+        <strong>${fmt.pct(split.contextPct)}</strong> of it was context handling${split.contextLabel
+    ? ` — ${split.contextLabel}` : ''}. The answers themselves were
+        <strong>${fmt.pct(split.outputPct)}</strong>, and the prompts you sent
+        <strong>${fmt.pct(split.inputPct)}</strong>.</p>` : '';
+  $('sessionDetailSpend').innerHTML = `
+    <section class="session-spend">
+      <h4>Where this session's money went</h4>
+      ${lead}
+      ${renderBreakdown(spend, null, { unreported: unreportedBuckets(events) })}
+    </section>`;
+
+  const findings = findingsForSession(state.insights, sessionId);
+  $('sessionDetailFindings').innerHTML = findings.length
+    ? `<section class="session-findings"><h4>What stands out</h4>
+        <div class="findings-grid">${renderFindingGrid(findings, {
+    expanded: state.expandedFindings.has(`session:${sessionId}`),
+    toggle: `session:${sessionId}`,
+    linkSession: false,
+    relatedScope: 'this session',
+  })}</div></section>`
+    : '';
+
+  $('sessionDetailTimeline').innerHTML = renderSessionTimeline(events);
+  // Which conversation the dialog is currently showing, so a name that arrives
+  // after it opened can still be put in the heading (see refreshOpenSessionTitle).
+  dialog.dataset.session = sessionId;
+  state.ask.sessionId = sessionId;
+  if (!dialog.open) dialog.showModal();
+}
+
+// ---------------------------------------------------------------------------
+// Ask Cursor Chat about one session, or one request out of it
+// ---------------------------------------------------------------------------
+
+/**
+ * Which pile of dollars the brief is quoting.
+ *
+ * Without this the same brief means two different things depending on a toggle
+ * the reader can't see, and every recommendation that follows is calibrated
+ * against the wrong number.
+ */
+function briefCostBasis() {
+  return state.costMode === 'billed'
+    ? 'billed by the plan'
+    : 'in token value (what-if: the API-equivalent value of the tokens, not necessarily charged)';
+}
+
+function askTemplates(scope) {
+  return BRIEF_TEMPLATES.filter((t) => t.scope === scope);
+}
+
+function currentAskTemplate() {
+  const offered = askTemplates(state.ask.scope);
+  return offered.find((t) => t.id === state.ask.templateId) || offered[0];
+}
+
+/** Everything the pure brief builders need from the dashboard, in one place. */
+function askContext() {
+  return {
+    breakdownOf: breakdownForEvent,
+    classify: (e) => classifyRequest(e, state.analyzeThresholds),
+    ratesOf: (e) => ratesForEvent(e.modelRaw, e),
+    formatTime: (ms) => fmt.date(ms),
+  };
+}
+
+function buildAskBrief() {
+  const { sessionId, scope, requestId } = state.ask;
+  if (!sessionId) return '';
+  const events = sessionEventsInOrder(sessionId);
+  if (!events.length) return '';
+  const session = {
+    id: sessionId,
+    name: sessionId === UNATTRIBUTED_SESSION
+      ? 'requests the API reported no conversation for'
+      : state.sessions.titles.get(sessionId) || sessionId,
+    costBasis: briefCostBasis(),
+  };
+  const question = $('askCustomQ')?.value || '';
+  const template = currentAskTemplate();
+
+  if (scope === 'request') {
+    const event = events.find((e) => e.id === requestId) || events[0];
+    return buildRequestBrief({
+      event,
+      sessionEvents: events,
+      session,
+      findings: findingsForRequest(state.insights, event.id),
+      template,
+      question,
+      ...askContext(),
+    });
+  }
+  return buildSessionBrief({
+    session,
+    events,
+    findings: findingsForSession(state.insights, sessionId),
+    template,
+    question,
+    ...askContext(),
+  });
+}
+
+/**
+ * What the brief will cost to send, before it is sent.
+ *
+ * The whole point of scoping an ask down to one session is spending fewer tokens
+ * on the analysis, and a saving nobody can see isn't one. Priced against the
+ * session's own dominant model, since that's the rate card the user recognises.
+ */
+function renderAskSize(text) {
+  const el = $('askSize');
+  if (!el) return;
+  const { chars, tokens } = estimateBriefSize(text);
+  if (!chars) { el.textContent = ''; return; }
+  const events = state.ask.sessionId ? sessionEventsInOrder(state.ask.sessionId) : [];
+  // The session's most-used model, not its first request's: a session that
+  // opened on one model and ran on another quoted a rate card the user never
+  // recognised, and the first request is the least representative row there is.
+  const dominant = dominantEvent(events);
+  const rates = dominant ? ratesForEvent(dominant.modelRaw, dominant) : null;
+  const dollars = rates?.input != null ? (tokens * rates.input) / 1_000_000 : null;
+  el.textContent = `≈ ${fmt.num(tokens)} tokens (${fmt.num(chars)} characters)`
+    + (dollars != null ? ` — about ${moneyFine(dollars)} to send as input on ${rates.label}.` : '.');
+}
+
+function renderAskDialog() {
+  const { sessionId, scope } = state.ask;
+  if (!sessionId) return;
+  const events = sessionEventsInOrder(sessionId);
+  const name = sessionId === UNATTRIBUTED_SESSION
+    ? 'Requests with no conversation'
+    : sessionLabel(sessionId).text;
+  $('askTitle').textContent = `Ask Cursor Chat about "${name}"`;
+
+  document.querySelectorAll('#askCursorDialog input[name="askScope"]').forEach((el) => {
+    el.checked = el.value === scope;
+  });
+
+  const picker = $('askRequest');
+  picker.classList.toggle('hidden', scope !== 'request');
+  picker.innerHTML = events.map((e, i) =>
+    `<option value="${esc(e.id)}"${e.id === state.ask.requestId ? ' selected' : ''}>#${i + 1} · ${esc(fmt.date(e.timestampMs))} · ${esc(fmt.money(e.cost))}</option>`,
+  ).join('');
+
+  const offered = askTemplates(scope);
+  const chosen = currentAskTemplate();
+  $('askTemplate').innerHTML = offered.map((t) =>
+    `<option value="${esc(t.id)}"${t.id === chosen.id ? ' selected' : ''}>${esc(t.title)}</option>`,
+  ).join('');
+
+  // The question box belongs to the Custom option and nothing else. Left always
+  // open it read as a second question you could add to any template, when in
+  // fact anything typed there replaced the template silently and for good.
+  $('askCustomField').classList.toggle('hidden', chosen.custom !== true);
+
+  updateAskPreview();
+}
+
+function updateAskPreview() {
+  const text = buildAskBrief();
+  const preview = $('askPreview');
+  if (preview) preview.value = text;
+  renderAskSize(text);
+}
+
+/** Opens the ask dialog over whatever the user was already looking at. */
+function openAskDialog(sessionId) {
+  const dialog = $('askCursorDialog');
+  if (!dialog) return;
+  const events = sessionEventsInOrder(sessionId);
+  if (!events.length) return;
+  state.ask.sessionId = sessionId;
+  // The dearest request is the one anybody opening this came to ask about, so
+  // it's what request scope starts on.
+  const dearest = events.reduce((best, e) => ((e.cost ?? 0) > (best.cost ?? 0) ? e : best));
+  if (!events.some((e) => e.id === state.ask.requestId)) state.ask.requestId = dearest.id;
+  renderAskDialog();
+  if (!dialog.open) dialog.showModal();
+}
+
 function renderTable(events, summary) {
   const { rows, totalPages, start, end } = pageSlice(events);
   const costs = events.map((e) => e.cost).filter((c) => c != null);
@@ -2578,24 +3404,69 @@ function renderTable(events, summary) {
     el.classList.toggle('hidden', !showUsageFee);
   });
 
+  // Names for the sessions on this page. Asked for per page rather than for the
+  // whole period: the lookup reads Cursor's database, and 25 ids is enough to
+  // fill the column the user is actually looking at.
+  void loadSessionTitles(rows.map((e) => e.conversationId).filter(Boolean));
+
   $('tableBody').innerHTML = rows.map((e) => {
     const expensive = e.cost != null && e.cost >= (p75 || 0.25);
     const savingsTitle = e.pricingLabel
       ? ` title="Used ${esc(e.pricingLabel)} pricing: cache-read × (input − cache-read rate)"`
       : (e.cacheReadTokens > 0 ? ' title="No matching model pricing — savings unavailable"' : '');
-    return `<tr class="${expensive ? 'expensive' : ''}">
-      <td>${fmt.date(e.timestampMs)}</td>
+    const flags = findingsForRequest(state.insights, e.id);
+    const sessionId = e.conversationId || null;
+    // Same label the session list uses: an unnamed conversation is shortened
+    // rather than printed in full, so one column doesn't read as a 24-character
+    // id while the other reads as "conv_0000…0023".
+    const sessionCell = sessionCellFor(sessionId);
+    const open = state.expandedRequests.has(e.id);
+    const kind = classifyRequest(e, state.analyzeThresholds);
+    // A compaction is not a request the user made, and it is the one row people
+    // go looking for after reading "summarising worked" — so it says so in the
+    // log rather than only inside the detail nobody has expanded yet.
+    // A native title rather than the .tip pattern: the other per-row
+    // explanations in this table use one, and a CSS tooltip here would be
+    // clipped by the log's own horizontal scroll.
+    const kindChip = kind === 'compaction'
+      ? '<span class="kind-chip" title="Cursor compacting the conversation: the whole thread went up'
+        + ' in one uncached request and a summary came back. Not a request you made.">summary</span>'
+      : '';
+    const row = `<tr class="${expensive ? 'expensive' : ''}${open ? ' row-open' : ''}" data-request="${esc(e.id)}">
+      <td class="time-cell"><button type="button" class="row-toggle" data-toggle="${esc(e.id)}"
+        aria-expanded="${open}" title="What this request's cost was made of">${open ? '▾' : '▸'}</button>${fmt.date(e.timestampMs)}${kindChip}${insightBadge(flags)}</td>
       <td>${esc(e.model)}${discountBadge(discountForEvent(e.modelRaw, e.timestampMs))}</td>
+      <td class="session-cell">${sessionCell}</td>
       <td class="cost">${fmt.money(e.cost)}</td>
       <td class="usage-fee${showUsageFee ? '' : ' hidden'}">${e.requestCharge != null ? fmt.money(e.requestCharge) : '—'}</td>
       <td class="savings"${savingsTitle}>${e.cacheSavings != null ? fmt.money(e.cacheSavings) : '—'}</td>
-      <td class="tokens">${fmt.num(e.inputTokens)}</td>
-      <td class="tokens">${fmt.num(e.outputTokens)}</td>
-      <td class="tokens">${fmt.num(e.cacheReadTokens)}</td>
-      <td class="tokens">${fmt.num(e.cacheWriteTokens)}</td>
-      <td class="tokens">${fmt.num(e.totalTokens)}</td>
+      ${tokenCell(e, 'input')}
+      ${tokenCell(e, 'output')}
+      ${tokenCell(e, 'cacheRead')}
+      ${tokenCell(e, 'cacheWrite')}
+      <td class="tokens"${(e.unreportedBuckets || []).length
+  ? ' title="Sum of the counts Cursor sent — buckets shown as — are not in it."' : ''}>${fmt.num(e.totalTokens)}</td>
       <td><button type="button" class="btn-link btn-compare" data-id="${esc(e.id)}">Compare</button></td>
     </tr>`;
+    if (!open) return row;
+    const kindNote = kind === 'compaction'
+      ? '<p class="bd-note">This looks like Cursor compacting the conversation: the whole thread went up '
+        + 'in one uncached request and a summary came back. It is not a request you made.</p>'
+      : '';
+    return `${row}<tr class="row-detail" data-detail="${esc(e.id)}"><td colspan="12">
+      <div class="detail-sticky">
+        <div class="detail-grid${flags.length ? '' : ' no-findings'}">
+          <div>
+            <h4>What this cost was made of</h4>
+            ${renderBreakdown(breakdownForEvent(e), e)}
+            ${kindNote}
+          </div>
+          ${flags.length
+            ? `<div><h4>What stands out</h4><div class="findings-grid">${renderFindingCards(flags, { linkRequest: false })}</div></div>`
+            : ''}
+        </div>
+      </div>
+    </td></tr>`;
   }).join('');
 
   const pageCost = sumRows(rows.filter((e) => e.cost != null), 'cost');
@@ -2603,7 +3474,7 @@ function renderTable(events, summary) {
   const pageSavings = sumRows(rows.filter((e) => e.cacheSavings != null), 'cacheSavings');
   const feeCol = `<td class="usage-fee${showUsageFee ? '' : ' hidden'}">${fmt.money(pageFees)}</td>`;
   $('tableFoot').innerHTML = `<tr>
-    <td colspan="2">Page subtotal (${rows.length} rows)</td>
+    <td colspan="3">Page subtotal (${rows.length} rows)</td>
     <td class="cost">${fmt.money(pageCost)}</td>
     ${feeCol}
     <td class="savings">${fmt.money(pageSavings)}</td>
@@ -2801,6 +3672,13 @@ function overviewCostSubHtml(summary) {
 function refresh() {
   const baseEvents = applyFilters(state.all);
   state.filtered = sortEvents(applyCostMode(baseEvents));
+  // Built once per filter change, off the same rows every view renders, so the
+  // same tip reaches the Overview, the session list and the request row.
+  state.insights = buildInsights({
+    events: state.filtered,
+    ratesFor: ratesForEvent,
+    thresholds: state.analyzeThresholds,
+  });
   const summary = summarize(state.filtered);
   summary.costMode = state.costMode;
   summary.valueTotal = baseEvents.reduce((s, e) => s + (e.valueCost ?? 0), 0);
@@ -2974,10 +3852,23 @@ function renderOverview() {
     if (top) {
       insightPanel.classList.remove('hidden');
       $('ovInsightCard').className = `finding-card ov-insight-card severity-${top.severity}`;
+      // The link matters more here than anywhere else: Overview is the screen
+      // with no request log on it, so without a way through, a finding about
+      // one specific request is a statement the user can't act on.
+      const links = [];
+      if (top.anchor?.requestId) {
+        links.push(`<button type="button" class="btn-link finding-jump" data-request="${esc(top.anchor.requestId)}">Show me the request →</button>`);
+      }
+      if (top.anchor?.sessionId && top.anchor.sessionId !== UNATTRIBUTED_SESSION) {
+        links.push(`<button type="button" class="btn-link finding-session" data-session="${esc(top.anchor.sessionId)}">Open the session →</button>`);
+      }
+      const others = data.findings.length - 1;
       $('ovInsightCard').innerHTML = `
-        <h4>${esc(top.title)}</h4>
+        <h4>${esc(top.title)}${top.impact > 0 ? `<span class="finding-impact">${fmt.money(top.impact)}</span>` : ''}</h4>
         <p>${esc(top.body)}</p>
-        <span class="finding-action">→ ${esc(top.action)}</span>`;
+        <span class="finding-action">→ ${esc(top.action)}</span>
+        ${links.length ? `<div class="finding-links">${links.join('')}</div>` : ''}
+        ${others > 0 ? `<p class="ov-insight-more">${fmt.num(others)} more finding${others === 1 ? '' : 's'} in Analyze.</p>` : ''}`;
     } else {
       insightPanel.classList.add('hidden');
     }
@@ -3058,6 +3949,9 @@ async function load() {
     // Written every load, because "no discount found" has several very
     // different causes and none of them are visible from the panel.
     void rpc('log', { text: describeDiscountRun(state.detectedDiscounts, state.all.length) }).catch(() => {});
+    // Same reason: a built-in Auto rate looks exactly like a scraped one from
+    // the panel, and only the page itself says which the user is looking at.
+    void rpc('log', { text: describePricingScrape(state.pricing) }).catch(() => {});
     // Not signed in is not "zero usage" — keep the placeholders in that case.
     state.loaded = usage.authMode !== 'none';
     state.page = 1;
@@ -3183,6 +4077,17 @@ function csvCell(v) {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+/**
+ * A token count for the CSV — blank when Cursor sent none.
+ *
+ * Blank, not 0: an absent count is absent data, and a zero would be
+ * indistinguishable from a request that genuinely moved no tokens in that
+ * bucket. Anything parsing this column has to treat an empty cell as unknown.
+ */
+function csvToken(event, bucket) {
+  return (event.unreportedBuckets || []).includes(bucket) ? '' : event[BUCKET_TOKEN_FIELD[bucket]];
+}
+
 function exportCsv() {
   if (!state.filtered.length) {
     showAlert('warn', 'Nothing to export — no requests in the current filter.');
@@ -3202,17 +4107,36 @@ function exportCsv() {
     e.billedCost ?? '',
     e.requestCharge ?? '',
     e.cacheSavings ?? '',
-    e.inputTokens,
-    e.outputTokens,
-    e.cacheReadTokens,
-    e.cacheWriteTokens,
+    csvToken(e, 'input'),
+    csvToken(e, 'output'),
+    csvToken(e, 'cacheRead'),
+    csvToken(e, 'cacheWrite'),
     e.totalTokens,
     e.planMeteredCost ?? '',
     e.billingRegime,
   ]);
   const csv = [headers.join(','), ...rows.map((r) => r.map(csvCell).join(','))].join('\n');
   const filename = `cursor-usage-${$('startDate').value}-${$('endDate').value}.csv`;
+  // In a browser tab the host's save dialog would open behind the IDE window,
+  // where nobody watching this tab would see it. The browser's own download is
+  // both visible and where a browser user expects a file to land.
+  if (!inVsCode) {
+    downloadCsv(csv, filename);
+    return;
+  }
   rpc('exportCsv', { csv, filename }).catch((e) => showAlert('error', `Export failed: ${e.message}`));
+}
+
+function downloadCsv(csv, filename) {
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showAlert('info', `Downloading ${filename}.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -3329,7 +4253,13 @@ function computeAnalyzeData(events, summary, thresholds = state.analyzeThreshold
   const tokens = tokenTotals(events);
   const totalTok = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
   const withCache = events.filter((e) => e.cacheReadTokens > 0);
-  const coldStarts = events.filter((e) => e.cacheReadTokens === 0 && e.inputTokens > thresholds.coldStartInputTokens);
+  // Compactions also read no cache, and counting them here both inflated the
+  // number and produced backwards advice — "continue existing threads" is the
+  // opposite of what a thread being summarised needs. classifyRequest tells
+  // them apart on cache writes: a real cold start caches the prefix it just
+  // established, a compaction caches nothing.
+  const coldStarts = events.filter((e) => classifyRequest(e, thresholds) === 'coldStart');
+  const compactions = events.filter((e) => classifyRequest(e, thresholds) === 'compaction');
   const highOutput = events.filter((e) => e.outputTokens > thresholds.heavyOutputTokens);
   const expensive = [...events].filter((e) => e.cost != null).sort((a, b) => b.cost - a.cost).slice(0, 10);
   const costs = events.map((e) => e.cost).filter((c) => c != null);
@@ -3343,15 +4273,26 @@ function computeAnalyzeData(events, summary, thresholds = state.analyzeThreshold
     ? events.reduce((s, e) => s + e.cacheReadTokens, 0) / events.length
     : 0;
 
-  const findings = buildAnalyzeFindings(events, summary, {
-    modelRows, tokens, totalTok, withCache, coldStarts, highOutput, expensive, autoPct, cacheHitRate, p75,
+  // The anchored findings lead, because they carry a dollar figure and a link
+  // to the request they are about; the period-level ones describe the shape of
+  // the whole range and read as context underneath. Positives go last wherever
+  // they came from — "this is working" should never outrank real money.
+  const periodFindings = buildAnalyzeFindings(events, summary, {
+    modelRows, tokens, totalTok, withCache, coldStarts, compactions, highOutput, expensive, autoPct, cacheHitRate, p75,
   }, thresholds);
+  const findings = [
+    ...state.insights.filter((f) => f.severity !== 'positive'),
+    ...periodFindings.filter((f) => f.severity !== 'positive'),
+    ...state.insights.filter((f) => f.severity === 'positive'),
+    ...periodFindings.filter((f) => f.severity === 'positive'),
+  ];
 
   return {
     summary,
     modelRows,
     tokens,
     totalTok,
+    unreported: unreportedBuckets(events),
     cache: { withCache: withCache.length, coldStarts: coldStarts.length, cacheHitRate, avgCacheRead, totalSavings: summary.totalSavings },
     expensive,
     dailyRows,
@@ -3414,11 +4355,23 @@ function buildAnalyzeFindings(events, summary, ctx, thresholds = state.analyzeTh
 
   if (summary.totalSavings > 0 && summary.noCache > 0) {
     const pct = (summary.totalSavings / summary.noCache) * 100;
+    // The saving is real, but "keep long threads open" is the wrong lesson to
+    // draw from it on a range whose dearest requests are mostly re-read
+    // context — that advice is what ran the bill up. The counterfactual behind
+    // this figure is paying full input price for those tokens, not avoiding
+    // them, so it shouldn't be read as an argument for accumulating more.
+    const contextHeavy = state.insights.some(
+      (f) => f.rule === 'context-blowup' || f.rule === 'stale-resume',
+    );
     findings.push({
       severity: 'positive',
       title: 'Cache is working',
-      body: `Estimated ${fmt.money(summary.totalSavings)} saved (${fmt.pct(pct)} of no-cache cost).`,
-      action: 'Keep long agent threads open — restarting chats loses cached context.',
+      body: `Estimated ${fmt.money(summary.totalSavings)} saved (${fmt.pct(pct)} of no-cache cost)`
+        + `${contextHeavy ? ', against paying full input price for those same tokens' : ''}.`,
+      action: contextHeavy
+        ? 'Worth keeping in perspective: the flagged requests above still spent more re-reading context '
+          + 'than on the answers. Cheap re-reads are not the same as few of them.'
+        : 'Keep long agent threads open — restarting chats loses cached context.',
     });
   } else if (ctx.cacheHitRate < thresholds.cacheHitWarnPct && events.length > 10) {
     findings.push({
@@ -3433,7 +4386,8 @@ function buildAnalyzeFindings(events, summary, ctx, thresholds = state.analyzeTh
     findings.push({
       severity: 'medium',
       title: `${ctx.coldStarts.length} cold starts`,
-      body: 'Large fresh input with no cache reads — you paid full input price.',
+      body: 'Large fresh input with no cache reads — you paid full input price'
+        + `${ctx.compactions.length ? `. ${ctx.compactions.length} conversation compaction${ctx.compactions.length === 1 ? '' : 's'} are counted separately, since summarising a thread is not starting one` : ''}.`,
       action: 'Continue existing threads instead of opening new ones for related work.',
     });
   }
@@ -3447,15 +4401,9 @@ function buildAnalyzeFindings(events, summary, ctx, thresholds = state.analyzeTh
     });
   }
 
-  if (ctx.expensive.length && ctx.p75 > 0) {
-    const topReq = ctx.expensive[0];
-    findings.push({
-      severity: 'high',
-      title: 'Spike requests add up',
-      body: `Top request: ${fmt.money(topReq.cost)} on ${fmt.date(topReq.timestampMs)} (${fmt.num(topReq.totalTokens)} tokens).`,
-      action: 'Use Simulator → Compare on expensive rows to see if a cheaper model fits.',
-    });
-  }
+  // The old "spike requests add up" finding lived here. The anchored
+  // spend-concentration finding says the same thing with the dollars attached
+  // and a link to the request, so keeping both just said it twice.
 
   if (summary.hasUsageFees && summary.totalRequestFees > 0) {
     findings.push({
@@ -3497,12 +4445,10 @@ function renderAnalyzeHero(data, events) {
 }
 
 function renderAnalyzeFindings(findings) {
-  $('analyzeFindings').innerHTML = findings.map((f) => `
-    <article class="finding-card severity-${f.severity}">
-      <h4>${esc(f.title)}</h4>
-      <p>${esc(f.body)}</p>
-      <span class="finding-action">→ ${esc(f.action)}</span>
-    </article>`).join('');
+  $('analyzeFindings').innerHTML = renderFindingGrid(findings, {
+    expanded: state.expandedFindings.has('analyze'),
+    toggle: 'analyze',
+  });
 }
 
 function renderAnalyzeModelPanel(modelRows, totalCost) {
@@ -3551,18 +4497,23 @@ function renderAnalyzeExpensivePanel(expensive) {
     <tr>
       <td>${fmt.date(e.timestampMs)}</td>
       <td>${esc(e.model)}${discountBadge(discountForEvent(e.modelRaw, e.timestampMs))}</td>
+      <td class="session-cell">${sessionCellFor(e.conversationId || null)}</td>
       <td class="num">${fmt.money(e.cost)}</td>
       <td class="num">${fmt.num(e.cacheReadTokens)}</td>
       <td class="num">${fmt.num(e.totalTokens)}</td>
       <td><button type="button" class="btn-link btn-compare" data-id="${esc(e.id)}">Compare</button></td>
     </tr>`).join('');
+  // The names come from a local database, so they arrive after the first paint
+  // — the same lookup the request log does, for the ids this table shows.
+  void loadSessionTitles(expensive.map((e) => e.conversationId).filter(Boolean));
 
   $('analyzeExpensivePanel').innerHTML = `
     <h3>Most expensive requests</h3>
-    <p class="panel-desc">Open Simulator to replay token profile against other models</p>
+    <p class="panel-desc">Open a session to see what the request was part of, or Simulator to replay
+      its token profile against other models</p>
     <table class="analyze-table">
-      <thead><tr><th>Time</th><th>Model</th><th class="num">Cost</th><th class="num">Cache read</th><th class="num">Total tok</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6">No cost data</td></tr>'}</tbody>
+      <thead><tr><th>Time</th><th>Model</th><th>Session</th><th class="num">Cost</th><th class="num">Cache read</th><th class="num">Total tok</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7">No cost data</td></tr>'}</tbody>
     </table>`;
 }
 
@@ -3643,20 +4594,31 @@ function buildBriefSectionCache(data) {
     `- Cache hit rate: ${fmt.pct(cache.cacheHitRate)} (${fmt.num(cache.withCache)} requests)`,
     `- Cold starts: ${fmt.num(cache.coldStarts)}`,
     `- Total cache savings (est.): ${fmt.money(cache.totalSavings)}`,
-    `- Token mix: input ${fmt.num(tokens.input)}, output ${fmt.num(tokens.output)}, cache read ${fmt.num(tokens.cacheRead)}, cache write ${fmt.num(tokens.cacheWrite)} (${fmt.num(totalTok)} total)`,
+    `- Token mix: ${BUCKET_ORDER.slice().reverse()
+      .map((k) => `${BUCKET_LABELS[k].toLowerCase()} ${briefToken(data.unreported, k, tokens[k])}`)
+      .join(', ')} (${fmt.num(totalTok)} total)`,
   ].join('\n');
+}
+
+/**
+ * A count for a brief, which is read by a model rather than a person.
+ *
+ * "0" is the one thing this must never say for a bucket Cursor omitted: a model
+ * handed a zero will reason from it — "this session cached nothing" — and build
+ * an argument on a measurement that does not exist.
+ */
+const BRIEF_UNREPORTED = 'not reported by Cursor (unknown, not zero)';
+
+function briefToken(unreported, bucket, value) {
+  return unreported?.has(bucket) ? BRIEF_UNREPORTED : fmt.num(value);
 }
 
 function buildBriefSectionTokenMix(data) {
   const { tokens, totalTok } = data;
   if (!totalTok) return '- No token data';
   const pct = (n) => `${fmt.pct((n / totalTok) * 100)}`;
-  return [
-    `- Input: ${fmt.num(tokens.input)} (${pct(tokens.input)})`,
-    `- Output: ${fmt.num(tokens.output)} (${pct(tokens.output)})`,
-    `- Cache read: ${fmt.num(tokens.cacheRead)} (${pct(tokens.cacheRead)})`,
-    `- Cache write: ${fmt.num(tokens.cacheWrite)} (${pct(tokens.cacheWrite)})`,
-  ].join('\n');
+  return BUCKET_ORDER.slice().reverse().map((k) => `- ${BUCKET_LABELS[k]}: ${
+    data.unreported?.has(k) ? BRIEF_UNREPORTED : `${fmt.num(tokens[k])} (${pct(tokens[k])})`}`).join('\n');
 }
 
 function buildBriefSectionTopRequests(expensive) {
@@ -3713,13 +4675,9 @@ function buildCursorBrief() {
     parts.push('## Dashboard findings (rule-based)', buildBriefSectionFindings(data.findings), '');
   }
 
-  parts.push(
-    '---',
-    'Notes for the model:',
-    '- Auto optimizes for task success and uses the Auto+Composer pool — not always the cheapest rate card.',
-    '- Cheaper models in comparisons assume the same token counts; real usage may differ.',
-    '- Token cost excludes flat per-request usage fees unless noted in summary.',
-  );
+  // Shared with the session and request briefs so the three can't drift into
+  // giving the reader different caveats about the same numbers.
+  parts.push('---', 'Notes for the model:', ...BRIEF_NOTES);
 
   return parts.join('\n');
 }
@@ -3772,30 +4730,45 @@ function renderAnalyze() {
   updateBriefPreview();
 }
 
+/**
+ * Puts a brief on the clipboard and opens Cursor's chat next to it.
+ *
+ * Shared by the period panel and the per-session dialog so the two can't drift
+ * into saying different things about the same operation. Never populates or
+ * submits the prompt itself — there's no reliable way to do that across Cursor
+ * versions, and doing it wrong could fire an unreviewed prompt on the user's
+ * behalf — so this only opens the panel, and says "paste it yourself" when even
+ * that isn't supported here.
+ *
+ * Returns false when the copy failed, so callers can fall back to showing the
+ * text somewhere the user can select it by hand.
+ */
+async function sendBriefToCursor(text, statusEl) {
+  if (!text) return false;
+  let outcome;
+  try {
+    outcome = await rpc('sendToCursorChat', { text });
+  } catch {
+    return false;
+  }
+  if (statusEl) {
+    // Three different things can have happened and only one of them is "done".
+    // Saying "opened and pasted" when the text is merely on the clipboard sends
+    // the user to a chat window to press Enter on nothing.
+    statusEl.textContent = outcome?.pasted
+      ? 'Opened Cursor Chat with the brief in the box — read it, then press Enter'
+      : outcome?.opened
+        ? 'Copied — Cursor Chat is open, press ⌘/Ctrl+V then Enter'
+        : 'Copied — paste in Cursor Chat';
+    setTimeout(() => { statusEl.textContent = ''; }, 6000);
+  }
+  return true;
+}
+
 async function copyCursorBrief() {
   const text = buildCursorBrief();
   if (!text) return;
-  try {
-    await rpc('copyText', { text });
-    // Best-effort: also try to bring Cursor's chat panel into focus so
-    // there's less to hunt for. Never populates or sends the prompt itself —
-    // there's no reliable way to do that across Cursor versions, and doing
-    // it wrong could submit an unreviewed prompt on the user's behalf. Falls
-    // back to the plain "paste it yourself" message if unsupported here.
-    let opened = false;
-    try {
-      opened = Boolean((await rpc('focusCursorChat')).opened);
-    } catch {
-      opened = false;
-    }
-    const status = $('copyBriefStatus');
-    if (status) {
-      status.textContent = opened
-        ? 'Copied — Cursor Chat is open, press ⌘/Ctrl+V then Enter'
-        : 'Copied — paste in Cursor Chat';
-      setTimeout(() => { status.textContent = ''; }, 4000);
-    }
-  } catch {
+  if (!await sendBriefToCursor(text, $('copyBriefStatus'))) {
     $('analyzeBriefPreview').value = text;
     $('analyzeBriefPreview').closest('details')?.setAttribute('open', 'open');
     showAlert('info', 'Could not copy automatically — select the preview text and copy manually.');
@@ -4493,8 +5466,10 @@ function runCompareFromRequest() {
       <div><dt>When</dt><dd>${fmt.date(event.timestampMs)}</dd></div>
       <div><dt>Model used ${tip('The model Cursor billed for this request. Auto means Cursor chose the model automatically.')}</dt><dd>${esc(event.model)}${discountBadge(discountForEvent(event.modelRaw, event.timestampMs))}</dd></div>
       <div><dt>Actual token cost ${tip('What Cursor charged for model/API tokens on this request. Does not include flat usage fees on some plans, and always the token value rather than the Billed figure — the comparison below prices tokens, so its baseline has to as well.')}</dt><dd>${fmt.money(actualCost)}</dd></div>
-      <div><dt>Input / output ${tip('Token counts from your request — replayed as-is when estimating other models.')}</dt><dd>${fmt.num(tokens.input)} / ${fmt.num(tokens.output)}</dd></div>
-      <div><dt>Cache read / write ${tip('Prompt cache tokens from this request. Savings estimates assume similar cache behavior on other models.')}</dt><dd>${fmt.num(tokens.cacheRead)} / ${fmt.num(tokens.cacheWrite)}</dd></div>
+      <div><dt>Input / output ${tip('Token counts from your request — replayed as-is when estimating other models.')}</dt><dd>${simTokenFigure(event, 'input', tokens.input)} / ${
+  simTokenFigure(event, 'output', tokens.output)}</dd></div>
+      <div><dt>Cache read / write ${tip('Prompt cache tokens from this request. Savings estimates assume similar cache behavior on other models.')}</dt><dd>${simTokenFigure(event, 'cacheRead', tokens.cacheRead)} / ${
+  simTokenFigure(event, 'cacheWrite', tokens.cacheWrite)}</dd></div>
       <div><dt>Total tokens ${tip('Sum of input, output, cache read, and cache write tokens.')}</dt><dd>${fmt.num(event.totalTokens)}</dd></div>`;
   }
 
@@ -4651,6 +5626,19 @@ async function init() {
   $('refreshBtn').addEventListener('click', load);
   $('exportBtn').addEventListener('click', exportCsv);
 
+  // Only meaningful inside the VS Code webview — a tab opened this way is
+  // already a browser tab, so the button stays hidden there (default state).
+  if (inVsCode) {
+    $('openInBrowserSep')?.classList.remove('hidden');
+    const openInBrowserBtn = $('openInBrowserBtn');
+    if (openInBrowserBtn) {
+      openInBrowserBtn.classList.remove('hidden');
+      openInBrowserBtn.addEventListener('click', () => {
+        rpc('openInBrowser', {}).catch(() => {});
+      });
+    }
+  }
+
   document.querySelectorAll(PRESET_BTN_SELECTOR).forEach((btn) => {
     btn.addEventListener('click', () => onPresetClick(btn.dataset.preset));
   });
@@ -4701,6 +5689,10 @@ async function init() {
   // to its own change event — handling both would toggle the row twice.
   $('sessionsList')?.addEventListener('click', (ev) => {
     if (ev.target.closest('input[type="checkbox"]')) return;
+    // The name is a link into the session's own view, handled by the delegated
+    // finding/session listener. Without this it also toggled the row into the
+    // comparison tray, so opening a session quietly picked it for comparison.
+    if (ev.target.closest('.session-open')) return;
     const sortable = ev.target.closest('[data-session-sort]');
     if (sortable) {
       setSessionSort(sortable.dataset.sessionSort);
@@ -4886,9 +5878,84 @@ async function init() {
   });
 
   $('tableBody')?.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('.btn-compare');
-    if (!btn) return;
-    openCompare(btn.dataset.id);
+    const compare = ev.target.closest('.btn-compare');
+    if (compare) {
+      openCompare(compare.dataset.id);
+      return;
+    }
+    // A session link opens the dialog through the delegated handler further
+    // down, which serves every table that renders one. Here it only has to not
+    // *also* toggle the row open behind the dialog.
+    if (ev.target.closest('.session-link')) return;
+    // Anywhere else on the row opens the breakdown — the disclosure arrow is
+    // the affordance, but a whole row is a much easier target than a glyph.
+    const row = ev.target.closest('tr[data-request]');
+    if (!row) return;
+    const id = row.dataset.request;
+    if (state.expandedRequests.has(id)) state.expandedRequests.delete(id);
+    else state.expandedRequests.add(id);
+    renderTable(state.filtered, summarize(state.filtered));
+  });
+
+  // Findings carry their own links, and they appear in several containers.
+  document.addEventListener('click', (ev) => {
+    const toggle = ev.target.closest('[data-findings-toggle]');
+    if (toggle) {
+      const key = toggle.dataset.findingsToggle;
+      if (state.expandedFindings.has(key)) state.expandedFindings.delete(key);
+      else state.expandedFindings.add(key);
+      if (key.startsWith('session:')) openSessionDetail(key.slice('session:'.length));
+      else renderAnalyze();
+      return;
+    }
+    const toRequest = ev.target.closest('.finding-jump, .tl-bar');
+    if (toRequest) {
+      jumpToRequest(toRequest.dataset.request);
+      return;
+    }
+    const toSession = ev.target.closest('.finding-session, .session-open, .session-link');
+    if (toSession) openSessionDetail(toSession.dataset.session);
+  });
+
+  $('sessionDetailClose')?.addEventListener('click', () => $('sessionDetailDialog').close());
+
+  // Delegated so it survives the timeline being re-rendered, and bound to focus
+  // as well as hover so the bars are readable without a pointer — which the
+  // native title attribute they used to carry never was.
+  const timeline = $('sessionDetailTimeline');
+  timeline?.addEventListener('mouseover', (ev) => showTimelineTip(ev.target.closest('.tl-bar')));
+  timeline?.addEventListener('focusin', (ev) => showTimelineTip(ev.target.closest('.tl-bar')));
+  timeline?.addEventListener('mouseleave', hideTimelineTip);
+  timeline?.addEventListener('focusout', hideTimelineTip);
+  // The plot scrolls sideways on a long session, which would leave the tip
+  // pointing at wherever the bar used to be.
+  timeline?.addEventListener('scroll', hideTimelineTip, true);
+  // The dialog body scrolls too, and the tip is positioned in viewport
+  // coordinates — so scrolling the panel behind it leaves it pointing at empty
+  // space. Captured on the dialog, since a scroll event does not bubble.
+  $('sessionDetailDialog')?.addEventListener('scroll', hideTimelineTip, true);
+  $('sessionDetailDialog')?.addEventListener('close', hideTimelineTip);
+
+  // Stacks on top of the session dialog rather than replacing it, so closing the
+  // ask puts the user back on the breakdown they were reading.
+  $('sessionAskBtn')?.addEventListener('click', () => openAskDialog(state.ask.sessionId));
+  $('askClose')?.addEventListener('click', () => $('askCursorDialog').close());
+  $('askCursorDialog')?.addEventListener('change', (ev) => {
+    const target = ev.target;
+    if (target.name === 'askScope') state.ask.scope = target.value;
+    else if (target.id === 'askRequest') state.ask.requestId = target.value;
+    else if (target.id === 'askTemplate') state.ask.templateId = target.value;
+    else return;
+    renderAskDialog();
+  });
+  $('askCustomQ')?.addEventListener('input', updateAskPreview);
+  $('askCopy')?.addEventListener('click', async () => {
+    const text = buildAskBrief();
+    if (!text) return;
+    if (!await sendBriefToCursor(text, $('askStatus'))) {
+      $('askPreview').closest('details')?.setAttribute('open', 'open');
+      showAlert('info', 'Could not copy automatically — select the preview text and copy manually.');
+    }
   });
 
   $('analyzeExpensivePanel')?.addEventListener('click', (ev) => {

@@ -29,7 +29,47 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
   <link rel="stylesheet" href="${styles}" />
 </head>
 <body>
-  <div class="app">
+${dashboardBody()}
+  <script nonce="${n}" src="${script}"></script>
+</body>
+</html>`;
+}
+
+/**
+ * Standalone page served by the local browser server (see browserServer.ts)
+ * so the dashboard can be opened in a real browser tab instead of the VS
+ * Code webview. Same body markup and bundled main.js/styles.css.
+ *
+ * Carries no token of its own. main.js picks the token out of the launch URL
+ * and keeps it in sessionStorage — which is what lets the tab survive a
+ * reload, and what keeps this page free of the inline script that
+ * `script-src 'self'` would (correctly) refuse to run.
+ *
+ * `class="standalone"` marks the one context where no VS Code theme variables
+ * exist, so the stylesheet can follow the OS light/dark preference instead of
+ * always rendering the light fallback palette.
+ */
+export function getBrowserDashboardHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self';" />
+  <title>Cursor Usage Dashboard</title>
+  <link rel="icon" href="/favicon.png" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="standalone">
+${dashboardBody()}
+  <script src="/main.js"></script>
+</body>
+</html>`;
+}
+
+function dashboardBody(): string {
+  return `  <div class="app">
     <header class="header">
       <div class="header-top">
         <div class="brand">
@@ -39,6 +79,8 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             <a href="https://cursor.com/dashboard/usage">Official usage dashboard ↗</a>
             <span>·</span>
             <a href="https://cursor.com/docs/models-and-pricing">Model pricing ↗</a>
+            <span id="openInBrowserSep" class="hidden">·</span>
+            <button type="button" class="btn-link-inline hidden" id="openInBrowserBtn">Open in browser ↗</button>
           </p>
         </div>
         <nav class="app-nav" aria-label="Main">
@@ -195,7 +237,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <div class="table-head">
           <div>
             <h3>Request log</h3>
-            <p class="table-desc" id="tableCostDesc">Token cost per request (not the flat usage fee). Hover ⓘ on column headers for help.</p>
+            <p class="table-desc" id="tableCostDesc">Token cost per request (not the flat usage fee). Hover ⓘ on column headers for help. Click any row to see what its cost was made of.</p>
           </div>
           <div class="table-controls">
             <label class="inline-label">
@@ -214,6 +256,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
               <tr>
                 <th scope="col" tabindex="0" data-sort="timestampMs">Time</th>
                 <th scope="col" tabindex="0" data-sort="model">Model <span class="tip" tabindex="0" data-tip="Auto = Cursor picked the model and didn't say which. When it does say — &quot;Auto Balance → Grok 4.5&quot; — that's Balance/Intelligence mode, billed and priced at that model's own rate; plain Auto is priced at Auto's bundled rate. Token cost itself is always Cursor's real charge either way.">ⓘ</span></th>
+                <th scope="col">Session <span class="tip" tabindex="0" data-tip="The Cursor conversation this request belongs to. Names are read from Cursor on this machine; requests the API reports no conversation for show a dash. Click one to open that session's breakdown.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="cost"><span id="colCostLabelText">Token cost</span> <span class="tip" tabindex="0" data-tip="Model/API charge from token usage — the number that reflects how expensive the request actually was. Follows the Costs toggle: What-if shows the API-equivalent value of the tokens, Billed shows what your plan charged.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="requestCharge" id="colUsageFee" class="hidden">Usage fee <span class="tip" tabindex="0" data-tip="Extra flat per-request charge on usage-based plans (e.g. $0.04). Not part of token cost above.">ⓘ</span></th>
                 <th scope="col" tabindex="0" data-sort="cacheSavings">Cache saved <span class="tip" tabindex="0" data-tip="Per request: cache-read tokens × (input rate − cache-read rate) using that request's model pricing. Hover a cell to see which rate was used.">ⓘ</span></th>
@@ -434,12 +477,90 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
             <textarea id="analyzeBriefPreview" readonly rows="12"></textarea>
           </details>
           <div class="analyze-actions">
-            <button type="button" id="copyCursorBrief" class="btn primary">Copy for Cursor Chat</button>
+            <button type="button" id="copyCursorBrief" class="btn primary">Open and paste in Cursor Chat</button>
             <span id="copyBriefStatus" class="copy-status" aria-live="polite"></span>
           </div>
         </aside>
       </div>
     </section>
+
+      <!--
+      One session, opened from anywhere that names it: the session list, a
+      request row, or a finding's "show me" link. A dialog rather than a
+      fourth sub-tab because it is always reached from a specific session
+      rather than browsed to, and because closing it should put the user back
+      where they were.
+    -->
+    <dialog id="sessionDetailDialog" class="sessions-dialog session-detail">
+      <header class="sessions-dialog-head">
+        <div>
+          <h3 id="sessionDetailTitle">Session</h3>
+          <p class="panel-desc" id="sessionDetailMeta"></p>
+        </div>
+        <div class="sessions-dialog-controls">
+          <button type="button" class="btn primary" id="sessionAskBtn">Ask Cursor Chat</button>
+          <button type="button" class="btn" id="sessionDetailClose">Close</button>
+        </div>
+      </header>
+      <div class="session-detail-body">
+        <div id="sessionDetailSpend"></div>
+        <div id="sessionDetailFindings"></div>
+        <section class="session-timeline-wrap">
+          <h4>Cost per request</h4>
+          <p class="panel-desc">Each bar is one request, in order. The shaded part is context handling —
+            the conversation re-read from cache, and written to it — as opposed to the prompt you sent
+            and the answer that came back.</p>
+          <div id="sessionDetailTimeline" class="session-timeline"></div>
+        </section>
+      </div>
+      <!--
+        Inside the dialog on purpose: a modal renders in the top layer, so a
+        tooltip parented to <body> would sit behind it whatever its z-index.
+      -->
+      <div id="tlTip" class="tl-tip" role="tooltip" hidden></div>
+    </dialog>
+
+      <!--
+      Handing one session — or one request out of it — to Cursor's own chat.
+      Outside every view section on purpose: a <dialog> inside a display:none
+      ancestor opens at zero size, and this one is reached from the session
+      dialog, which can be open from anywhere.
+    -->
+    <dialog id="askCursorDialog" class="sessions-dialog ask-dialog">
+      <header class="sessions-dialog-head">
+        <div>
+          <h3 id="askTitle">Ask Cursor Chat</h3>
+          <p class="panel-desc">Copy a compact brief and paste it into Cursor Chat. Token counts,
+            timings and costs only — never anything you wrote.</p>
+        </div>
+        <button type="button" class="btn" id="askClose">Close</button>
+      </header>
+      <div class="ask-body">
+        <fieldset class="ask-scope">
+          <legend>What to ask about</legend>
+          <label><input type="radio" name="askScope" value="session" checked /> The whole session</label>
+          <label><input type="radio" name="askScope" value="request" /> One request</label>
+          <select id="askRequest" class="ask-request" aria-label="Which request"></select>
+        </fieldset>
+        <label class="ask-field">
+          <span>Question</span>
+          <select id="askTemplate"></select>
+        </label>
+        <label class="ask-field hidden" id="askCustomField">
+          <span>Your question</span>
+          <textarea id="askCustomQ" rows="3" placeholder="e.g. was the 5-hour gap what made this expensive?"></textarea>
+        </label>
+        <details class="ask-preview">
+          <summary>Preview brief</summary>
+          <textarea id="askPreview" readonly rows="14"></textarea>
+        </details>
+        <p class="ask-size" id="askSize" aria-live="polite"></p>
+        <div class="analyze-actions">
+          <button type="button" id="askCopy" class="btn primary">Open and paste in Cursor Chat</button>
+          <span id="askStatus" class="copy-status" aria-live="polite"></span>
+        </div>
+      </div>
+    </dialog>
 
     <section id="simulatorView" class="hidden">
       <div class="simulator panel">
@@ -581,8 +702,5 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
         <button type="button" class="btn-primary" id="simIntroAdd">Add a discount</button>
       </div>
     </div>
-  </div>
-  <script nonce="${n}" src="${script}"></script>
-</body>
-</html>`;
+  </div>`;
 }

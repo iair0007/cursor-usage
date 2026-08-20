@@ -35,6 +35,7 @@ const {
   estimateTokenCost,
   cacheSavingsFor,
   describeDiscountRun,
+  describePricingScrape,
   detectDiscounts,
   discountImpact,
   discountPeriods,
@@ -69,11 +70,16 @@ const {
 
 let passed = 0;
 let failed = 0;
+// Every async test's promise, so the summary cannot be printed — and the exit
+// code decided — while one is still running. An async test whose `test(...)`
+// call was not awaited used to settle after `process.exit(1)` had already been
+// skipped, so a failure inside it left CI green.
+const running = [];
 function test(name, fn) {
   try {
     const maybe = fn();
     if (maybe && typeof maybe.then === 'function') {
-      return maybe.then(
+      const settled = maybe.then(
         () => {
           passed++;
           console.log(`  ✓ ${name}`);
@@ -83,6 +89,8 @@ function test(name, fn) {
           console.error(`  ✗ ${name}\n    ${e.message}`);
         },
       );
+      running.push(settled);
+      return settled;
     }
     passed++;
     console.log(`  ✓ ${name}`);
@@ -458,9 +466,86 @@ test('sub-cent requests are ignored — rounding moves them more than a promo wo
   assert.deepEqual(discounts, {});
   assert.equal(observed.size, 0);
 });
-test('Auto is skipped — its billed value belongs to a model Cursor does not name', () => {
-  const autos = [0, 1, 2, 3].map((i) => ({ ...grokEvent(i, 0.5), modelRaw: 'auto' }));
-  assert.deepEqual(detectDiscounts(autos, pricing).discounts, {});
+// Auto is priced from its own published row, which is the comparison of like
+// with like — the rate a request billed as Auto is actually charged at.
+const AUTO_LIST = estimateTokenCost(matchPricing('auto', pricing), GROK_TOKENS);
+
+test('paying exactly the published Auto rate is no discount', () => {
+  const autos = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 1), modelRaw: 'auto', modelTokenCost: AUTO_LIST, listTokenCost: null, billedTokenCost: null }));
+  const { discounts, observed } = detectDiscounts(autos, pricing);
+  assert.deepEqual(discounts, {}, 'the Auto bundle being cheaper than a frontier model is not a sale');
+  assert.ok(observed.has('auto|2026-08-13'), 'measured, and the answer was "no sale"');
+});
+
+test('a real promotion on Auto is still found, against Auto\'s own rate', () => {
+  const autos = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 1), modelRaw: 'auto', modelTokenCost: AUTO_LIST * 0.5, listTokenCost: null, billedTokenCost: null }));
+  assert.equal(detectDiscounts(autos, pricing).discounts.auto['2026-08-13'].pct, 50);
+});
+// An enterprise agreement is a standing reduction on every request, reported
+// on the event as enterpriseUsageDiscountPercent while totalCents stays at
+// list. Measured against list it looks like a permanent sale on every model.
+const entEvent = (i, billedFraction, pct) => ({
+  id: `x${i}`,
+  timestampMs: new Date(`2026-08-12T1${i}:00:00`).getTime(),
+  modelRaw: 'cursor-grok-4.6-high',
+  listTokenCost: 1,
+  billedTokenCost: billedFraction,
+  baselineDiscountPct: pct,
+  inputTokens: 5000, outputTokens: 900, cacheReadTokens: 400_000, cacheWriteTokens: 0,
+});
+
+test("a standing enterprise reduction is the account's price, not a sale", () => {
+  // Paying exactly the agreement and nothing more: no promotion to report.
+  const { discounts, observed } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.93, 7)), pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high|2026-08-12'), 'measured, and the answer was "no sale"');
+});
+
+test('a sale on top of an agreement is reported at its own size', () => {
+  // A 50% sale billed on a 7% account lands at 0.5 x 0.93 of list. Measured
+  // against list that reads 53.5%; against what the account actually pays, 50%.
+  const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.5 * 0.93, 7)), pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-12'].pct, 50);
+});
+
+test('an account with no agreement is measured exactly as before', () => {
+  const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.5, 0)), pricing);
+  assert.equal(discounts['cursor-grok-4-6-high']['2026-08-12'].pct, 50);
+});
+
+test('a nonsense agreement percentage is ignored rather than trusted', () => {
+  for (const pct of [100, 120, -5, NaN, null]) {
+    const { discounts } = detectDiscounts([0, 1, 2, 3].map((i) => entEvent(i, 0.5, pct)), pricing);
+    assert.equal(discounts['cursor-grok-4-6-high']?.['2026-08-12']?.pct, 50,
+      `baseline ${pct} must not scale anything`);
+  }
+});
+
+test('the agreement percentage is read from the event Cursor sends', () => {
+  const api = readFileSync(path.join(here, '..', 'src/api.ts'), 'utf8');
+  assert.match(api, /enterpriseUsageDiscountPercent/);
+  const logic = readFileSync(path.join(here, '..', 'src/webview/logic.js'), 'utf8');
+  assert.match(logic, /baselineDiscountPct/);
+});
+
+test('a Balance-routed row is measured — Cursor named the model it billed at', () => {
+  // The opposite case to bare Auto: "(Auto Balanced)" means the request was
+  // billed at the named model's own rate, and matchPricing resolves it to that
+  // catalog row. Skipping it on the word "auto" left every routed request
+  // permanently undetectable wherever tokenUsage.totalCents is absent.
+  const routed = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 0.5), modelRaw: 'Cursor Grok 4.6 High (Auto Balanced)' }));
+  const { discounts } = detectDiscounts(routed, pricing);
+  assert.equal(discounts['cursor-grok-4-6-high-auto-balanced']['2026-08-13'].pct, 50);
+});
+test('a Balance-routed row at list price is reported as no discount, not as unknown', () => {
+  const routed = [0, 1, 2, 3].map((i) => (
+    { ...grokEvent(i, 1), modelRaw: 'Cursor Grok 4.6 High (Auto Balanced)' }));
+  const { discounts, observed } = detectDiscounts(routed, pricing);
+  assert.deepEqual(discounts, {});
+  assert.ok(observed.has('cursor-grok-4-6-high-auto-balanced|2026-08-13'));
 });
 // Grok publishes no cache-write rate, so a request carrying cache writes has
 // two defensible prices: writes at the input rate (what estimateTokenCost
@@ -573,11 +658,17 @@ test('paying exactly the list value is no discount', () => {
   assert.deepEqual(discounts, {});
   assert.ok(observed.has('cursor-grok-4-6-high|2026-08-13'), 'measured, and the answer was no');
 });
-test('Auto is measurable this way — no rate row is needed', () => {
-  // The rate table can never price Auto, since Cursor does not say what it
-  // routed to. Its own two figures do not care.
-  const { discounts } = detectDiscounts([exactEvent(0, 0.5, 0.25, '2026-08-13', 'auto')], pricing);
-  assert.equal(discounts.auto['2026-08-13'].pct, 50);
+test("Auto's own two figures are not comparable, so they are not compared", () => {
+  // For bare Auto they describe different rate cards: totalCents is what the
+  // tokens are worth on whatever model Auto routed to, while the charge follows
+  // Auto's flat rate "regardless of which model is used". Their gap is the Auto
+  // bundle's structural saving, and reading it as a sale badged Auto
+  // "Discounted" every day at a different percentage.
+  const { discounts } = detectDiscounts(
+    [0, 1, 2, 3].map((i) => exactEvent(i, 0.5, 0.25, '2026-08-13', 'auto')),
+    pricing,
+  );
+  assert.deepEqual(discounts, {}, 'a routed-model list value proves nothing about Auto');
 });
 test('the measured figure wins over anything the rate table would have said', () => {
   // Rates here would price these tokens at nothing like $0.86, and it does not
@@ -1129,6 +1220,30 @@ test('period wiring cannot match the cost-mode buttons', () => {
     + 'preset clears the What-if/Billed highlight and clicking one fires the period handler',
   );
 });
+test('session names reach the request log whatever view is on screen', () => {
+  // Switching to Requests only unhides the table; it does not rebuild it. The
+  // first lookup lands while the user is still on the Overview, so a re-render
+  // gated on the current view left the column showing raw ids.
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const fn = main.match(/async function loadSessionTitles\(ids\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
+  assert.ok(fn, 'expected loadSessionTitles');
+  const redraw = fn.slice(fn.indexOf('if (!learned) return;'));
+  const table = redraw.match(/.*renderTable\(.*/)?.[0] || '';
+  assert.ok(table, 'a learned name must redraw the request log');
+  assert.ok(!/state\.appView/.test(table), 'the redraw must not depend on which view is visible');
+});
+
+test('opening a session does not also pick it for comparison', () => {
+  // The session name became a link into the session view, inside a row whose
+  // own click handler toggles the comparison selection — so one click did both.
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const handler = main.match(/\$\('sessionsList'\)\?\.addEventListener\('click'[\s\S]*?\n {2}\}\);/)?.[0] || '';
+  assert.ok(handler, 'expected the delegated sessions-list click handler');
+  const guard = handler.indexOf('.session-open');
+  const toggle = handler.indexOf('toggleSessionSelected');
+  assert.ok(guard > -1 && guard < toggle, 'the name link must bail out before the row toggle runs');
+});
+
 test('the period and cost-mode controls exist exactly once', () => {
   // Overview used to carry a second copy of these chips, two rows below the
   // filter bar — two controls for one filter, which is what a user sees as
@@ -2345,5 +2460,1577 @@ console.log('conversationTitles');
   });
 }
 
+console.log('insights (advice derived from token counts alone)');
+{
+  const ins = await loadTs('src/webview/insights.js', 'insights.mjs');
+  const RATES = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Sonnet' };
+  const ratesFor = () => RATES;
+  const HOUR = 60 * 60 * 1000;
+
+  // Shapes taken from a real export: a long agent session whose cost is almost
+  // entirely re-read context, a five-hour gap before the dearest request, and
+  // Cursor's own compaction calls.
+  const ev = (o) => ({
+    id: o.id,
+    timestampMs: o.t,
+    modelRaw: 'claude-sonnet-5-thinking-high',
+    conversationId: o.s,
+    cost: o.cost,
+    inputTokens: o.in ?? 0,
+    outputTokens: o.out ?? 0,
+    cacheReadTokens: o.cr ?? 0,
+    cacheWriteTokens: o.cw ?? 0,
+    totalTokens: (o.in ?? 0) + (o.out ?? 0) + (o.cr ?? 0) + (o.cw ?? 0),
+  });
+
+  test('costBreakdown splits a request into what it was actually made of', () => {
+    const b = ins.costBreakdown(ev({ id: 'a', t: 0, s: 's', cost: 3.55, in: 17761, out: 21016, cr: 7379479, cw: 259267 }), RATES);
+    // Cache read dominates; output — the answer itself — is a rounding error.
+    assert.ok(b.cacheRead > b.cacheWrite && b.cacheWrite > b.output && b.output > b.input);
+    assert.ok(Math.abs(b.cacheRead / b.total - 0.62) < 0.02);
+    assert.ok(ins.contextShare(b) > 0.85);
+  });
+
+  test('the parts always add up to the cost shown beside them', () => {
+    // A discounted request costs less than list rates predict; the breakdown
+    // rescales rather than printing parts that sum to the wrong total.
+    const e = ev({ id: 'a', t: 0, s: 's', cost: 1.0, in: 10000, out: 10000, cr: 1000000, cw: 100000 });
+    const b = ins.costBreakdown(e, RATES);
+    assert.ok(Math.abs((b.input + b.output + b.cacheRead + b.cacheWrite) - 1.0) < 1e-9);
+    assert.equal(b.scaled, true);
+  });
+
+  test('a compaction is not a cold start', () => {
+    // Cursor summarising the thread: everything in, a summary out, nothing cached.
+    const compaction = ev({ id: 'c', t: 0, s: 's', cost: 0.077, in: 165817, out: 2786 });
+    assert.equal(ins.classifyRequest(compaction), 'compaction');
+    // A real cold start caches the prefix it just established.
+    const cold = ev({ id: 'k', t: 0, s: 's', cost: 0.1, in: 35000, out: 500, cw: 35000 });
+    assert.equal(ins.classifyRequest(cold), 'coldStart');
+    assert.equal(ins.classifyRequest(ev({ id: 'n', t: 0, s: 's', cost: 0.1, cr: 500000 })), 'cached');
+  });
+
+  const blowupSession = [
+    ...[0, 1, 2, 3, 4].map((i) => ev({ id: `s1-${i}`, t: i * 60000, s: 's1', cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000 })),
+    ev({ id: 's1-big', t: 5 * HOUR, s: 's1', cost: 6.81, in: 110696, out: 62425, cr: 12940878, cw: 844618 }),
+  ];
+
+  test('a long idle gap followed by a big re-cache is flagged as a stale resume', () => {
+    const found = ins.buildInsights({ events: blowupSession, ratesFor });
+    const stale = found.find((f) => f.rule === 'stale-resume');
+    assert.ok(stale, 'expected a stale-resume finding');
+    assert.equal(stale.anchor.requestId, 's1-big');
+    assert.equal(stale.anchor.sessionId, 's1');
+    // Impact is the re-caching specifically, not the whole request.
+    assert.ok(stale.impact > 0 && stale.impact < 6.81);
+    assert.match(stale.title, /re-caching/);
+  });
+
+  test('a context blowup is measured against the session it happened in', () => {
+    const found = ins.buildInsights({ events: blowupSession, ratesFor });
+    const blowup = found.find((f) => f.rule === 'context-blowup');
+    assert.ok(blowup, 'expected a context-blowup finding');
+    assert.equal(blowup.anchor.requestId, 's1-big');
+    assert.ok(blowup.evidence.cacheShare > 0.9);
+    // Only the reads above this session's own normal level are attributed.
+    const whole = ins.costBreakdown(blowupSession[5], RATES);
+    assert.ok(blowup.impact < whole.cacheRead);
+  });
+
+  test('a session that never idles or blows out produces neither finding', () => {
+    const steady = [0, 1, 2, 3, 4, 5].map((i) => ev({
+      id: `q-${i}`, t: i * 60000, s: 'q', cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000,
+    }));
+    const found = ins.buildInsights({ events: steady, ratesFor });
+    assert.equal(found.filter((f) => f.rule === 'stale-resume' || f.rule === 'context-blowup').length, 0);
+  });
+
+  test('a compaction that holds is reported as working', () => {
+    const events = [
+      ev({ id: 'b1', t: 0, s: 'c1', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'b2', t: 60000, s: 'c1', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'sum', t: 120000, s: 'c1', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'a1', t: 180000, s: 'c1', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'a2', t: 240000, s: 'c1', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+    ];
+    const found = ins.buildInsights({ events, ratesFor });
+    const worked = found.find((f) => f.rule === 'compaction-worked');
+    assert.ok(worked, 'expected compaction-worked');
+    assert.equal(worked.severity, 'positive');
+    assert.equal(worked.anchor.requestId, 'sum');
+  });
+
+  test('a compaction the thread grows back out of points at the regrowth, not the summary', () => {
+    const events = [
+      ev({ id: 'b1', t: 0, s: 'c2', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'b2', t: 60000, s: 'c2', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'sum', t: 120000, s: 'c2', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'a1', t: 180000, s: 'c2', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'a2', t: 240000, s: 'c2', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'regrow', t: 34 * 60000, s: 'c2', cost: 4.21, in: 11069, out: 45131, cr: 9306929, cw: 237065 }),
+    ];
+    const found = ins.buildInsights({ events, ratesFor });
+    assert.ok(!found.some((f) => f.rule === 'compaction-worked'));
+    const undone = found.find((f) => f.rule === 'compaction-undone');
+    assert.ok(undone, 'expected compaction-undone');
+    // It anchors to the expensive request the regrowth caused, which is what
+    // the user would click through to.
+    assert.equal(undone.anchor.requestId, 'regrow');
+    assert.ok(undone.impact > 1);
+  });
+
+  test('two compactions regrowing into one request say so once', () => {
+    // Both summaries find the same later request as their regrowth, and the
+    // rule anchors there — so without a dedupe the card renders twice and its
+    // dollars are counted twice by anything that totals findings.
+    const events = [
+      ev({ id: 'b1', t: 0, s: 'c3', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'b2', t: 60000, s: 'c3', cost: 0.5, in: 8000, out: 4000, cr: 800000, cw: 40000 }),
+      ev({ id: 'sum1', t: 120000, s: 'c3', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'm1', t: 180000, s: 'c3', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'm2', t: 240000, s: 'c3', cost: 0.2, in: 3000, out: 4000, cr: 300000, cw: 30000 }),
+      ev({ id: 'sum2', t: 300000, s: 'c3', cost: 0.077, in: 165817, out: 2786 }),
+      ev({ id: 'm3', t: 360000, s: 'c3', cost: 0.1, in: 3000, out: 4000, cr: 100000, cw: 10000 }),
+      ev({ id: 'm4', t: 420000, s: 'c3', cost: 0.1, in: 3000, out: 4000, cr: 100000, cw: 10000 }),
+      ev({ id: 'regrow', t: 34 * 60000, s: 'c3', cost: 4.21, in: 11069, out: 45131, cr: 9306929, cw: 237065 }),
+    ];
+    const found = ins.buildInsights({ events, ratesFor });
+    assert.deepEqual(found.map((f) => f.id), [...new Set(found.map((f) => f.id))],
+      'the same finding was emitted twice');
+  });
+
+  test('spend concentration reports the outliers and points at the dearest', () => {
+    const many = [
+      ...Array.from({ length: 12 }, (_, i) => ev({ id: `m${i}`, t: i * 60000, s: 'm', cost: 0.05, in: 2000, out: 1000, cr: 100000, cw: 5000 })),
+      ev({ id: 'big', t: 20 * 60000, s: 'm', cost: 6.81, in: 110696, out: 62425, cr: 12940878, cw: 844618 }),
+    ];
+    const found = ins.buildInsights({ events: many, ratesFor });
+    const conc = found.find((f) => f.rule === 'spend-concentration');
+    assert.ok(conc, 'expected spend-concentration');
+    assert.equal(conc.scope, 'period');
+    assert.equal(conc.anchor.requestId, 'big');
+  });
+
+  test('new-chat overhead measures the floor across cold starts', () => {
+    const colds = [
+      ev({ id: 'k1', t: 0, s: 'k1', cost: 0.2, in: 35000, out: 500, cw: 35000 }),
+      ev({ id: 'k2', t: HOUR, s: 'k2', cost: 0.2, in: 41000, out: 500, cw: 41000 }),
+      ev({ id: 'k3', t: 2 * HOUR, s: 'k3', cost: 0.2, in: 38000, out: 500, cw: 38000 }),
+    ];
+    const found = ins.buildInsights({ events: colds, ratesFor });
+    const overhead = found.find((f) => f.rule === 'new-chat-overhead');
+    assert.ok(overhead, 'expected new-chat-overhead');
+    assert.equal(overhead.evidence.floorTokens, 35000);
+    assert.equal(overhead.evidence.coldStarts, 3);
+    // Compactions must not be counted here — that was the old cold-start bug.
+    const withCompaction = ins.buildInsights({
+      events: [...colds, ev({ id: 'sum', t: 3 * HOUR, s: 'k4', cost: 0.077, in: 165817, out: 2786 })],
+      ratesFor,
+    });
+    assert.equal(withCompaction.find((f) => f.rule === 'new-chat-overhead').evidence.coldStarts, 3);
+  });
+
+  test('findings rank by dollars, with positives last', () => {
+    const found = ins.buildInsights({ events: blowupSession, ratesFor });
+    const impacts = found.filter((f) => f.severity !== 'positive').map((f) => f.impact);
+    assert.deepEqual(impacts, [...impacts].sort((a, b) => b - a));
+    if (found.some((f) => f.severity === 'positive')) {
+      assert.equal(found[found.length - 1].severity, 'positive');
+    }
+  });
+
+  test('unattributed requests get period findings but not per-session ones', () => {
+    // Requests with no conversation id are unrelated to each other, so gaps
+    // and medians across them would compare different conversations.
+    const orphans = [
+      ev({ id: 'o1', t: 0, s: null, cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000 }),
+      ev({ id: 'o2', t: 5 * HOUR, s: null, cost: 6.81, in: 110696, out: 62425, cr: 12940878, cw: 844618 }),
+    ];
+    const found = ins.buildInsights({ events: orphans, ratesFor });
+    assert.equal(found.filter((f) => f.scope === 'request').length, 0);
+  });
+
+  test('requests with no cost at all yield nothing rather than throwing', () => {
+    assert.deepEqual(ins.buildInsights({ events: [], ratesFor }), []);
+    assert.deepEqual(ins.buildInsights({ events: [ev({ id: 'x', t: 0, s: 's', cost: null })], ratesFor }), []);
+    assert.equal(ins.costBreakdown(ev({ id: 'x', t: 0, s: 's', cost: 1 }), null), null);
+  });
+
+  test('a compaction that regrew points at the summary as well as the regrowth', () => {
+    // The finding is anchored to the request that spent the money, but the
+    // summary is what the reader wants to see next and it is not the anchor.
+    const MIN = 60 * 1000;
+    const session = [
+      ...[0, 1, 2, 3].map((i) => ev({ id: `c${i}`, t: i * MIN, s: 'c', cost: 0.4, cr: 900000, cw: 10000 })),
+      ev({ id: 'summary', t: 5 * MIN, s: 'c', cost: 0.07, in: 165817, out: 2786 }),
+      ...[0, 1, 2, 3].map((i) => ev({ id: `d${i}`, t: (6 + i) * MIN, s: 'c', cost: 0.1, cr: 100000, cw: 10000 })),
+      ev({ id: 'regrown', t: 20 * MIN, s: 'c', cost: 0.9, cr: 1200000, cw: 10000 }),
+    ];
+    const undone = ins.buildInsights({ events: session, ratesFor }).find((f) => f.rule === 'compaction-undone');
+    assert.ok(undone, 'expected a compaction-undone finding');
+    assert.equal(undone.anchor.requestId, 'regrown');
+    assert.equal(undone.anchor.summaryRequestId, 'summary');
+  });
+}
+
+console.log('what changed partway through a session');
+{
+  const ins = await loadTs('src/webview/insights.js', 'insights-switch.mjs');
+  const MIN = 60 * 1000;
+
+  // Two genuinely different rate cards, plus a second variant of one of them
+  // that prices against the same card — which is exactly how Cursor bills
+  // reasoning effort, and the distinction the two detectors turn on.
+  const CARDS = {
+    'claude-4-5-sonnet': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Claude 4.5 Sonnet' },
+    'claude-4-5-sonnet-thinking': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Claude 4.5 Sonnet' },
+    'composer-2.5': { input: 0.5, output: 2.5, cacheRead: 0.2, cacheWrite: 0.5, label: 'Composer 2.5' },
+  };
+  const ratesFor = (modelRaw) => CARDS[modelRaw] || null;
+  const listCost = (modelRaw, k) => {
+    const r = CARDS[modelRaw];
+    return (k.in * r.input + k.out * r.output + k.cr * r.cacheRead + k.cw * r.cacheWrite) / 1e6;
+  };
+
+  let seq = 0;
+  const ev = (modelRaw, k, opts = {}) => ({
+    id: opts.id ?? `q${seq++}`,
+    timestampMs: (opts.at ?? seq) * MIN,
+    modelRaw,
+    model: modelRaw,
+    conversationId: opts.s ?? 's',
+    cost: opts.cost ?? listCost(modelRaw, k),
+    inputTokens: k.in, outputTokens: k.out, cacheReadTokens: k.cr, cacheWriteTokens: k.cw,
+    totalTokens: k.in + k.out + k.cr + k.cw,
+  });
+  const run = (n, modelRaw, k, opts = {}) => Array.from({ length: n }, (_, i) =>
+    ev(modelRaw, k, { ...opts, at: (opts.from ?? 0) + i }));
+
+  const TOK = { in: 5000, out: 3000, cr: 400000, cw: 20000 };
+  const find = (events, rule) => ins.buildInsights({ events, ratesFor }).find((f) => f.rule === rule);
+
+  test('switching rate card is priced against the model you left, not the one you moved to', () => {
+    // Token counts are identical either side, so any difference the detector
+    // reports has to be the rate and nothing else. This is the property the
+    // whole rule rests on: a switch usually happens once a session is already
+    // large, and comparing raw before/after spend would blame the new model for
+    // context growth it had nothing to do with.
+    const events = [...run(4, 'composer-2.5', TOK), ...run(4, 'claude-4-5-sonnet', TOK, { from: 4 })];
+    const f = find(events, 'model-switch');
+    assert.ok(f, 'expected a model-switch finding');
+    assert.equal(f.severity, 'high');
+    assert.equal(f.evidence.switchedAt, 5);
+    assert.equal(f.evidence.fromLabel, 'Composer 2.5');
+    assert.equal(f.evidence.toLabel, 'Claude 4.5 Sonnet');
+    const expected = 4 * (listCost('claude-4-5-sonnet', TOK) - listCost('composer-2.5', TOK));
+    assert.ok(Math.abs(f.impact - expected) < 1e-9, `impact ${f.impact} should be the rate gap ${expected}`);
+    assert.match(f.body, /the same tokens on composer-2\.5 would have been/);
+  });
+
+  test('context growing across the switch is not charged to the new model', () => {
+    // Same switch, but the second half also reads four times the context. The
+    // impact must still be only the rate difference on the tokens actually sent.
+    const grown = { in: 5000, out: 3000, cr: 1600000, cw: 20000 };
+    const events = [...run(4, 'composer-2.5', TOK), ...run(4, 'claude-4-5-sonnet', grown, { from: 4 })];
+    const f = find(events, 'model-switch');
+    const expected = 4 * (listCost('claude-4-5-sonnet', grown) - listCost('composer-2.5', grown));
+    assert.ok(Math.abs(f.impact - expected) < 1e-9,
+      'the counterfactual must price the grown tokens both ways, not compare halves');
+  });
+
+  test('a switch that saved money is reported, and ranked below findings that cost money', () => {
+    const events = [...run(4, 'claude-4-5-sonnet', TOK), ...run(4, 'composer-2.5', TOK, { from: 4 })];
+    const f = find(events, 'model-switch');
+    assert.ok(f);
+    assert.equal(f.severity, 'positive');
+    assert.equal(f.impact, 0, 'a positive carries no dollars, so it cannot outrank real money');
+    assert.match(f.title, /saved/);
+  });
+
+  test('raising the effort level is measured in tokens, never in rates', () => {
+    // Both variants price against one published row, so re-pricing the same
+    // tokens would return exactly zero. What changes is how much gets written.
+    const low = { in: 5000, out: 2000, cr: 300000, cw: 20000 };
+    const high = { in: 5000, out: 9000, cr: 300000, cw: 20000 };
+    const events = [...run(4, 'claude-4-5-sonnet', low), ...run(4, 'claude-4-5-sonnet-thinking', high, { from: 4 })];
+    const f = find(events, 'effort-switch');
+    assert.ok(f, 'expected an effort-switch finding');
+    assert.equal(f.evidence.outputBefore, 2000);
+    assert.equal(f.evidence.outputAfter, 9000);
+    assert.ok(f.impact > 0);
+    assert.match(f.body, /The price per token did not change/);
+    // The failure mode worth pinning: the same rate card either side must not
+    // read as a model switch, which would report a $0.00 rate difference.
+    assert.equal(find(events, 'model-switch'), undefined);
+  });
+
+  test('a promotion ending mid-session is caught from the charge, not the discount table', () => {
+    // Discounts are stored per day, so reading them would only ever catch a
+    // session that ran across midnight. The billed-to-list ratio moves whenever
+    // the price does.
+    const half = listCost('claude-4-5-sonnet', TOK) / 2;
+    const events = [
+      ...run(4, 'claude-4-5-sonnet', TOK, { cost: half }),
+      ...run(4, 'claude-4-5-sonnet', TOK, { from: 4 }),
+    ];
+    const f = find(events, 'price-changed');
+    assert.ok(f, 'expected a price-changed finding');
+    assert.equal(f.severity, 'high');
+    assert.equal(f.evidence.changedAt, 5);
+    assert.ok(Math.abs(f.evidence.shiftPct - 100) < 1, `shift was ${f.evidence.shiftPct}%`);
+    assert.match(f.title, /dearer/);
+  });
+
+  test('a steady session reports none of the three', () => {
+    const events = run(8, 'claude-4-5-sonnet', TOK);
+    for (const rule of ['model-switch', 'effort-switch', 'price-changed']) {
+      assert.equal(find(events, rule), undefined, `${rule} fired on an unchanged session`);
+    }
+  });
+
+  test('a change too small or too brief to matter is left alone', () => {
+    // Two requests either side is not a pattern, whatever the rate gap.
+    const brief = [...run(2, 'composer-2.5', TOK), ...run(2, 'claude-4-5-sonnet', TOK, { from: 2 })];
+    assert.equal(find(brief, 'model-switch'), undefined);
+    // And a switch between two cards priced almost identically is noise.
+    const tiny = { in: 100, out: 50, cr: 2000, cw: 100 };
+    const cheap = [...run(4, 'composer-2.5', tiny), ...run(4, 'claude-4-5-sonnet', tiny, { from: 4 })];
+    assert.equal(find(cheap, 'model-switch'), undefined);
+  });
+
+  test('the unattributed bucket gets none of them', () => {
+    // It is not a conversation, so a "switch" across it compares unrelated work.
+    const events = [
+      ...run(4, 'composer-2.5', TOK, { s: null }),
+      ...run(4, 'claude-4-5-sonnet', TOK, { from: 4, s: null }),
+    ].map((e) => ({ ...e, conversationId: null }));
+    const found = ins.buildInsights({ events, ratesFor });
+    for (const rule of ['model-switch', 'effort-switch', 'price-changed']) {
+      assert.equal(found.find((f) => f.rule === rule), undefined, `${rule} fired on the unattributed bucket`);
+    }
+  });
+
+  test('an unpriced model does not throw or invent a comparison', () => {
+    const events = [...run(4, 'composer-2.5', TOK),
+      ...Array.from({ length: 4 }, (_, i) => ({ ...ev('composer-2.5', TOK, { at: 4 + i }), modelRaw: 'who-knows' }))];
+    assert.doesNotThrow(() => ins.buildInsights({ events, ratesFor }));
+    assert.equal(find(events, 'model-switch'), undefined, 'no rates on one side means no honest comparison');
+  });
+}
+
+console.log('brief (handing one session or request to Cursor Chat)');
+{
+  const brf = await loadTs('src/webview/brief.js', 'brief.mjs');
+  const ins = await loadTs('src/webview/insights.js', 'insights2.mjs');
+  const RATES = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, label: 'Sonnet' };
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+
+  const ev = (o) => ({
+    id: o.id,
+    timestampMs: o.t,
+    modelRaw: 'claude-sonnet-5-thinking-high',
+    model: o.model ?? 'Sonnet 5 Thinking',
+    conversationId: o.s ?? 'sess',
+    counted: o.counted !== false,
+    cost: o.cost,
+    cacheSavings: o.savings ?? 0,
+    inputTokens: o.in ?? 0,
+    outputTokens: o.out ?? 0,
+    cacheReadTokens: o.cr ?? 0,
+    cacheWriteTokens: o.cw ?? 0,
+    totalTokens: (o.in ?? 0) + (o.out ?? 0) + (o.cr ?? 0) + (o.cw ?? 0),
+  });
+
+  const ctx = {
+    breakdownOf: (e) => ins.costBreakdown(e, RATES),
+    classify: (e) => ins.classifyRequest(e),
+    ratesOf: () => RATES,
+    // Fixed rather than locale-dependent, so the assertions below mean the same
+    // thing on every machine that runs them.
+    formatTime: (ms) => new Date(ms).toISOString().slice(11, 16),
+  };
+
+  /** A plain session: n ordinary cached turns, one per minute. */
+  const plain = (n, s = 'sess') => Array.from({ length: n }, (_, i) =>
+    ev({ id: `${s}-${i}`, t: i * MIN, s, cost: 0.2, in: 6000, out: 4000, cr: 400000, cw: 20000 }));
+
+  test('the cost curve is the same size whatever the session is', () => {
+    // The whole reason it exists: a 300-request session must not cost 25x more
+    // to describe than a 12-request one.
+    assert.equal(brf.costCurve(plain(47)).length, 6);
+    assert.equal(brf.costCurve(plain(300)).length, 6);
+    assert.equal(brf.costCurve(plain(12)).length, 6);
+    // Fewer requests than slices collapses rather than emitting empty buckets.
+    assert.equal(brf.costCurve(plain(3)).length, 3);
+    assert.deepEqual(brf.costCurve([]), []);
+  });
+
+  test('the curve covers every request exactly once', () => {
+    const curve = brf.costCurve(plain(47));
+    assert.equal(curve.reduce((s, c) => s + c.count, 0), 47);
+    assert.equal(curve[0].from, 0);
+    assert.equal(curve[curve.length - 1].to, 47);
+  });
+
+  test('the curve keeps the step a compaction puts in the session', () => {
+    // Heavy reads, then a compaction, then light reads. Downsampling to
+    // "representative rows" is what loses this; slice medians keep it.
+    const heavy = Array.from({ length: 24 }, (_, i) =>
+      ev({ id: `h${i}`, t: i * MIN, s: 'z', cost: 0.5, cr: 900000 }));
+    const light = Array.from({ length: 24 }, (_, i) =>
+      ev({ id: `l${i}`, t: (25 + i) * MIN, s: 'z', cost: 0.1, cr: 90000 }));
+    const curve = brf.costCurve([...heavy, ...light]);
+    assert.ok(curve[0].medianRead > 500000, 'early slices should be heavy');
+    assert.ok(curve[5].medianRead < 200000, 'late slices should be light');
+  });
+
+  test('a spike moves the median far less than it moves a mean', () => {
+    // Reported once, in the events list, rather than also inflating a slice and
+    // reading as sustained growth.
+    const flat = Array.from({ length: 23 }, (_, i) =>
+      ev({ id: `f${i}`, t: i * MIN, s: 'z', cost: 0.1, cr: 100000 }));
+    flat.push(ev({ id: 'spike', t: 24 * MIN, s: 'z', cost: 5, cr: 12000000 }));
+    const curve = brf.costCurve(flat);
+    const last = curve[curve.length - 1];
+    assert.equal(last.medianRead, 100000, 'the spike does not drag the slice up with it');
+    // It is still visible where it belongs: in the slice's total cost.
+    assert.ok(last.cost > curve[0].cost * 5);
+  });
+
+  const gapSession = [
+    ...plain(4, 'g'),
+    ev({ id: 'g-resume', t: 5 * HOUR, s: 'g', cost: 6.81, in: 110696, out: 62425, cr: 0, cw: 844618 }),
+    ...Array.from({ length: 4 }, (_, i) =>
+      ev({ id: `g-after${i}`, t: 5 * HOUR + (i + 1) * MIN, s: 'g', cost: 0.3, cr: 850000 })),
+  ];
+
+  test('an event a finding already narrates is not narrated twice', () => {
+    const findings = [{ anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', title: 't', body: 'b' }];
+    const bare = brf.briefEvents(gapSession, [], ctx);
+    const deduped = brf.briefEvents(gapSession, findings, ctx);
+    assert.ok(bare.some((e) => /idle before #5/.test(e.line)), 'the gap is an event on its own');
+    assert.ok(!deduped.some((e) => /idle before #5/.test(e.line)),
+      'once a finding owns that request, repeating it invites double-counting the money');
+  });
+
+  test('events are ranked by dollars and capped', () => {
+    const many = Array.from({ length: 12 }, (_, i) =>
+      ev({ id: `m${i}`, t: i * 2 * HOUR, s: 'm', cost: i * 0.5, cr: 100000 }));
+    const events = brf.briefEvents(many, [], ctx);
+    assert.ok(events.length <= 5, `capped, got ${events.length}`);
+    const impacts = events.map((e) => e.impact);
+    assert.deepEqual(impacts, [...impacts].sort((a, b) => b - a), 'dearest first');
+  });
+
+  test('"the dearest request" never names the runner-up', () => {
+    const bare = brf.briefEvents(gapSession, [], ctx);
+    assert.ok(bare.some((e) => /#5 was the dearest request/.test(e.line)));
+    // Once a finding owns the dearest one, this line goes quiet rather than
+    // promoting the second-dearest and calling it the dearest.
+    const findings = [{ anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', title: 't', body: 'b' }];
+    assert.ok(!brf.briefEvents(gapSession, findings, ctx).some((e) => /dearest request/.test(e.line)));
+  });
+
+  test('a compaction the findings already judged is not re-narrated', () => {
+    // compaction-worked / compaction-undone anchor to the regrowth request, not
+    // to the summary, so matching on request id alone would miss this.
+    const withCompaction = [
+      ...plain(3, 'c'),
+      ev({ id: 'c-sum', t: 4 * MIN, s: 'c', cost: 0.07, in: 165817, out: 2786 }),
+      ...plain(3, 'c2'),
+    ];
+    assert.ok(brf.briefEvents(withCompaction, [], ctx).some((e) => /compacted the conversation/.test(e.line)));
+    const judged = [{ rule: 'compaction-undone', anchor: { requestId: 'c2-2', sessionId: 'c' }, severity: 'medium', title: 't', body: 'b' }];
+    assert.ok(!brf.briefEvents(withCompaction, judged, ctx).some((e) => /compacted the conversation/.test(e.line)));
+  });
+
+  test('the cost split leads with the largest bucket and drops the empty ones', () => {
+    const text = brf.buildRequestBrief({
+      event: gapSession[4], sessionEvents: gapSession, session: { id: 'g' }, ...ctx,
+    });
+    const split = text.match(/- Cost split: (.*)/)[1];
+    assert.ok(split.startsWith('cache write'), `largest first, got "${split}"`);
+    assert.ok(!/cache read/.test(split), 'a cold start read nothing; saying so in dollars costs tokens');
+    const shares = [...split.matchAll(/\((\d+)%\)/g)].map((m) => Number(m[1]));
+    assert.deepEqual(shares, [...shares].sort((a, b) => b - a));
+  });
+
+  test('errored requests are one line, not one line each', () => {
+    const withErrors = [
+      ...plain(3, 'e'),
+      ev({ id: 'e-x', t: 10 * MIN, s: 'e', cost: 0.07, cr: 1000, counted: false }),
+      ev({ id: 'e-y', t: 11 * MIN, s: 'e', cost: 0.07, cr: 1000, counted: false }),
+    ];
+    const lines = brf.briefEvents(withErrors, [], ctx).map((e) => e.line);
+    const errored = lines.filter((l) => /errored/.test(l));
+    assert.equal(errored.length, 1);
+    assert.ok(/2 requests errored/.test(errored[0]));
+  });
+
+  const session = { id: 'g', name: 'Migrate auth service', costBasis: 'billed by the plan' };
+
+  test('a session brief states its cost basis, its shape and its money', () => {
+    const findings = [{
+      anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', impact: 3.1,
+      title: '$3.10 spent re-caching a thread left for 5.1h', body: 'The prompt cache had expired.',
+      action: 'Start a fresh chat after hours away.',
+    }];
+    const text = brf.buildSessionBrief({ session, events: gapSession, findings, ...ctx,
+      template: brf.BRIEF_TEMPLATES[0] });
+    assert.ok(text.includes('billed by the plan'), 'without this the dollars are ambiguous');
+    assert.ok(text.includes('Migrate auth service'));
+    assert.ok(/## Cost curve/.test(text));
+    assert.ok(/Context handling.* was \d+%/.test(text));
+    // The leftover after context is output *and* input, and input is the
+    // prompt. Calling the pair "the answers" hands the reader a false premise
+    // about the one split the rest of the brief argues from.
+    assert.ok(!/the answers themselves were/.test(text),
+      'output and input must be reported separately, not merged into "the answers"');
+    assert.ok(/the answers were \d+% and the prompts I sent \d+%/.test(text));
+    assert.ok(text.includes('$3.10 spent re-caching'), 'findings are quoted');
+    assert.ok(text.includes(brf.BRIEF_TEMPLATES[0].prompt), 'the question is the point of the brief');
+    assert.ok(/markers.*idle before #5/.test(text), 'the curve marks where the shape changed');
+  });
+
+  test('the finding action is left out, since beating it is the job', () => {
+    const findings = [{
+      anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'high', impact: 3.1,
+      title: 'Re-cached a stale thread', body: 'Body.', action: 'GENERIC-ADVICE-MARKER',
+    }];
+    const text = brf.buildSessionBrief({ session, events: gapSession, findings, ...ctx });
+    assert.ok(text.includes('Re-cached a stale thread'));
+    assert.ok(!text.includes('GENERIC-ADVICE-MARKER'),
+      'quoting our own advice anchors the answer to what we are trying to improve on');
+  });
+
+  test('findings are capped and a positive never crowds out real money', () => {
+    const findings = [
+      ...Array.from({ length: 6 }, (_, i) => ({
+        anchor: { requestId: `g-after${i % 4}`, sessionId: 'g' }, severity: 'high', impact: 6 - i,
+        title: `High ${i}`, body: 'b',
+      })),
+      { anchor: { requestId: 'g-resume', sessionId: 'g' }, severity: 'positive', impact: 0, title: 'Nice', body: 'b' },
+    ];
+    const text = brf.buildSessionBrief({ session, events: gapSession, findings, ...ctx });
+    const quoted = text.match(/^\d+\. \[/gm) || [];
+    assert.equal(quoted.length, 4);
+    assert.ok(!text.includes('Nice'), 'the positive is dropped before a finding with dollars on it');
+  });
+
+  test('a brief never lists requests one per line, at any size', () => {
+    // Not a default any more — the opt-in that used to turn this on is gone, so
+    // it is now an unconditional property of the format.
+    for (const n of [3, 12, 47, 300]) {
+      const text = brf.buildSessionBrief({ session, events: plain(n), ...ctx });
+      assert.ok(!/^#\d+ \d/m.test(text), `${n}-request brief listed requests`);
+    }
+  });
+
+  test('a typed question only counts when the question template asked for one', () => {
+    // It used to win over whatever template was selected, silently and for good.
+    const picked = brf.BRIEF_TEMPLATES.find((t) => t.id === 'session-too-long');
+    const custom = brf.BRIEF_TEMPLATES.find((t) => t.id === 'session-custom');
+    const typed = 'MY-OWN-QUESTION';
+    const withTemplate = brf.buildSessionBrief({ session, events: plain(6), template: picked, question: typed, ...ctx });
+    assert.ok(withTemplate.includes(picked.prompt), 'the chosen template still asks its question');
+    assert.ok(!withTemplate.includes(typed), 'stale text in the box must not hijack a template');
+    const withCustom = brf.buildSessionBrief({ session, events: plain(6), template: custom, question: typed, ...ctx });
+    assert.ok(withCustom.includes(typed));
+  });
+
+  test('the question labels read as one instruction each', () => {
+    for (const t of brf.BRIEF_TEMPLATES) {
+      assert.ok(!t.title.includes(' — '), `"${t.title}" still carries a dash-appended explainer`);
+      assert.equal(t.desc, undefined, `${t.id} still has a desc the dropdown would have to render`);
+    }
+    const byId = Object.fromEntries(brf.BRIEF_TEMPLATES.map((t) => [t.id, t.title]));
+    assert.equal(byId['session-too-long'], 'Find where starting a fresh chat would have saved money.');
+    assert.equal(byId['session-waste'], 'Identify avoidable spend, ranked by dollar impact.');
+    assert.equal(byId['session-next-time'], 'Create a cheaper plan for doing the same work.');
+    assert.equal(byId['session-custom'], 'Custom question - Write a question');
+    // Only the custom ones open the free-text box.
+    assert.deepEqual(brf.BRIEF_TEMPLATES.filter((t) => t.custom).map((t) => t.id),
+      ['session-custom', 'request-custom']);
+  });
+
+  test('a session brief stays roughly flat as the session grows', () => {
+    const small = brf.estimateBriefSize(brf.buildSessionBrief({ session, events: plain(12), ...ctx })).tokens;
+    const large = brf.estimateBriefSize(brf.buildSessionBrief({ session, events: plain(300), ...ctx })).tokens;
+    assert.ok(large < small * 1.3, `12 requests cost ${small} tokens, 300 cost ${large}`);
+  });
+
+  test('a request brief looks one request back and three forward', () => {
+    const text = brf.buildRequestBrief({
+      event: gapSession[4],
+      sessionEvents: gapSession,
+      session,
+      findings: [],
+      template: brf.BRIEF_TEMPLATES.find((t) => t.id === 'request-avoidable'),
+      ...ctx,
+    });
+    assert.ok(/request #5 of 9/.test(text), 'position in the session');
+    assert.ok(/- Before: #4 /.test(text));
+    assert.ok(/4h 57m before this one/.test(text), 'the gap is what the previous request is there to establish');
+    assert.ok(/- After: #6 .* · #7 .* · #8 /.test(text), 'three forward — was the re-cache earned back?');
+    assert.ok(/1 more request/.test(text), 'and what became of the rest');
+    assert.ok(/Shape: cold start/.test(text));
+    assert.ok(/Cost split: cache write/.test(text));
+  });
+
+  test('a request brief handles the ends of a session', () => {
+    const last = brf.buildRequestBrief({ event: gapSession[8], sessionEvents: gapSession, session, ...ctx });
+    assert.ok(/After: nothing/.test(last));
+    const first = brf.buildRequestBrief({ event: gapSession[0], sessionEvents: gapSession, session, ...ctx });
+    assert.ok(!/- Before:/.test(first));
+  });
+
+  test('nothing a user wrote can reach the brief', () => {
+    // The extension never reads prompts or code, but a brief is the one thing
+    // here that leaves the machine — so this asserts the shape rather than
+    // trusting it.
+    const decoy = {
+      ...gapSession[4],
+      prompt: 'SECRET-PROMPT-TEXT',
+      text: 'SECRET-MESSAGE-TEXT',
+      content: 'SECRET-CODE-CONTEXT',
+      messages: [{ role: 'user', content: 'SECRET-TURN' }],
+    };
+    const events = [...gapSession.slice(0, 4), decoy, ...gapSession.slice(5)];
+    const both = brf.buildSessionBrief({ session, events, ...ctx })
+      + brf.buildRequestBrief({ event: decoy, sessionEvents: events, session, ...ctx });
+    for (const secret of ['SECRET-PROMPT-TEXT', 'SECRET-MESSAGE-TEXT', 'SECRET-CODE-CONTEXT', 'SECRET-TURN']) {
+      assert.ok(!both.includes(secret), `${secret} reached the brief`);
+    }
+  });
+
+  test('the preamble forbids the three things that waste a round trip', () => {
+    const p = brf.BRIEF_PREAMBLE;
+    assert.ok(/ask no clarifying questions/.test(p));
+    assert.ok(/Never invent, estimate or extrapolate/.test(p));
+    assert.ok(/never prompts, messages or code/.test(p), 'it must explain why nobody can answer "what were you doing"');
+    assert.ok(/cache read ~0\.1x input/.test(p),
+      'without the rate ratios a reader congratulates the user on a 90% cache hit rate');
+  });
+
+  test('every template demands the answer cite figures', () => {
+    for (const t of brf.BRIEF_TEMPLATES) {
+      assert.ok(['session', 'request'].includes(t.scope));
+      assert.ok(t.prompt.length > 40, `${t.id} has no real prompt`);
+    }
+    assert.ok(brf.BRIEF_TEMPLATES.some((t) => t.scope === 'session'));
+    assert.ok(brf.BRIEF_TEMPLATES.some((t) => t.scope === 'request'));
+  });
+
+  test('the size estimate grows with the text and is never zero for real text', () => {
+    assert.equal(brf.estimateBriefSize('').tokens, 0);
+    assert.ok(brf.estimateBriefSize('abcd').tokens >= 1);
+    assert.ok(brf.estimateBriefSize('x'.repeat(4000)).tokens > brf.estimateBriefSize('x'.repeat(400)).tokens);
+  });
+
+  test('the period brief keeps the notes it has always had', () => {
+    // buildCursorBrief now pulls these from here; if they changed, a shipped
+    // brief changed with them.
+    assert.deepEqual(brf.BRIEF_NOTES, [
+      '- Auto optimizes for task success and uses the Auto+Composer pool — not always the cheapest rate card.',
+      '- Cheaper models in comparisons assume the same token counts; real usage may differ.',
+      '- Token cost excludes flat per-request usage fees unless noted in summary.',
+    ]);
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    assert.ok(main.includes("parts.push('---', 'Notes for the model:', ...BRIEF_NOTES)"),
+      'the period brief must still emit the same heading above them');
+  });
+
+  test('sessions the dashboard can price oddly still produce a brief', () => {
+    const single = [ev({ id: 'one', t: 0, s: 'x', cost: 0.4, in: 5000, out: 900, cr: 20000 })];
+    assert.ok(brf.buildSessionBrief({ session: { id: 'x' }, events: single, ...ctx }).length > 0);
+    // No pricing table for this model: the split is unavailable, the brief isn't.
+    const unpriced = brf.buildSessionBrief({
+      session: { id: 'x' }, events: single, ...ctx, breakdownOf: () => null,
+    });
+    assert.ok(unpriced.includes('## Cost curve'));
+    assert.ok(!unpriced.includes('Context handling'));
+    assert.equal(brf.buildSessionBrief({ session, events: [], ...ctx }), '');
+    assert.equal(brf.buildRequestBrief({ event: null, ...ctx }), '');
+  });
+
+  test('every id the ask dialog wires up exists in the markup', () => {
+    const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+    for (const id of [
+      'sessionAskBtn', 'askCursorDialog', 'askTitle', 'askClose', 'askRequest',
+      'askTemplate', 'askCustomQ', 'askCustomField', 'askPreview',
+      'askSize', 'askCopy', 'askStatus',
+    ]) {
+      assert.ok(html.includes(`id="${id}"`), `markup is missing id="${id}"`);
+    }
+  });
+
+  test('the ask dialog is not nested inside a view that can be display:none', () => {
+    // A <dialog> inside a hidden ancestor opens at zero size — the exact bug the
+    // session detail dialog already had, and this one is opened from it.
+    const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+    const before = html.slice(0, html.indexOf('id="askCursorDialog"'));
+    const opened = (before.match(/<section /g) || []).length;
+    const closed = (before.match(/<\/section>/g) || []).length;
+    assert.equal(opened, closed, 'askCursorDialog sits inside an unclosed <section>');
+  });
+}
+
+console.log('Auto keeps a rate even when the pricing page moves it');
+{
+  const MODELS_TABLE = [
+    '| Model | Input | Cache Write | Cache Read | Output |',
+    '| --- | --- | --- | --- | --- |',
+    '| Claude 4.5 Sonnet | $3 | $3.75 | $0.30 | $15 |',
+    '| GPT-5.2 | $1.25 | $1.56 | $0.13 | $10 |',
+  ].join('\n');
+
+  test('a page that lists models but no Auto row still prices Auto', () => {
+    // This is the regression. Auto is priced from `pricing.auto` alone, and the
+    // wholesale fallback only fired when *nothing* parsed — so a page that still
+    // listed every named model but had moved or renamed the Auto row left Auto
+    // with no rates at all. Every Auto request then lost its cost breakdown, its
+    // cache-savings figure, and got reported as "not in the pricing table" — for
+    // the most-used model in the product.
+    const pricing = parsePricing(`## Pricing\n${MODELS_TABLE}`);
+    assert.equal(pricing.models.length, 2, 'the named models still parse');
+    assert.equal(pricing.autoFallback, true, 'and the substitution is recorded, not hidden');
+    const rates = matchPricing('auto', pricing);
+    assert.ok(rates, 'Auto must never come back unpriced');
+    assert.ok(rates.input > 0 && rates.output > 0);
+    assert.equal(rates.estimated, true, 'so the UI can say the rate is built-in, not scraped');
+  });
+
+  test('a published Auto rate is never overwritten by the built-in one', () => {
+    for (const doc of [
+      `### Auto pricing\n| Input and cache write | $1.10 |\n| Cache read | $0.22 |\n| Output | $5 |\n\n## Models\n${MODELS_TABLE}`,
+      `## Auto modes\n| Model | Input | Cache Write | Cache Read | Output |\n| --- | --- | --- | --- | --- |\n| Auto Cost | $1.10 | $1.10 | $0.22 | $5 |`,
+    ]) {
+      const pricing = parsePricing(doc);
+      assert.equal(pricing.autoFallback, false, 'a real rate was published');
+      const rates = matchPricing('auto', pricing);
+      assert.equal(rates.input, 1.1);
+      assert.equal(rates.output, 5);
+      assert.ok(!rates.estimated);
+    }
+  });
+
+  test('every spelling of Auto reaches the same rate', () => {
+    const pricing = parsePricing(`## Pricing\n${MODELS_TABLE}`);
+    for (const raw of ['auto', 'Auto', 'default', 'cursor-auto', 'Auto Cost', 'auto-cost']) {
+      assert.ok(matchPricing(raw, pricing), `matchPricing(${JSON.stringify(raw)}) came back null`);
+    }
+  });
+
+  await test('the built-in rate carries through to a cost breakdown', async () => {
+    const ins = await loadTs('src/webview/insights.js', 'insights3.mjs');
+    const pricing = parsePricing(`## Pricing\n${MODELS_TABLE}`);
+    const b = ins.costBreakdown(
+      { inputTokens: 5000, outputTokens: 900, cacheReadTokens: 400000, cacheWriteTokens: 20000, cost: 0.4 },
+      matchPricing('auto', pricing),
+    );
+    assert.ok(b && b.total > 0, 'an Auto request must be breakable down');
+    assert.equal(b.estimated, true, 'and must be able to say the rates were a default');
+  });
+}
+
+console.log('handing a brief to Cursor Chat');
+{
+  const rpc = readFileSync(path.join(here, '..', 'src/rpcDispatcher.ts'), 'utf8');
+
+  test('the chat command is never called with a query', () => {
+    // The load-bearing safety property. Upstream, `workbench.action.chat.open`
+    // only leaves a prompt unsent when passed `isPartialQuery: true`; a bare
+    // string — the form nearly every snippet on the web uses — normalizes to
+    // `{ query }` and calls acceptInput(), which bills a request on the spot.
+    // Whether Cursor honours `isPartialQuery` is undocumented, so the command is
+    // only ever called with no arguments at all.
+    const calls = [...rpc.matchAll(/executeCommand\(([^)]*)\)/g)].map((m) => m[1].trim());
+    for (const call of calls) {
+      assert.ok(!/chat\.open['"]\s*,/.test(call),
+        `chat.open is being passed an argument, which can submit a paid request: ${call}`);
+    }
+    // The comment above the method names this key to explain why it is avoided,
+    // so strip comments before looking for it as actual code.
+    const code = rpc.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    assert.ok(!/isPartialQuery/.test(code),
+      'gambling a paid request on an option key Cursor may silently ignore');
+    assert.ok(rpc.includes('executeCommand(command)'),
+      'the chat-panel candidates must stay argument-free');
+  });
+
+  test('the clipboard is written before anything else is attempted', () => {
+    const body = rpc.slice(rpc.indexOf('private async sendToCursorChat'));
+    const clip = body.indexOf('clipboard.writeText');
+    const deeplink = body.indexOf('prefillViaDeeplink');
+    assert.ok(clip > -1 && deeplink > clip,
+      'every path below can fail; the clipboard is what makes that survivable');
+  });
+
+  test('the deeplink is capped and gated to a desktop Cursor', () => {
+    assert.ok(rpc.includes('DEEPLINK_MAX_CHARS = 8000'), 'Cursor caps a deeplink payload');
+    assert.ok(/query\.length > RpcDispatcher\.DEEPLINK_MAX_CHARS/.test(rpc), 'and the cap is measured after encoding');
+    assert.ok(rpc.includes('new URLSearchParams({ text })'),
+      'hand-rolled encoding truncates the prompt at the first "&"');
+    assert.ok(rpc.includes("uriScheme !== 'cursor'"), 'do not fire cursor:// at a non-Cursor host');
+    assert.ok(rpc.includes('vscode.UIKind.Desktop'), 'the in-process interception is desktop-only');
+  });
+
+  test('the webview reports what actually happened, not what it hoped for', () => {
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.slice(main.indexOf('async function sendBriefToCursor'));
+    assert.ok(fn.includes('outcome?.pasted'), 'a paste and a copy are different outcomes');
+    assert.ok(fn.includes('outcome?.opened'));
+    assert.ok(/Copied — paste in Cursor Chat/.test(fn), 'and the plain copy is still a real outcome');
+  });
+}
+
+console.log('request-log row detail');
+{
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+
+  test('the detail cell undoes the nowrap the data columns need', () => {
+    // `td { white-space: nowrap }` is right for twelve columns of timestamps and
+    // token counts, and inherited — so in the one cell that holds sentences it
+    // turned each finding into a single unbreakable line whose min-content width
+    // fed back into the table's own minimum width under `table-layout: auto`.
+    // The detail row was not sitting in a wide table; it was making it wide.
+    assert.match(css, /td \{[^}]*white-space: nowrap;/s, 'the data columns still expect nowrap');
+    const rule = css.match(/\.row-detail > td \{[^}]*\}/)[0];
+    assert.match(rule, /white-space: normal/, '.row-detail > td must reset it');
+  });
+
+  test('long unbroken text cannot re-inflate the cell', () => {
+    assert.match(css, /\.finding-card h4,\s*\n\.finding-card p,\s*\n\.finding-action \{ overflow-wrap: anywhere; \}/);
+  });
+
+  test('the grid children are allowed to shrink', () => {
+    // Grid items refuse to go below their content's min-content width unless
+    // told to, which would undo the wrapping fix on a narrow column.
+    assert.match(css, /\.detail-grid > div \{ min-width: 0; \}/);
+    assert.match(css, /\.findings-grid \{[^}]*min-width: 0/);
+  });
+
+  test('the detail content is pinned to the visible width', () => {
+    // The twelve data columns can overflow a narrow window on their own, and
+    // then the cell is as wide as the table whatever this row does.
+    const rule = css.match(/\.detail-sticky \{[^}]*\}/)[0];
+    assert.match(rule, /position: sticky/);
+    assert.match(rule, /left: 0/);
+    assert.match(rule, /width: min\(100%, calc\(100vw - \d+px\)\)/);
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    assert.match(main, /<div class="detail-sticky">/, 'and something has to carry the class');
+  });
+}
+
+console.log('session timeline');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function openSessionDetail'));
+
+  test('the peak caption names the request it belongs to', () => {
+    // It used to read "$1.02 peak", centred by space-between under the middle of
+    // the plot — so on a three-bar session it sat over the *smallest* bar and
+    // read as that bar's label.
+    assert.ok(/peak \$\{|peak \$/.test(fn) || fn.includes('peak ${fmt.money(max)} at #${peakAt}'),
+      'the peak caption must say which request it is about');
+    assert.ok(fn.includes('peakAt'), 'and that index has to be computed');
+  });
+
+  test('bars get their own price while they are wide enough to show one', () => {
+    assert.ok(fn.includes('tl-labels'));
+    assert.ok(fn.includes('moneyFine(e.cost)'),
+      'fmt.money rounds a fraction-of-a-cent request to $0.00');
+    assert.ok(fn.includes('TIMELINE_LABEL_MAX'));
+  });
+
+  test('labels stop well before the plot starts scrolling', () => {
+    // .tl-labels is a sibling of .tl-plot, so once the plot scrolls horizontally
+    // the two slide out of alignment with each other. At flex 1 0 10px with a
+    // 3px gap in an ~816px dialog that starts around 60 bars.
+    const max = Number(main.match(/const TIMELINE_LABEL_MAX = (\d+)/)[1]);
+    assert.ok(max > 0 && max <= 20, `TIMELINE_LABEL_MAX is ${max}, too close to the scroll threshold`);
+  });
+
+  test('the compaction bars and the tooltip are wired to something real', () => {
+    const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+    assert.match(fn, /tl-compaction/, 'a summarising turn is marked in the plot');
+    assert.match(fn, /data-tl-tip=/, 'the tip text travels as data, not as a native title');
+    assert.ok(!/title="\$\{esc\(tip\)\}"/.test(fn),
+      'the native title must be gone, or two tooltips fight over the same bar');
+    // Fixed, not absolute: .tl-plot scrolls horizontally, and an overflow-x box
+    // clips on both axes, so an absolute tip would be cut off by its own plot.
+    const tip = css.match(/\.tl-tip \{[^}]*\}/)[0];
+    assert.match(tip, /position: fixed/);
+    assert.match(tip, /white-space: pre-line/, 'the tip is multi-line');
+    for (const id of ['tlTip']) {
+      const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+      assert.ok(html.includes(`id="${id}"`), `markup is missing id="${id}"`);
+      // Inside the dialog: a modal renders in the top layer, so a tooltip
+      // parented to <body> would sit behind it whatever its z-index.
+      const dialog = html.slice(html.indexOf('id="sessionDetailDialog"'));
+      assert.ok(dialog.slice(0, dialog.indexOf('</dialog>')).includes(`id="${id}"`),
+        `${id} must live inside the session dialog`);
+    }
+  });
+
+  test('the label row shares the plot\'s flex rules so labels sit under their bars', () => {
+    const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+    const labels = css.slice(css.indexOf('.tl-labels {'), css.indexOf('.tl-axis {'));
+    const plot = css.slice(css.indexOf('.tl-plot {'), css.indexOf('.tl-bar {'));
+    for (const rule of ['gap: 3px', 'padding: 6px']) {
+      assert.ok(plot.includes(rule), `.tl-plot lost "${rule}"`);
+      assert.ok(labels.includes(rule.replace('padding: 6px', 'padding: 0 6px')),
+        `.tl-labels must match .tl-plot on "${rule}"`);
+    }
+    assert.ok(labels.includes('flex: 1 0 10px'), 'and on how each cell sizes');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The standalone browser page. Its own CSP is the thing most likely to break
+// it, and it breaks it silently: a blocked bootstrap script leaves a page that
+// renders perfectly and can't load a single number.
+// ---------------------------------------------------------------------------
+console.log('\nbrowser page (Open in Browser)');
+{
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  const browserFn = html.slice(
+    html.indexOf('export function getBrowserDashboardHtml'),
+    html.indexOf('function dashboardBody'),
+  );
+
+  test('the page runs no inline script its own CSP would refuse', () => {
+    // script-src 'self' blocks inline script with no nonce and no hash, so an
+    // inline <script> here means the dashboard loads and then does nothing.
+    const csp = browserFn.match(/Content-Security-Policy[\s\S]*?content="([^"]+)"/)?.[1] || '';
+    assert.ok(/script-src [^;]*'self'/.test(csp), 'expected script-src to allow only same-origin scripts');
+    assert.ok(!/'unsafe-inline'/.test(csp.match(/script-src[^;]*/)?.[0] || ''),
+      'inline script must stay blocked — fix the page, not the policy');
+    const inline = (browserFn.match(/<script(?![^>]*\ssrc=)[^>]*>/g) || [])
+      .filter((tag) => !/nonce=/.test(tag));
+    assert.deepEqual(inline, [], `inline <script> would be blocked by this page's CSP: ${inline.join(', ')}`);
+  });
+
+  test('the RPC token is never written into the page', () => {
+    // It arrives in the launch URL and lives in sessionStorage; embedding it in
+    // the HTML is what forced the inline script in the first place.
+    assert.ok(!/getBrowserDashboardHtml\s*\(\s*token/.test(browserFn),
+      'the page should not take a token to render');
+    assert.ok(!/__CURSOR_USAGE_TOKEN__/.test(html), 'the token must not be inlined into the markup');
+  });
+
+  test('a reloaded tab can still authenticate', () => {
+    // The token is stripped from the URL on first load, so a plain F5 has to be
+    // served by sessionStorage or the tab comes back with no data at all.
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.match(/function readBrowserToken\(\)\s*\{[\s\S]*?\n\}/)?.[0] || '';
+    assert.ok(fn, 'main.js must resolve the browser token in one place');
+    assert.ok(/searchParams\.get\('token'\)/.test(fn), 'must read the token the launch URL carries');
+    assert.ok(/sessionStorage\.setItem/.test(fn) && /sessionStorage\.getItem/.test(fn),
+      'must survive a reload, which the URL no longer can');
+    assert.ok(/replaceState/.test(fn), 'must clean the token out of the address bar and history');
+  });
+
+  test('the server gates the data and not the shell', () => {
+    const server = readFileSync(path.join(here, '..', 'src/browserServer.ts'), 'utf8');
+    const rpc = server.slice(server.indexOf('private handleRpc'), server.indexOf('private readRpcBody'));
+    assert.ok(/tokenMatches\(req\.headers\[TOKEN_HEADER\]\)/.test(rpc), '/api/rpc must require the token header');
+    const shell = server.slice(server.indexOf("url.pathname === '/'"), server.indexOf("url.pathname === '/main.js'"));
+    assert.ok(!/403/.test(shell), 'gating the shell breaks reload — the shell carries no data');
+    assert.ok(/timingSafeEqual/.test(server), 'compare the token in constant time');
+  });
+
+  test('non-JSON answers surface as a message, not a parse error', () => {
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.match(/async function rpcOverHttp\([\s\S]*?\n\}/)?.[0] || '';
+    assert.ok(/res\.status === 403/.test(fn), 'a stale token needs an answer the user can act on');
+    assert.ok(/res\.ok/.test(fn), 'other error statuses must not be fed to res.json()');
+  });
+
+  test('the standalone page can follow the OS theme', () => {
+    // Nothing in a browser tab defines the --vscode-* variables the palette is
+    // built on, so every token falls back to its light value.
+    assert.ok(/<body class="standalone">/.test(browserFn), 'the page must mark itself as standalone');
+    const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+    const dark = css.match(/@media \(prefers-color-scheme: dark\)\s*\{\s*body\.standalone\s*\{[\s\S]*?\n {2}\}/)?.[0] || '';
+    assert.ok(dark, 'expected a dark palette scoped to the standalone page');
+    for (const token of ['--bg', '--panel', '--text', '--border', '--input-bg']) {
+      assert.ok(dark.includes(`${token}:`), `dark palette leaves ${token} at its light value`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Review pass: things that were correct in isolation and wrong in place.
+// ---------------------------------------------------------------------------
+console.log('\nreview fixes');
+{
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+
+  test('a finding keeps its own heading inside the row detail and the session dialog', () => {
+    // Both containers label their sections with an uppercase 11px caption, and
+    // a bare `h4` descendant selector reaches the finding card's title too —
+    // which is a full sentence, and was being rendered in muted small caps.
+    for (const scope of ['.detail-grid', '.session-detail-body']) {
+      assert.match(css, new RegExp(`${scope.replace('.', '\\.')} h4 \\{[^}]*text-transform: uppercase`),
+        `${scope} still captions its own sections`);
+    }
+    const rule = css.match(/\.detail-grid \.finding-card h4,\s*\n\.session-detail-body \.finding-card h4 \{[^}]*\}/)?.[0];
+    assert.ok(rule, 'the finding card must win its heading back in both containers');
+    assert.match(rule, /text-transform: none/);
+    assert.match(rule, /font-size: 12px/);
+  });
+
+  test('a row with nothing flagged does not reserve half the cell for it', () => {
+    assert.match(main, /class="detail-grid\$\{flags\.length \? '' : ' no-findings'\}"/,
+      'the grid has to know whether it has a second column to lay out');
+    assert.ok(!/<div>\$\{flags\.length/.test(main),
+      'an always-emitted empty <div> is still a grid item');
+    assert.match(css, /\.detail-grid\.no-findings \{[^}]*grid-template-columns: minmax\(/);
+  });
+
+  test('the brief is priced against the session it is about, not its first request', () => {
+    const fn = main.slice(main.indexOf('function renderAskSize'), main.indexOf('function renderAskDialog'));
+    assert.ok(fn.includes('dominantEvent(events)'),
+      'a session that opened on one model and ran on another quoted a rate card nobody recognised');
+    assert.ok(!/ratesForEvent\(events\[0\]/.test(fn));
+  });
+
+  test('nothing sizes a request list by spreading it into Math.max', () => {
+    // Math.max(...array) throws RangeError once the array is long enough to
+    // blow the argument limit, which only ever happens to the heaviest users.
+    // The remaining spreads in main.js are over days in a range or over the
+    // at-most-four sessions being compared, both of which are bounded.
+    const insights = readFileSync(path.join(here, '..', 'src/webview/insights.js'), 'utf8');
+    const timeline = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
+    assert.ok(!/Math\.(max|min)\(\.\.\./.test(timeline), 'one bar per request — the list is as long as the session');
+    assert.ok(timeline.includes('maxOf(priced'), 'and the reducing helper is what replaced it');
+    assert.ok(main.includes('function maxOf('), 'the reducing helper has to exist');
+    const overhead = insights
+      .slice(insights.indexOf('function newChatOverhead'), insights.indexOf('export function buildInsights'))
+      .replace(/^\s*\/\/.*$/gm, '');
+    assert.ok(!/Math\.(max|min)\(\.\.\./.test(overhead), 'the cold-start floor reduces over every cold start in the period');
+  });
+
+  test('a session named after its dialog opened still gets its name', () => {
+    assert.ok(main.includes('function refreshOpenSessionTitle'),
+      'names arrive asynchronously and the dialog heading is not redrawn by anything else');
+    assert.match(main, /dialog\.dataset\.session = sessionId/,
+      'the dialog has to record which conversation it is showing');
+    const loader = main.slice(main.indexOf('async function loadSessionTitles'), main.indexOf('function refreshOpenSessionTitle'));
+    assert.ok(loader.includes('refreshOpenSessionTitle()'), 'and the loader has to call it');
+  });
+
+  test('the loopback server survives an error after it started listening', () => {
+    const server = readFileSync(path.join(here, '..', 'src/browserServer.ts'), 'utf8');
+    const start = server.slice(server.indexOf('private async start()'), server.indexOf('private get baseUrl'));
+    assert.match(start, /this\.server\.on\('error'/,
+      "the once('error') used for listen() has fired; an unhandled 'error' event is thrown");
+  });
+
+  test('a filename from the webview cannot point the save dialog elsewhere', () => {
+    const rpc = readFileSync(path.join(here, '..', 'src/rpcDispatcher.ts'), 'utf8');
+    assert.match(rpc, /RpcDispatcher\.safeFilename\(filename\)/, 'joinPath resolves ".." like any path join');
+    assert.match(rpc, /static safeFilename\(name: string\): string \{/);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The session charts and the sessions table.
+// ---------------------------------------------------------------------------
+console.log('\nsession charts and table');
+{
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+
+  /** Hue angle in degrees, for a cheap "are these actually different colours" check. */
+  const hueOf = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    if (max === min) return null;
+    const d = max - min;
+    const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    return ((h * 60) + 360) % 360;
+  };
+  const bucketsIn = (block) => ['cache-read', 'cache-write', 'output', 'input']
+    .map((k) => block.match(new RegExp(`--bucket-${k}:\\s*(#[0-9a-f]{6})`, 'i'))?.[1]);
+
+  test('the four token buckets are four different colours, in every theme', () => {
+    // They were #d97706 and #f59e0b — two steps of the same orange, 10.8 ΔE
+    // apart for normal vision against a floor of 15. The bands were adjacent
+    // segments of one bar, so nobody could tell which was which.
+    // Every rule that sets a bucket colour, wherever it lives: the light :root,
+    // the editor's dark themes, and the standalone page's OS-dark block. Each
+    // has to define the whole set — a scope that redefines two of the four
+    // leaves the other two on the palette of the opposite theme, which is how
+    // a dark IDE ended up drawing light-surface hexes.
+    const blocks = css.match(/\{[^{}]*--bucket-cache-read:[^{}]*\}/g) || [];
+    assert.equal(blocks.length, 3, 'expected a light, an editor-dark and a standalone-dark palette');
+    for (const block of blocks) {
+      const name = bucketsIn(block).join('/');
+      const hexes = bucketsIn(block);
+      assert.ok(hexes.every(Boolean), `${name} does not define all four buckets`);
+      assert.equal(new Set(hexes).size, 4, `${name} reuses a colour across buckets`);
+      for (let i = 0; i < hexes.length; i += 1) {
+        for (let j = i + 1; j < hexes.length; j += 1) {
+          const [a, b] = [hueOf(hexes[i]), hueOf(hexes[j])];
+          const apart = Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+          assert.ok(apart >= 45,
+            `${name}: ${hexes[i]} and ${hexes[j]} are ${apart.toFixed(0)}° apart — same hue family`);
+        }
+      }
+    }
+  });
+
+  test('stacked segments are separated by a surface gap, not just by hue', () => {
+    assert.match(css, /\.bd-seg \{[^}]*box-shadow: 2px 0 0 0 var\(--panel\)/);
+    assert.match(css, /\.bd-seg:last-child \{ box-shadow: none; \}/);
+  });
+
+  test('the timeline is one plot — the token row that redrew it is gone', () => {
+    // Cost is very nearly a linear function of tokens sent (r = 0.99 on real
+    // usage), so a second row of bars drew the same shape twice, and the
+    // stacked cost bar already shows which bucket the tokens landed in.
+    for (const gone of ['tokensSent', 'tl-ctx-plot', 'tl-ctx-bar', 'tl-sub']) {
+      assert.ok(!main.includes(gone), `${gone} should have gone with the sub-plot`);
+      assert.ok(!css.includes(gone), `${gone} should have gone from the stylesheet`);
+    }
+  });
+
+  test('a summarising turn is still striped in the cost plot', () => {
+    const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
+    assert.match(fn, /tl-compaction/);
+    assert.match(css, /\.tl-compaction \{/);
+  });
+
+  test('the sessions table fits its width instead of scrolling sideways', () => {
+    // One 45-character models cell used to set the table's minimum width, so
+    // the whole table scrolled horizontally to serve a single column.
+    const cell = css.match(/\.sessions-table \.session-models \{[^}]*\}/)[0];
+    assert.match(cell, /max-width: \d+px/);
+    assert.match(cell, /white-space: normal/);
+    // A hyphen is its own break opportunity, so no overflow-wrap value keeps
+    // "cursor-grok-4.6-high" together — only nowrap on the name does.
+    assert.match(css, /\.session-model \{ white-space: nowrap; \}/);
+    assert.match(main, /<span class="session-model">/);
+  });
+
+  test('each sessions column header sits over its own data', () => {
+    assert.match(css, /\.sessions-table thead th \{ text-align: center; \}/);
+    // The name column is text and stays left, with its header over the names.
+    assert.match(css, /\.sessions-table thead th:first-child,\s*\n\.sessions-table thead th:nth-child\(2\) \{ text-align: left; \}/);
+    for (const cls of ['session-started', 'session-duration', 'session-requests', 'session-cost']) {
+      assert.ok(main.includes(`class="${cls}"`), `the ${cls} column needs a class to be aligned by`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Saying only what the numbers support.
+// ---------------------------------------------------------------------------
+console.log('\nthe context/answer claim');
+{
+  const ins = await loadTs('src/webview/insights.js', 'insights4.mjs');
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+
+  const split = (b) => ins.spendSplit({ total: 100, ...b });
+
+  test('an activity that did not happen is not named', () => {
+    // cacheWrite is 0 for every request on some accounts, so "re-reading and
+    // re-caching the conversation" was describing something that never
+    // occurred — beside a row reading $0.
+    assert.equal(split({ cacheRead: 70, cacheWrite: 0, output: 20, input: 10 }).contextLabel,
+      're-reading the conversation');
+    assert.equal(split({ cacheRead: 40, cacheWrite: 30, output: 20, input: 10 }).contextLabel,
+      're-reading and re-caching the conversation');
+    assert.equal(split({ cacheRead: 0, cacheWrite: 60, output: 30, input: 10 }).contextLabel,
+      'writing the conversation to cache');
+    assert.equal(split({ cacheRead: 0, cacheWrite: 0, output: 70, input: 30 }).contextLabel, null,
+      'with no cache activity at all the clause is dropped, not left empty');
+  });
+
+  test('the prompt is never counted as the answer', () => {
+    // The leftover after context is output + input. Reported as "the answers
+    // themselves" it overstated the answer's share by nearly double on a
+    // session that was 14.5% output and 12.4% input.
+    const s = split({ cacheRead: 73, cacheWrite: 0, output: 15, input: 12 });
+    assert.equal(Math.round(s.contextPct), 73);
+    assert.equal(Math.round(s.outputPct), 15);
+    assert.equal(Math.round(s.inputPct), 12);
+    // The invariant is that the answer figure is output alone. Deriving it as
+    // "everything that wasn't context" is exactly the bug: that leftover is
+    // output + input.
+    for (const [name, src] of [['the session panel', main], ['the brief', brief]]) {
+      assert.ok(!/100 - (split\.)?contextPct/.test(src),
+        `${name} still derives the answer share as the leftover after context`);
+    }
+    assert.ok(main.includes('split.outputPct') && main.includes('split.inputPct'),
+      'the session panel reports output and input as their own figures');
+    assert.ok(brief.includes('split.outputPct') && brief.includes('split.inputPct'),
+      'and so does the brief');
+    assert.ok(main.includes('the prompts you sent'), 'and names input for what it is');
+    assert.ok(brief.includes('prompts I sent'));
+    assert.ok(!/as opposed to the answer itself/.test(html),
+      'the timeline caption called the whole unshaded part the answer');
+  });
+
+  test('an empty bucket reads as zero rather than as a rounding artefact', () => {
+    const fn = main.slice(main.indexOf('function moneyFine'), main.indexOf('function insightBadge'));
+    assert.match(fn, /if \(v === 0\) return '\$0';/);
+  });
+
+  test('a token count is read by presence, so a real zero is never overridden', () => {
+    const api = readFileSync(path.join(here, '..', 'src/api.ts'), 'utf8');
+    const fn = api.slice(api.indexOf('function pickTokens'), api.indexOf('let loggedTokenShape'));
+    assert.match(fn, /!== undefined/, 'a present-and-zero field is an answer, not a miss');
+    assert.ok(!/\|\|/.test(fn), 'truthiness here would swap a real 0 for an alias');
+    // Cache write reads 0 on every request for some accounts; there is no way
+    // to tell a reported zero from a key we never read without seeing the shape.
+    assert.match(api, /Usage event tokenUsage shape:/, 'the shape has to be diagnosable from the logs');
+    assert.match(api, /resetTokenShapeLog\(\);/, 'and re-reported on each load, not once per window');
+  });
+}
+
+console.log('\none card per lesson');
+{
+  const { dedupeFindings, FINDING_CARD_LIMIT } = await loadTs('src/webview/insights.js', 'insights5.mjs');
+  const blowup = (id, impact) => ({
+    id: `context-blowup:${id}`, rule: 'context-blowup', severity: 'high', impact,
+    anchor: { requestId: id }, title: `Context grew — ${impact}`, body: 'b', action: 'a',
+  });
+
+  test('a rule that fired repeatedly is one card, not one per request', () => {
+    const cards = dedupeFindings([blowup('r1', 6.81), blowup('r2', 4.36), blowup('r3', 3.47)]);
+    assert.equal(cards.length, 1);
+    assert.equal(cards[0].anchor.requestId, 'r1', 'the dearest instance is the one worth opening');
+  });
+
+  test('folding the repeats keeps their dollars on the card', () => {
+    const [card] = dedupeFindings([blowup('r1', 6.81), blowup('r2', 4.36), blowup('r3', 3.47)]);
+    assert.equal(card.related.count, 2);
+    assert.ok(Math.abs(card.related.dollars - 7.83) < 1e-9, 'every instance but the lead');
+  });
+
+  test('the lead is the dearest however the list arrived', () => {
+    const [card] = dedupeFindings([blowup('r3', 3.47), blowup('r1', 6.81), blowup('r2', 4.36)]);
+    assert.equal(card.anchor.requestId, 'r1');
+    assert.ok(Math.abs(card.related.dollars - 7.83) < 1e-9);
+  });
+
+  test('a rule that fired once carries no tally at all', () => {
+    const [card] = dedupeFindings([blowup('r1', 6.81)]);
+    assert.equal(card.related, undefined);
+  });
+
+  test('different rules stay separate — that is the whole point', () => {
+    const cards = dedupeFindings([
+      blowup('r1', 6.81), blowup('r2', 4.36),
+      { rule: 'model-switch', severity: 'high', impact: 7.8, anchor: { requestId: 'r9' }, title: 't', body: 'b', action: 'a' },
+    ]);
+    assert.deepEqual(cards.map((f) => f.rule), ['model-switch', 'context-blowup']);
+  });
+
+  test('period findings have no rule, so their title keys them', () => {
+    const cards = dedupeFindings([
+      { severity: 'medium', title: 'Low cache hit rate', body: 'b', action: 'a' },
+      { severity: 'medium', title: 'Heavy output requests', body: 'b', action: 'a' },
+    ]);
+    assert.equal(cards.length, 2);
+  });
+
+  test('positives never outrank real money', () => {
+    const cards = dedupeFindings([
+      { rule: 'cache-ok', severity: 'positive', impact: 0, title: 'p', body: 'b', action: 'a' },
+      blowup('r1', 1.2),
+    ]);
+    assert.equal(cards[0].rule, 'context-blowup');
+  });
+
+  test('three cards is the cap, and the rest are reachable rather than dropped', () => {
+    assert.equal(FINDING_CARD_LIMIT, 3);
+    const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+    const fn = main.slice(main.indexOf('function renderFindingGrid'), main.indexOf('/** Moves the user to a request'));
+    assert.match(fn, /slice\(0, FINDING_CARD_LIMIT\)/, 'the grid is capped');
+    assert.match(fn, /dedupeFindings\(findings\)/, 'and deduped before it is capped');
+    assert.match(fn, /findings-more/, 'with the remainder behind a button');
+    // Held in state, not in the DOM: every filter change re-renders the grid.
+    assert.match(main, /expandedFindings: new Set\(\)/);
+  });
+
+  test('the brief says each finding once too', () => {
+    const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
+    const fn = brief.slice(brief.indexOf('function findingsBlock'), brief.indexOf('function ratesBlock'));
+    assert.match(fn, /dedupeFindings\(findings\)/);
+  });
+}
+
+console.log('\nthe session comparison table');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+  const fn = main.slice(main.indexOf('function renderModelDeltaTable'), main.indexOf('/** The inline from/to editor'));
+
+  test('the difference column says which way it reads', () => {
+    // Two sessions have no inherent order, so "Change" left the sign meaning
+    // whichever direction the reader assumed. The metrics table directly above
+    // already spells it out; these now agree word for word.
+    assert.match(main, /changeLabel: 'Difference'/);
+    assert.match(main, /changeSub: 'A against B'/);
+    assert.match(main, /<span class="compare-col-days">A against B<\/span>/,
+      'the metrics table it has to match');
+  });
+
+  test('a period comparison keeps its own wording — it has a time direction', () => {
+    assert.match(fn, /changeLabel = 'Change'/);
+    assert.match(fn, /changeSub = ''/);
+  });
+
+  test('a model only one side ran shows a dash, not $0.00 across 0 requests', () => {
+    // "never used it" and "used it and it came to nothing" are different
+    // statements. The matrix shown for three or more sessions always drew this
+    // distinction; the two-session table did not.
+    assert.match(fn, /const modelsIn = \(events\) => new Set\(events\.map\(\(e\) => e\.model\)\)/,
+      'presence comes from the events, not from a cost or a counted-request tally');
+    assert.match(fn, /'<td class="cell-absent">—<\/td>'/);
+    assert.match(fn, /const tag = !inBase/, 'the tag keys on presence too');
+  });
+
+  test('no percentage is offered against a side that never ran the model', () => {
+    assert.match(fn, /\{ pct: inCur && inBase \}/);
+    const cell = main.slice(main.indexOf('function deltaCell'), main.indexOf('function renderModelDeltaTable'));
+    assert.match(cell, /pct: withPct = true/);
+    assert.match(cell, /if \(!withPct\) \{\s*\n?\s*pct = '';/);
+  });
+
+  test('the row label contains its own content instead of running into the figures', () => {
+    assert.match(fn, /<span class="compare-model-label">/);
+    assert.match(fn, /<span class="compare-model-name"/);
+    assert.match(fn, /title="\$\{esc\(d\.model\)\}"/, 'a clipped name keeps the whole of it on the title');
+    const label = css.match(/\.compare-model-label \{[^}]*\}/)[0];
+    assert.match(label, /flex-wrap: wrap/, 'the badge drops below the name only when it has to');
+    assert.match(label, /min-width: 0/, 'without this a flex item refuses to shrink and overflows');
+    const name = css.match(/\.compare-model-name \{[^}]*\}/)[0];
+    for (const rule of ['overflow: hidden', 'text-overflow: ellipsis', 'white-space: nowrap']) {
+      assert.ok(name.includes(rule), `the name needs "${rule}" so it clips rather than breaking mid-identifier`);
+    }
+  });
+
+  test('the label column fits the longest model name Cursor bills under', () => {
+    // Measured in the browser at 224px for "claude-sonnet-5-thinking-medium",
+    // plus the cell's 10px padding either side. Narrower and the reasoning
+    // effort is what falls off the end — and medium and high are different
+    // rows at different prices.
+    const width = Number(css.match(/\.sessions-compare-table th:first-child \{ width: (\d+)px; \}/)[1]);
+    assert.ok(width >= 244, `label column is ${width}px, too narrow for a 224px name plus padding`);
+  });
+}
+
+console.log('\ngetting from an expensive request to its session');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+
+  test('the expensive-request table carries the session it came from', () => {
+    const fn = main.slice(main.indexOf('function renderAnalyzeExpensivePanel'),
+      main.indexOf('function renderThresholdInputs'));
+    assert.match(fn, /sessionCellFor\(e\.conversationId \|\| null\)/);
+    assert.match(fn, /<th>Session<\/th>/);
+    // Seven columns now, and the empty-state row has to span all of them or it
+    // sits under one header instead of the table.
+    assert.equal((fn.match(/<th[ >]/g) || []).length, 7, '<thead> is not a column');
+    assert.match(fn, /colspan="7"/);
+  });
+
+  test('the names are fetched for this table too, not just the request log', () => {
+    // They come from a local database and arrive after the first paint; without
+    // this every row reads as a raw conversation id.
+    const fn = main.slice(main.indexOf('function renderAnalyzeExpensivePanel'),
+      main.indexOf('function renderThresholdInputs'));
+    assert.match(fn, /loadSessionTitles\(expensive\.map/);
+  });
+
+  test('both tables build the cell the same way', () => {
+    // One helper, so the log and Analyze cannot drift into different labels or
+    // a different affordance for the same question.
+    assert.equal((main.match(/class="btn-link session-link/g) || []).length, 1,
+      'the markup lives in sessionCellFor and nowhere else');
+    assert.equal((main.match(/sessionCellFor\(/g) || []).length, 3, 'defined once, called from both tables');
+  });
+
+  test('a session link opens the dialog from wherever it is rendered', () => {
+    assert.match(main, /\.finding-session, \.session-open, \.session-link/);
+  });
+
+  test('clicking one in the log opens the session without also toggling the row', () => {
+    // Two listeners see the click. The row handler has to bow out, and it must
+    // not open the dialog itself or the delegated handler opens it twice.
+    const fn = main.slice(main.indexOf("$('tableBody')?.addEventListener"), main.indexOf('// Findings carry their own links'));
+    assert.match(fn, /if \(ev\.target\.closest\('\.session-link'\)\) return;/);
+    assert.ok(!/closest\('\.session-link'\)[\s\S]{0,120}openSessionDetail/.test(fn),
+      'the row handler must not open the dialog as well');
+  });
+}
+
+console.log('\nthe Auto rate, and saying which one is on screen');
+{
+  const MODELS_MD = ['## Model pricing', '',
+    '| Model | Input | Cache write | Cache read | Output |',
+    '| :--- | :--- | :--- | :--- | :--- |',
+    '| Claude 4.5 Sonnet | $3.00 | $3.75 | $0.30 | $15.00 |', ''].join('\n');
+  const withAuto = (rowName) => parsePricing(['## Auto Cost', '',
+    '| Name | Input | Cache Write | Cache Read | Output |',
+    '| :--- | :--- | :--- | :--- | :--- |',
+    `| ${rowName} | $1.25 | $1.25 | $0.25 | $6 |`, '', MODELS_MD].join('\n'));
+
+  test('the published Auto row is read, including a whole-dollar rate', () => {
+    const p = withAuto('Auto Cost');
+    assert.deepEqual(p.auto, { input: 1.25, cacheWrite: 1.25, cacheRead: 0.25, output: 6 });
+    assert.equal(p.autoFallback, false, 'this is a scrape, not the built-in rate');
+  });
+
+  test('an Auto row named for what it prices is still found by its heading', () => {
+    // "All models", "Any model" — the row need not carry the word Auto when the
+    // section above it does, and it is the only priced row there.
+    const p = withAuto('All models');
+    assert.equal(p.auto.input, 1.25);
+    assert.equal(p.autoFallback, false);
+  });
+
+  test('a model whose own name contains "auto" never stands in for the bundle', () => {
+    const p = parsePricing(['## Model pricing', '',
+      '| Model | Input | Cache write | Cache read | Output |',
+      '| :--- | :--- | :--- | :--- | :--- |',
+      '| Autocoder 2 | $3.00 | $3.75 | $0.30 | $15.00 |',
+      '| Claude 4.5 Sonnet | $3.00 | $3.75 | $0.30 | $15.00 |'].join('\n'));
+    assert.equal(p.autoFallback, true, 'two priced rows in that section — not an Auto table');
+  });
+
+  test('when the Auto rate is missing, the log says what the page did have', () => {
+    const p = parsePricing(['## Auto Cost', '', '<AutoPricingTable />', '', MODELS_MD].join('\n'));
+    assert.equal(p.autoFallback, true);
+    const said = describePricingScrape(p);
+    assert.match(said, /no Auto rate — using the built-in one/);
+    assert.match(said, /Model pricing/, 'the tables it did find are the whole point of the line');
+    assert.match(said, /Model \| Input/, 'with their headers, so a renamed column is visible');
+  });
+
+  test('a healthy scrape says so in one line', () => {
+    assert.match(describePricingScrape(withAuto('Auto Cost')), /Auto rate read from the page/);
+  });
+}
+
+console.log('\nan omitted bucket is not a zero');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const brief = readFileSync(path.join(here, '..', 'src/webview/brief.js'), 'utf8');
+  const api = readFileSync(path.join(here, '..', 'src/api.ts'), 'utf8');
+  const raw = (tokenUsage) => ({
+    id: 'r1', timestamp: Date.now(), model: 'claude-sonnet-5-thinking-medium',
+    isTokenBasedCall: true, chargedCents: 12, tokenUsage,
+  });
+
+  test('a payload carrying a count is reported, zero or not', () => {
+    for (const n of [30806, 0]) {
+      const e = normalize(raw({ inputTokens: 10, cacheWriteTokens: n, unreportedBuckets: [] }), pricing);
+      assert.deepEqual(e.unreportedBuckets, [], `cacheWriteTokens: ${n} is a measurement`);
+      assert.equal(e.cacheWriteTokens, n);
+    }
+  });
+
+  test('a bucket with no count is listed, and still counts as 0 for arithmetic', () => {
+    const e = normalize(raw({ inputTokens: 10, unreportedBuckets: ['cacheWrite'] }), pricing);
+    assert.deepEqual(e.unreportedBuckets, ['cacheWrite']);
+    assert.equal(e.cacheWriteTokens, 0, 'the sums still need a number');
+  });
+
+  test('an event from before the flag existed is treated as fully reported', () => {
+    const e = normalize(raw({ inputTokens: 10, cacheWriteTokens: 5 }), pricing);
+    assert.deepEqual(e.unreportedBuckets, []);
+  });
+
+  test('presence is computed for every bucket, not just the one that broke', () => {
+    // Which field an upstream change drops next is not worth predicting.
+    const fn = api.slice(api.indexOf('const TOKEN_ALIASES'), api.indexOf('function unreportedOf'));
+    for (const bucket of ['input:', 'output:', 'cacheRead:', 'cacheWrite:']) {
+      assert.ok(fn.includes(bucket), `${bucket} needs an alias list of its own`);
+    }
+    assert.match(api, /unreportedBuckets: unreportedOf\(tu\)/);
+  });
+
+  test('a bucket is unknown only when every request in view omitted it', () => {
+    const fn = main.slice(main.indexOf('function unreportedBuckets'), main.indexOf('const BUCKET_TOKEN_FIELD'));
+    assert.match(fn, /shared\.delete\(key\)/, 'one reporting request makes the total real, if partial');
+    assert.match(fn, /if \(!list\.length\) return new Set\(\)/, 'an empty list is not "unknown"');
+  });
+
+  test('every token cell in the log can show a dash', () => {
+    for (const bucket of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+      assert.ok(main.includes(`tokenCell(e, '${bucket}')`), `${bucket} goes through tokenCell`);
+    }
+    const fn = main.slice(main.indexOf('function tokenCell'), main.indexOf('function insightBadge'));
+    assert.match(fn, /missing \? UNREPORTED : fmt\.num/);
+  });
+
+  test('the cost breakdown drops the figure for any missing bucket and says which', () => {
+    const fn = main.slice(main.indexOf('function renderBreakdown'), main.indexOf('/** Moves the user to a request'));
+    assert.match(fn, /const missing = unreported\.has\(key\)/, 'any bucket, not one hardcoded');
+    assert.match(fn, /missing \? UNREPORTED : moneyFine/);
+    assert.match(fn, /missing \? UNREPORTED : fmt\.pct/);
+    assert.match(fn, /Cursor sent no \$\{\[\.\.\.unreported\]/, 'the note names what is actually missing');
+  });
+
+  test('no user-facing copy dates or explains the outage', () => {
+    // It may come back, and the next gap may be a different bucket for a
+    // different reason. The interface describes the payload in front of it;
+    // when it broke belongs in the changelog.
+    for (const [name, src] of [['main.js', main], ['brief.js', brief]]) {
+      const copy = src.split('\n').filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'));
+      assert.ok(!/August 2026/.test(copy.join('\n')), `${name} must not date the outage in user-facing text`);
+      assert.ok(!/stopped reporting|no longer says/.test(copy.join('\n')),
+        `${name} must not narrate a cause that may not hold next time`);
+    }
+  });
+
+  test('the CSV leaves any missing count blank instead of writing 0', () => {
+    const fn = main.slice(main.indexOf('function csvToken'), main.indexOf('function exportCsv'));
+    assert.match(fn, /includes\(bucket\) \? '' :/);
+    for (const bucket of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+      assert.ok(main.includes(`csvToken(e, '${bucket}')`), `${bucket} goes through csvToken`);
+    }
+  });
+
+  test('the brief says absent in words, so the model cannot reason from a zero', () => {
+    assert.match(brief, /not reported by Cursor \(unknown, not zero\)/);
+    assert.match(main, /not reported by Cursor \(unknown, not zero\)/);
+    // "rewrote not reported by Cursor tokens to cache" is not a sentence.
+    assert.match(brief, /reported\(event, 'cacheWrite'\)/, 'the idle-resume clause is dropped, not filled');
+  });
+}
+
+console.log('\nthe suite itself');
+{
+  const suite = readFileSync(path.join(here, 'run-tests.mjs'), 'utf8');
+
+  test('webview modules are loaded through the bundler, never imported raw', () => {
+    // src/webview/*.js imports src/shared/usageLogic.ts. Node 22 strips the
+    // types and loads it; CI's Node 20 throws ERR_UNKNOWN_FILE_EXTENSION. So a
+    // bare import() of one of these passes locally and fails only on CI —
+    // loadTs bundles it and works on both.
+    const raw = suite.match(/import\(\s*'\.\.\/src\/[^']+'/g) || [];
+    assert.deepEqual(raw, [], 'use loadTs(...) instead of importing src/ directly');
+  });
+
+  test('an async test that is not awaited still decides the exit code', () => {
+    assert.match(suite, /const running = \[\];/);
+    assert.match(suite, /running\.push\(settled\);/);
+    assert.match(suite, /await Promise\.all\(running\);/);
+  });
+}
+
+await Promise.all(running);
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

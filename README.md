@@ -73,6 +73,8 @@ The plan card always covers the **current billing cycle**, not the period picked
 
 The full request log: custom date ranges, model filter, per-request token cost and cache savings, expensive-request highlighting, sortable columns, CSV export. On usage-based plans a separate **Usage fee** column shows the flat per-request charge, kept apart from token cost so neither number absorbs the other. The **Analytics** sub-tab adds daily token cost, cost by model, and token volume charts with a week-over-week trend badge.
 
+A **Session** column names the conversation each request came from and links straight to it, so an expensive row doesn't mean going hunting for which chat it belonged to. **Click any row** to see what its cost was actually made of — cache read, cache write, output, input. On a long agent turn that split is usually the whole story: the answer costs a few cents and the rest is re-reading context. Rows the dashboard has something to say about carry a marker.
+
 Date presets are **Today / 7 days / 30 days / Month to date / Custom**. If your account moved from per-request to token pricing, a **Current plan** preset appears and the dashboard switches to it once, so you aren't comparing dollars from two different billing systems in one total.
 
 ![Analytics charts](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analytics.png)
@@ -83,7 +85,17 @@ Three sub-tabs, all answering "why does my bill look like this" — **Findings**
 
 ![Analyze tab](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analyze.png)
 
-**Findings** are rule-based with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, spike requests, a measured promotion and what it's worth switching to it for — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick, copies it, and focuses Cursor's chat so you just paste and send.
+**Findings** are rule-based with configurable thresholds: which model dominates your spend, whether your cache is working, cold starts, heavy-output requests, a measured promotion and what it's worth switching to it for — each with a concrete "what to do about it". The **Ask Cursor Chat** panel builds a compact brief from the data slices you pick and opens Cursor's chat with it in the input box, unsent, for you to read and send yourself.
+
+Findings that are about a specific request say what the pattern cost and link through to it, and the same finding appears wherever you happen to be looking — on the Overview, on the session it belongs to, and as a marker on the row in the log. They're derived from token counts and timestamps alone, never from anything you wrote:
+
+| Finding | What it means |
+| --- | --- |
+| **Stale resume** | You came back to a thread after hours away. The prompt cache had expired, so the whole accumulated context was re-written at full price before any work happened — this tells you what that cost. |
+| **Context blowup** | One request read far more cached context than the rest of its session, and was almost entirely re-read context. Cost here is context size × how many turns the agent took, not how long the answer was. |
+| **Summarising worked** / **the context grew back** | Cursor compacting a conversation is recognised as such, and judged on what happened next — cache reads that stayed down, or a thread that re-inflated within the hour. |
+| **Spend concentration** | A handful of requests account for most of the period, so working on the outliers beats trimming everyday usage. |
+| **What every new chat costs before you type** | Measured from your cold starts. That baseline is Cursor's system prompt, your rules files, and the tool definitions of every connected MCP server — you pay it on every fresh chat, and it rides inside every context re-read after that. |
 
 #### Compare periods
 
@@ -100,6 +112,14 @@ Alongside cost it shows requests, avg per request, per-day rates and cache hit r
 Groups the requests in your selected period by the Cursor conversation they came from, so "one chat" reads as one row instead of scattered log lines. Each session shows its cost, span, requests, and the models it reached for; names come from Cursor's own local chat index when it has one, otherwise the conversation id.
 
 ![Sessions list](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-sessions.png)
+
+**Click a session name** to open its breakdown: where that session's money went by token bucket, the findings anchored to it, and one bar per request in the order you asked them, each priced, with the context share shaded. A session that got more expensive as it went looks expensive — the shaded band swells while the solid part stays flat.
+
+**Ask Cursor Chat about it.** The breakdown has an **Ask Cursor Chat** button that builds a brief about *this* session — or about one request out of it — and opens Cursor Chat with it already in the input box. It stops there: nothing is sent until you've read it and pressed Enter. Where prefilling isn't available it copies the brief and opens chat for you to paste, and tells you which happened.
+
+The brief is engineered small on purpose, because the analysis costs tokens too: instead of listing every request, it reports the session's spending as six equal slices, so a 300-request session costs the same to describe as a 12-request one and the growth curve, the step down at a compaction and the spike all still show. Anything a finding already explains isn't repeated. The dialog tells you the brief's size in tokens and roughly what it'll cost to send *before* you send it. Pick a question — *find where starting a fresh chat would have saved money*, *identify avoidable spend, ranked by dollar impact*, *create a cheaper plan for doing the same work* — or write your own.
+
+The brief carries the conversation's name, its token counts, timings and costs, and nothing else. Nothing you typed is in it, because the extension never read it.
 
 Tick up to four sessions and a selection tray pins to the bottom of the view with a **Compare** button — picking rows at the bottom of a long list gives you feedback right there instead of a table you have to scroll up to find. With two sessions the comparison shows a plain difference column; with three or four it highlights the best and worst figure in each row against a base you can re-pick, plus a model-by-model cost breakdown for the same sessions.
 
@@ -122,6 +142,7 @@ Discounted requests are badged **"Discounted"** wherever they appear — the req
 | Command | Description |
 | --- | --- |
 | `Cursor Usage: Open Dashboard` | Open the dashboard panel |
+| `Cursor Usage: Open in Browser` | Open the same dashboard in your default browser instead of the IDE panel |
 | `Cursor Usage: Refresh` | Reload usage data (dashboard + status bar) |
 | `Cursor Usage: Set Session Token Manually` | Fallback auth via pasted cookie |
 | `Cursor Usage: Set Team Admin API Key` | Team usage via the Admin API |
@@ -145,6 +166,12 @@ Discounted requests are badged **"Discounted"** wherever they appear — the req
 | `cursorUsage.statusBar.criticalAtPercent` | `95` | % of the allowance at which the status bar turns red |
 
 "Allowance" means included requests on plans that have them, and your monthly budget on plans metered in dollars — the quota settings cover both.
+
+## Opening the dashboard in a browser
+
+Prefer a real browser tab over the IDE panel? Click **"Open in browser ↗"** next to the header links, or run *"Cursor Usage: Open in Browser"* from the command palette. This starts a small local server on `127.0.0.1` (a random free port, never exposed beyond your machine) and opens your default browser to it. It's the same dashboard and the same local data access as the IDE panel — nothing is sent anywhere new — just served over HTTP instead of a VS Code webview. The tab follows your operating system's light/dark preference, since there's no editor theme to inherit out there.
+
+A random access token is generated per IDE session and handed to the tab in its launch URL; the page moves it into `sessionStorage` and clears it out of the address bar straight away, so it survives a reload but never lands in your browser history. Every call that returns usage data requires it, so nothing else on your machine can read your usage through that port. Opening the bare URL in a new tab gets you the dashboard shell and a message telling you to relaunch it from the IDE. The server shuts down when the IDE window closes.
 
 ## Authentication & privacy
 

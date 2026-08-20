@@ -183,7 +183,13 @@ export function parsePricing(md) {
   const models = [];
   const seenNames = new Set();
   const lines = text.split('\n').map((l) => l.trim());
+  // Every table header seen, and the heading each sat under. Kept for the
+  // diagnostic below: when the Auto rate goes missing the useful question is
+  // what the page *did* contain, and that is invisible from the panel.
+  const tablesSeen = [];
+  let heading = '';
   for (let i = 0; i < lines.length - 1; i++) {
+    if (lines[i].startsWith('#')) heading = lines[i].replace(/^#+\s*/, '');
     if (!lines[i].startsWith('|') || !isTableSeparatorRow(lines[i + 1])) continue;
     const headerCells = splitRowCells(lines[i]);
     const rows = [];
@@ -192,9 +198,14 @@ export function parsePricing(md) {
       rows.push(splitRowCells(lines[j]));
       j++;
     }
-    for (const m of parseModelTableRows(headerCells, rows)) {
+    const parsed = parseModelTableRows(headerCells, rows);
+    tablesSeen.push({ heading, headers: headerCells, rows: rows.length, priced: parsed.length });
+    for (const m of parsed) {
       if (seenNames.has(m.name)) continue;
       seenNames.add(m.name);
+      // Which section it came from, so an Auto row named something else can
+      // still be recognised by the heading above it.
+      m.section = heading;
       models.push(m);
     }
     i = j - 1;
@@ -208,13 +219,34 @@ export function parsePricing(md) {
   // rates entirely, and with them its cache-savings figure.
   if (auto.input == null) {
     const autoRow = models.find((m) => m.name.includes('auto') && m.name.includes('cost'))
-      || models.find((m) => m.name === 'auto');
+      || models.find((m) => m.name === 'auto')
+      // Last resort: the only priced row under a heading that is about Auto.
+      // Covers the row being named for what it prices ("All models", "Any
+      // model") rather than for Auto itself, without letting a model whose own
+      // name merely contains "auto" stand in for the bundle.
+      || models.find((m) => normModel(m.section).includes('auto')
+        && models.filter((x) => x.section === m.section).length === 1);
     if (autoRow?.input != null) {
       auto.input = autoRow.input;
       auto.cacheWrite = autoRow.cacheWrite ?? autoRow.input;
       auto.cacheRead = autoRow.cacheRead;
       auto.output = autoRow.output;
     }
+  }
+
+  // Auto's rate can go missing on its own, and it used to take Auto down with
+  // it. The wholesale fallback below only fires when *nothing* parsed, so a page
+  // that still lists every named model but has moved, renamed or un-tabled the
+  // Auto row left `auto.input` null — and since Auto is priced from that field
+  // alone, every Auto request lost its rates, its cache-savings figure and its
+  // cost breakdown, and the UI reported the most-used model in the product as
+  // "not in the pricing table". A built-in rate that might be a little stale is
+  // better than no rate at all; `autoFallback` records which one is on screen so
+  // nothing has to present a guess as a scrape.
+  let autoFallback = false;
+  if (auto.input == null && models.length > 0) {
+    Object.assign(auto, FALLBACK_PRICING.auto);
+    autoFallback = true;
   }
 
   // Scrape found nothing usable (empty/unreachable doc, or page restructured) — fall back.
@@ -228,7 +260,14 @@ export function parsePricing(md) {
     };
   }
 
-  return { auto, models, aliasIndex: buildAliasIndex(models), fallback: false };
+  return {
+    auto,
+    models,
+    aliasIndex: buildAliasIndex(models),
+    fallback: false,
+    autoFallback,
+    tablesSeen,
+  };
 }
 
 /**
@@ -237,6 +276,20 @@ export function parsePricing(md) {
  * estimating need to know the difference, or they read the substitution as a
  * real price. `cacheWritePublished` records which of the two this is.
  */
+/**
+ * Whether this row is billed at Auto's own flat rate rather than a model's.
+ *
+ * Bare Auto and Cost mode keep the bundled rate whatever they route to; Balance
+ * and Intelligence bill at the routed model's rate, which is why Cursor names
+ * that model in the row. Shared with discount detection so the two cannot
+ * disagree about which rate card a request belongs to.
+ */
+export function isBundledAuto(model) {
+  const n = normModel(model);
+  return n === 'auto' || n === 'default' || n === 'cursor-auto'
+    || (n.includes('auto') && n.includes('cost'));
+}
+
 export function matchPricing(model, pricing) {
   const n = normModel(model);
   const autoRates = () => (pricing.auto.input != null ? {
@@ -246,6 +299,9 @@ export function matchPricing(model, pricing) {
     cacheRead: pricing.auto.cacheRead,
     output: pricing.auto.output,
     label: 'Auto',
+    // True when the pricing page didn't publish an Auto rate this time and the
+    // built-in one stood in — see parsePricing. Carried so the UI can say so.
+    estimated: pricing.autoFallback === true,
   } : null);
   // Auto is billed one of two ways, and which one depends on the router mode.
   // Cost mode keeps Auto's bundled flat rate whatever it routes to. Balance and
@@ -257,10 +313,7 @@ export function matchPricing(model, pricing) {
   // a named Balance/Intelligence row, where the model beside it is the answer.
   // Matching on the word "auto" anywhere used to price every one of them at the
   // bundled rate — roughly half what a routed Grok request really costs.
-  const autoRouted = n.includes('auto');
-  const bundledAuto = n === 'auto' || n === 'default' || n === 'cursor-auto'
-    || (autoRouted && n.includes('cost'));
-  if (bundledAuto) {
+  if (isBundledAuto(model)) {
     const rates = autoRates();
     if (rates) return rates;
   }
@@ -314,7 +367,7 @@ export function matchPricing(model, pricing) {
     };
   }
   // Auto-routed traffic whose model the table cannot name any better.
-  if (autoRouted) return autoRates();
+  if (n.includes('auto')) return autoRates();
   return null;
 }
 
@@ -480,6 +533,27 @@ export const DISCOUNT_DETECTION = {
   exactSlackPct: 1,
 };
 
+/**
+ * What this account pays for a request that is on no promotion at all.
+ *
+ * Cursor reports a standing enterprise reduction on the event itself, and
+ * applies it to the charge while `totalCents` stays at list. Measured against
+ * list, then, every model on such an account sits permanently "below list" by
+ * that much — a 7% agreement put three models a hair under the 8% promotion
+ * floor, and pushed every real sale 7 points deeper than it was (a 33% sale
+ * measured as 37.7%, a 50% one as 53.5%). Price against what the account
+ * actually pays and both problems go away. Zero for everyone else, so this
+ * changes nothing on an account with no such agreement.
+ */
+function mul(value, factor) {
+  return value == null ? null : value * factor;
+}
+
+function baselineFactor(event) {
+  const pct = event?.baselineDiscountPct;
+  return Number.isFinite(pct) && pct > 0 && pct < 100 ? 1 - pct / 100 : 1;
+}
+
 function median(sorted) {
   if (!sorted.length) return null;
   const mid = Math.floor(sorted.length / 2);
@@ -541,9 +615,19 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     // thrown by a stale scrape, a model the table has never heard of, or an
     // unpublished cache-write rate — and Auto works, which the rate table can
     // never price because Cursor does not say what it routed to.
-    const list = e.listTokenCost;
+    const baseline = baselineFactor(e);
+    const list = e.listTokenCost != null ? e.listTokenCost * baseline : null;
     const billed = e.billedTokenCost;
-    if (list != null && billed != null && list >= cfg.minExpectedCost) {
+    // Bare Auto is the one row where Cursor's two figures describe different
+    // rate cards. `totalCents` is what the tokens are worth on the model Auto
+    // routed to; the charge follows Auto's own flat rate, "regardless of which
+    // model is used". Their gap is the Auto bundle's structural saving, not a
+    // promotion — and it moves with the routing rather than with any sale,
+    // which is why it read as a different discount every day (44%, 46%, 48%,
+    // and one day too scattered to call) and put a "Discounted" badge on Auto
+    // permanently. Auto is measured further down instead, against Auto's own
+    // published rate, which is a comparison of like with like.
+    if (list != null && billed != null && list >= cfg.minExpectedCost && !isBundledAuto(e.modelRaw)) {
       diagnostics.considered++;
       const bucketKey = `${n}|${day}`;
       if (!buckets.has(bucketKey)) {
@@ -566,10 +650,13 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       continue;
     }
 
-    // Auto routes to a model Cursor does not name, so its billed value cannot
-    // be checked against any single rate row. Only the fallback below needs one.
-    if (!n || n === 'unknown' || n === 'default' || n.includes('auto')) {
-      skip('Auto or unnamed model, and no list value to compare against');
+    // Nothing here is skipped for being Auto any more. Every flavour of it has
+    // a rate row that matchPricing can name — bare Auto and Cost mode price
+    // against Auto's own published rate, Balance and Intelligence against the
+    // model Cursor named in the row — so the check that matters is whether a
+    // rate was found at all, which happens a few lines down.
+    if (!n || n === 'unknown') {
+      skip('unnamed model, and no list value to compare against');
       continue;
     }
 
@@ -594,7 +681,7 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
       cacheRead: e.cacheReadTokens,
       cacheWrite: e.cacheWriteTokens,
     };
-    const expected = estimateTokenCost(rates, tokens);
+    const expected = mul(estimateTokenCost(rates, tokens), baseline);
     if (expected == null || expected < cfg.minExpectedCost) {
       skip('below the sub-cent floor', n);
       continue;
@@ -619,7 +706,7 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
     // that, while allowing the gaps too large for the substitution to explain.
     let floorExpected = expected;
     if (e.cacheWriteTokens > 0 && !rates.cacheWritePublished) {
-      floorExpected = estimateTokenCost({ ...rates, cacheWrite: 0 }, tokens);
+      floorExpected = mul(estimateTokenCost({ ...rates, cacheWrite: 0 }, tokens), baseline);
       if (floorExpected == null || !(floorExpected > 0)) {
         skip('cache-write rate unbounded', n);
         continue;
@@ -705,6 +792,29 @@ export function detectDiscounts(events = [], pricing = null, opts = {}) {
   }
 
   return { discounts, observed, diagnostics };
+}
+
+/**
+ * What the pricing scrape found, for the log.
+ *
+ * The Auto rate going missing is the one scrape failure with a visible
+ * consequence — every Auto request loses its rates — and from the panel a
+ * built-in rate is indistinguishable from a scraped one. When Auto is missing
+ * this prints the tables the page actually had, which is the only thing that
+ * says whether the row moved, was renamed, or stopped being a table at all.
+ */
+export function describePricingScrape(pricing) {
+  if (!pricing) return 'Pricing: nothing parsed.';
+  if (pricing.fallback) return 'Pricing: nothing parsed from the page — using built-in rates for every model.';
+  const head = `Pricing: ${pricing.models.length} model row(s) parsed`;
+  if (!pricing.autoFallback) return `${head}, Auto rate read from the page.`;
+  const tables = (pricing.tablesSeen || []).map(
+    (t) => `    "${t.heading || '(no heading)'}" [${t.headers.join(' | ')}] ${t.rows} row(s), ${t.priced} priced`,
+  );
+  return [
+    `${head}, but no Auto rate — using the built-in one.`,
+    ...(tables.length ? ['  Tables on the page:', ...tables] : ['  No markdown tables found on the page.']),
+  ].join('\n');
 }
 
 /**
@@ -1028,6 +1138,15 @@ export function normalize(raw, pricing, opts = {}) {
   const outputTokens = num(tu.outputTokens);
   const cacheReadTokens = num(tu.cacheReadTokens);
   const cacheWriteTokens = num(tu.cacheWriteTokens);
+  // Cursor stopped sending this count in August 2026. An omitted bucket and a
+  // measured zero must not print the same figure, so the distinction travels
+  // with the event. Absent flag means reported: every fixture and every older
+  // payload carried the count.
+  // Which token buckets arrived with no count at all. An omitted bucket and a
+  // measured zero both read 0 here, and the difference is the whole point:
+  // one is a measurement, the other is its absence. Empty for any payload that
+  // carried every count, which is every fixture and every older event.
+  const unreportedBuckets = Array.isArray(tu.unreportedBuckets) ? [...tu.unreportedBuckets] : [];
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
 
   const isTokenBased = Boolean(raw.isTokenBasedCall);
@@ -1055,6 +1174,13 @@ export function normalize(raw, pricing, opts = {}) {
   // since both come from Cursor for the same request, the gap between them is
   // the discount — measured, not inferred from a scraped rate table.
   const listTokenCost = modelCents != null ? modelCents / 100 : null;
+  // A standing per-account reduction (an enterprise agreement), applied to the
+  // charge on every request. It is the account's baseline price, not a sale,
+  // and detection has to price against it — see baselineFactor.
+  const baselineDiscountPct = Number.isFinite(tu.enterpriseUsageDiscountPercent)
+    && tu.enterpriseUsageDiscountPercent > 0 && tu.enterpriseUsageDiscountPercent < 100
+    ? Number(tu.enterpriseUsageDiscountPercent)
+    : 0;
   const billedTokenCost = isTokenBased && chargedCents != null
     ? Math.max(0, chargedCents - feeCents) / 100
     : null;
@@ -1109,6 +1235,8 @@ export function normalize(raw, pricing, opts = {}) {
     isTokenBased,
     billingRegime,
     planMeteredCost,
+    baselineDiscountPct,
+    unreportedBuckets,
     cacheSavings,
     noCacheCost,
     pricingLabel: rates?.label || null,

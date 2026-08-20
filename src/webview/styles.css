@@ -52,6 +52,56 @@ body.vscode-high-contrast-light {
   color-scheme: light;
 }
 
+/* The standalone browser page (browserServer.ts) is the one place with no VS
+   Code variables to inherit, so every token above resolves to its light
+   fallback — a white page next to a dark IDE. There is no theme to read there,
+   but there is an OS preference, so follow that. Scoped to body.standalone:
+   inside the webview the editor's own theme already decides. */
+@media (prefers-color-scheme: dark) {
+  body.standalone {
+    color-scheme: dark;
+    --bg: #1a1a1a;
+    --panel: #232323;
+    --border: rgba(255, 255, 255, 0.14);
+    --text: #e6e6e6;
+    --muted: #9d9d9d;
+    --accent: #4daafc;
+    --accent-fg: #ffffff;
+    --btn-bg: rgba(255, 255, 255, 0.1);
+    --btn-fg: #e6e6e6;
+    --btn-primary-bg: #0e639c;
+    --input-bg: #2a2a2a;
+    --input-fg: #e6e6e6;
+    --input-border: rgba(255, 255, 255, 0.18);
+    --hover: rgba(255, 255, 255, 0.07);
+    --green: #3fd39a;
+    --green-strong: #34c48c;
+    --amber: #e0a044;
+    --red: #f2716b;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    /* --bucket-* are set on :root, so without this the standalone page would
+       keep the light steps; they are the same dark steps the editor's dark
+       themes get above. */
+    --bucket-cache-read: #c98500;
+    --bucket-cache-write: #008300;
+    --bucket-output: #3987e5;
+    --bucket-input: #d55181;
+    --vscode-editorWidget-background: #232323;
+    --vscode-editorWidget-foreground: #e6e6e6;
+    --vscode-editorWidget-border: rgba(255, 255, 255, 0.14);
+    --vscode-editorHoverWidget-background: #2a2a2a;
+    --vscode-editorHoverWidget-foreground: #e6e6e6;
+    --vscode-editorHoverWidget-border: rgba(255, 255, 255, 0.18);
+    --vscode-descriptionForeground: #9d9d9d;
+    --vscode-textLink-foreground: #4daafc;
+    --vscode-input-background: #2a2a2a;
+    --vscode-input-foreground: #e6e6e6;
+    --vscode-input-border: rgba(255, 255, 255, 0.18);
+    --vscode-button-foreground: #ffffff;
+    --vscode-focusBorder: #4daafc;
+  }
+}
+
 .app {
   max-width: 1280px;
   margin: 0 auto;
@@ -702,6 +752,30 @@ tfoot td {
   letter-spacing: 0;
 }
 
+/* The row label holds a model name and, sometimes, a tag and a discount badge.
+   In the sessions dialog the column is a fixed 180-odd pixels, so on a long
+   name — "claude-sonnet-5-thinking-high" plus "Discounted on Aug 16" — the
+   badge ran straight out of the cell and over the figure in the next column.
+   Wrapping rather than truncating: the badge drops to its own line only when
+   the name has taken the width, so the wide period-comparison table keeps them
+   side by side. The name itself never breaks mid-identifier — it clips, with
+   the whole of it on the title. */
+.compare-model-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+}
+.compare-model-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compare-model-label .compare-tag,
+.compare-model-label .discount-tag { margin-left: 0; }
+
 .compare-tag {
   display: inline-block;
   margin-left: 6px;
@@ -884,7 +958,12 @@ tfoot td {
    metric row in the top table and a model row in the one below it line up —
    two tables of different content would otherwise auto-size their columns
    independently and drift out of register with each other. */
-.sessions-compare-table th:first-child { width: 180px; }
+/* Wide enough for the longest model name Cursor actually bills under —
+   "claude-sonnet-5-thinking-medium" measures 224px in the editor's monospace
+   face — plus the cell's own padding. Below this the name clips, and the
+   reasoning effort is the part that falls off the end: "…-thinking-" tells you
+   nothing, and medium and high are different rows at different prices. */
+.sessions-compare-table th:first-child { width: 246px; }
 .sessions-compare-table { table-layout: fixed; }
 .sessions-compare-table td { min-width: 96px; }
 /* Four named columns have to fit without the last one falling off the edge, so
@@ -984,7 +1063,43 @@ tfoot td {
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 12px;
 }
-.sessions-table .session-models { color: var(--muted); font-size: 11px; }
+/* Header and cell centred together, per column, so a label sits over its own
+   data rather than over the right edge every column happened to share. The
+   money column keeps its digits right-aligned inside a centred block: the
+   figures still line up decimal-for-decimal for scanning down the column, and
+   the block sits under its header. */
+.sessions-table thead th { text-align: center; }
+.sessions-table thead th:first-child,
+.sessions-table thead th:nth-child(2) { text-align: left; }
+.sessions-table .session-started,
+.sessions-table .session-duration,
+.sessions-table .session-requests,
+.sessions-table .session-cost { text-align: center; }
+.sessions-table .session-cost .compare-sub { text-align: center; }
+/* A date and a duration are single values — breaking "Aug 17, 06:14 PM" across
+   two lines is never the wrap that saves the layout. */
+.sessions-table .session-started,
+.sessions-table .session-duration { white-space: nowrap; }
+/* The column that used to force the table sideways. Three model names at ~22
+   characters each ran to a single 45-character line, and with `table-layout:
+   auto` that width propagated into the table's own minimum — so the whole
+   table scrolled horizontally to serve one column. Capped and wrapped, it
+   costs a second line on the busiest rows and nothing on the rest. */
+.sessions-table .session-models {
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 200px;
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.35;
+}
+/* Each name is one unbreakable unit, so the line breaks at the commas between
+   them and never inside one. Neither `anywhere` nor `break-word` achieves this:
+   a hyphen is a legitimate break opportunity in its own right, so "cursor-grok
+   -4.6-high" was being split at its own hyphens however the overflow rules were
+   set. Only nowrap on the name itself takes those opportunities away. */
+.session-model { white-space: nowrap; }
 
 .analytics-chart-main { margin-bottom: 10px; }
 .analytics-chart-row {
@@ -1052,9 +1167,34 @@ tfoot td {
   background: var(--panel);
   padding: 10px 12px;
 }
-.finding-card h4 { font-size: 12px; margin-bottom: 4px; }
+/* The dollar figure is the last child of the heading, and it used to be
+   floated there. A float escapes the heading's line box, so the moment a title
+   wrapped to two lines the figure dropped down beside the *body* paragraph and
+   read as an annotation on the wrong sentence. Flex keeps it on the title. */
+.finding-card h4 {
+  font-size: 12px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
 .finding-card p { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+/* The instances folded into this card. Set apart from the explanation above it
+   — it is a tally of other requests, not more detail about this one. */
+.finding-card .finding-related {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
 .finding-action { color: var(--accent); font-size: 12px; }
+/* Spans the whole grid rather than sitting in a cell, so it reads as the foot
+   of the list instead of a fourth card. */
+.findings-more {
+  grid-column: 1 / -1;
+  justify-self: start;
+  font-size: 12px;
+}
 .severity-high { border-left-color: var(--red); }
 .severity-medium { border-left-color: var(--amber); }
 .severity-positive { border-left-color: var(--green-strong); }
@@ -1539,3 +1679,373 @@ thead .tip:focus::after {
   font-size: 12px;
 }
 .compare-pin-note span { color: var(--vscode-descriptionForeground, #9d9d9d); }
+
+/* ---------------------------------------------------------------------------
+   Insights: cost breakdowns, finding badges, and the per-session view
+   --------------------------------------------------------------------------- */
+
+/* The four token buckets keep one set of colours everywhere they appear — the
+   row breakdown, the session breakdown and the timeline — so the band the user
+   learns to recognise as "context" reads the same in all three.
+
+   Four hues, not two oranges and a grey. Cache read and cache write used to be
+   #d97706 and #f59e0b: adjacent segments of the same bar, 10.8 ΔE apart for
+   *normal* vision against a floor of 15, which is why nobody could tell which
+   band was which. Input was a grey below the chroma floor, so it read as
+   "no data" rather than as a bucket.
+
+   This set was chosen by running every four-hue candidate through a CVD and
+   contrast validator rather than by eye, and it is held to the strictest
+   pairlist — *all* pairs, not just the ones that touch in the bar. That is the
+   gate the legend needs: the legend stacks all four vertically, so the reader
+   compares every pair whether or not they are neighbours in the chart. Worst
+   pair 19.6 normal / 13.0 CVD on light, 19.3 / 6.9 on dark.
+
+   Two caveats the layout already answers. The dark green↔yellow pair sits in
+   the 6–8 CVD band, which is legal only with a secondary encoding, and yellow
+   and magenta fall under 3:1 on the light surface, which triggers the relief
+   rule. Both are covered the same way: every bucket is named and carries its
+   own dollar figure in the list beside the bar, and the segments are separated
+   by a surface gap — identity is never carried by colour alone. The green is
+   deliberately #008300 rather than the app's --green (#10b981): far enough from
+   the colour this UI uses for savings not to read as a status. */
+:root {
+  --bucket-cache-read: #eda100;
+  --bucket-cache-write: #008300;
+  --bucket-output: #2a78d6;
+  --bucket-input: #e87ba4;
+}
+/* Stepped for a dark surface rather than flipped: the light hexes sit outside
+   the dark lightness band and lose contrast against it. Applied to the editor's
+   own dark themes as well as the standalone page, which previously kept the
+   light values in a dark IDE because only the standalone block overrode them. */
+body.vscode-dark,
+body.vscode-high-contrast:not(.vscode-high-contrast-light) {
+  --bucket-cache-read: #c98500;
+  --bucket-cache-write: #008300;
+  --bucket-output: #3987e5;
+  --bucket-input: #d55181;
+}
+
+.finding-impact {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--red);
+  font-weight: 600;
+}
+.severity-positive .finding-impact { color: var(--green-strong); }
+.finding-links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.finding-links .btn-link { font-size: 11px; }
+.ov-insight-more { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+
+.insight-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 6px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  vertical-align: middle;
+  cursor: help;
+}
+.insight-high { background: var(--red); }
+.insight-medium { background: var(--amber); }
+.insight-positive { background: var(--green-strong); }
+
+/* Cost breakdown ---------------------------------------------------------- */
+
+.breakdown { display: flex; flex-direction: column; gap: 8px; }
+.bd-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--border);
+}
+/* A 2px surface gap between segments. Two saturated fills meeting edge-to-edge
+   read as one blended band at the boundary; the gap is what makes the join a
+   join rather than a gradient, and it costs nothing at this bar height. */
+.bd-seg { display: block; height: 100%; box-shadow: 2px 0 0 0 var(--panel); }
+.bd-seg:last-child { box-shadow: none; }
+.bd-cacheRead { background: var(--bucket-cache-read); }
+.bd-cacheWrite { background: var(--bucket-cache-write); }
+.bd-output { background: var(--bucket-output); }
+.bd-input { background: var(--bucket-input); }
+.bd-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.bd-list li {
+  display: grid;
+  grid-template-columns: 1fr auto 52px;
+  gap: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.bd-key { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.bd-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.bd-pct { text-align: right; color: var(--muted); }
+.bd-note, .bd-empty { margin: 0; color: var(--muted); font-size: 11px; }
+
+/* Request log row detail --------------------------------------------------- */
+
+.row-toggle {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 6px 0 0;
+  font-size: 10px;
+}
+.time-cell { white-space: nowrap; }
+.session-cell { max-width: 190px; }
+.session-link {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.session-none { color: var(--muted); }
+tr.row-open > td { border-bottom-color: transparent; }
+/* `white-space: nowrap` on every td is right for the twelve data columns — a
+   wrapped timestamp or token count is unreadable — but it is inherited, and this
+   cell holds sentences. Left alone, each finding became one unbreakable line
+   whose min-content width fed straight back into the table's own minimum width
+   under `table-layout: auto`: the detail row was not merely sitting in a wide
+   table, it was what made the table wide, and its text then ran off the screen. */
+.row-detail > td { padding: 4px 12px 14px; background: var(--panel); white-space: normal; }
+/* The twelve data columns can still overflow a narrow window on their own, and
+   the cell is as wide as the table whatever this row does. Pinning the content
+   to the left edge of the scrollport keeps it readable without scrolling
+   sideways — the same trick, for the same reason, as the comparison table's
+   sticky row labels above. The 56px covers .app's padding and a scrollbar. */
+.detail-sticky {
+  position: sticky;
+  left: 0;
+  width: min(100%, calc(100vw - 56px));
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(240px, 1.4fr);
+  gap: 18px;
+  align-items: start;
+}
+/* Grid items refuse to shrink below their content's min-content width unless
+   told to, which would undo the wrapping fix above on a narrow column. */
+.detail-grid > div { min-width: 0; }
+.detail-grid h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+/* A row with nothing flagged has nothing for the second column to hold, and an
+   empty half left the breakdown squeezed into 40% of a full-width cell. */
+.detail-grid.no-findings { grid-template-columns: minmax(240px, 640px); }
+@media (max-width: 820px) { .detail-grid { grid-template-columns: 1fr; } }
+
+/* Marks the rows Cursor generated to summarise the thread, so the request that
+   did the compacting is findable in the log rather than only inside a detail
+   row somebody has to expand first. */
+.kind-chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: help;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+/* Referenced from three render paths and, until now, styled from none of them. */
+.findings-grid { display: grid; gap: 10px; min-width: 0; }
+.finding-card { min-width: 0; }
+/* An id or a URL in a finding is one unbreakable token, and one of those would
+   re-inflate the cell exactly the way nowrap used to. */
+.finding-card h4,
+.finding-card p,
+.finding-action { overflow-wrap: anywhere; }
+
+/* The two containers above label their own sections with an uppercase 11px
+   caption, and that rule reaches every h4 inside them — including a finding
+   card's title, which is a full sentence and not a caption. Same specificity
+   as those rules and declared after them, so the card keeps its own heading
+   wherever it is rendered. */
+.detail-grid .finding-card h4,
+.session-detail-body .finding-card h4 {
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  margin: 0 0 4px;
+}
+
+@keyframes rowFlash {
+  from { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  to { background: transparent; }
+}
+.row-flash > td { animation: rowFlash 1.6s ease-out; }
+
+/* Session detail ---------------------------------------------------------- */
+
+.session-detail { max-width: 860px; }
+.session-detail-body { padding: 6px 16px 18px; display: flex; flex-direction: column; gap: 18px; overflow: auto; max-height: calc(86vh - 84px); }
+.session-detail-body h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+.session-spend-lead { margin: 0 0 10px; font-size: 12px; }
+.session-timeline-wrap h4 { margin-bottom: 4px; }
+.session-timeline { margin-top: 10px; }
+.tl-plot {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 130px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+/* Each bar is one request: full height is its cost, and the darker foot is the
+   share that went on moving context around rather than on the answer. */
+.tl-bar {
+  flex: 1 0 10px;
+  min-width: 10px;
+  height: var(--bar-h, 4%);
+  padding: 0;
+  border: 0;
+  border-radius: 2px 2px 0 0;
+  background: var(--bucket-output);
+  display: flex;
+  align-items: flex-end;
+  cursor: pointer;
+}
+.tl-bar:hover { outline: 1px solid var(--accent); }
+.tl-context {
+  display: block;
+  width: 100%;
+  height: var(--ctx-h, 0%);
+  background: var(--bucket-cache-read);
+  border-radius: 0 0 2px 2px;
+}
+.tl-flagged { box-shadow: 0 -3px 0 0 var(--red); }
+/* Cursor's own summarising turns, striped so they read as "not a request you
+   made" rather than as another data point — distinct from the red top-bar that
+   marks a finding. */
+.tl-compaction {
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 3px,
+    color-mix(in srgb, var(--bg) 55%, transparent) 3px 6px
+  );
+}
+.tl-legend { margin: 6px 0 0; font-size: 10px; color: var(--muted); }
+.tl-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: -1px;
+  background-color: var(--bucket-output);
+}
+/* Fixed, not absolute: .tl-plot scrolls horizontally, and an overflow-x box
+   clips on both axes, so an absolutely positioned tip would be cut off by the
+   very plot it describes. Positioned from JS — see showTimelineTip. */
+.tl-tip {
+  position: fixed;
+  z-index: 60;
+  max-width: 280px;
+  padding: 6px 9px;
+  border: 1px solid var(--vscode-editorHoverWidget-border, var(--border));
+  border-radius: 6px;
+  background: var(--vscode-editorHoverWidget-background, var(--panel));
+  color: var(--vscode-editorHoverWidget-foreground, var(--text));
+  box-shadow: var(--shadow);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-line;
+  pointer-events: none;
+}
+.tl-tip[hidden] { display: none; }
+/* Deliberately the same flex rules as .tl-plot, so each label sits under its own
+   bar without wrapping the bars in columns — their heights are percentages of
+   .tl-plot, and a wrapper would resolve them against itself instead. */
+.tl-labels {
+  display: flex;
+  gap: 3px;
+  padding: 0 6px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.tl-labels span {
+  flex: 1 0 10px;
+  min-width: 10px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* --- Ask Cursor Chat ------------------------------------------------------ */
+
+/* Narrower than the comparison dialog it borrows its chrome from: this one is a
+   column of controls, not a wide table, and full width would strand the buttons
+   a screen away from the labels they belong to. */
+.ask-dialog { width: min(640px, 94vw); }
+/* The title carries the session's name, which can be a sentence. Left to the
+   shared header rules it wraps and shoves Close onto a line of its own, hard
+   against the left edge — so here the text block is allowed to shrink and the
+   button is not. */
+.ask-dialog .sessions-dialog-head { flex-wrap: nowrap; }
+.ask-dialog .sessions-dialog-head > div { min-width: 0; }
+.ask-dialog .sessions-dialog-head > .btn { flex: 0 0 auto; }
+.ask-dialog h3 { overflow-wrap: anywhere; }
+.ask-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 18px;
+  overflow: auto;
+  max-height: calc(86vh - 84px);
+}
+
+.ask-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0;
+}
+.ask-scope legend { font-size: 11px; color: var(--muted); padding: 0 4px; }
+.ask-scope label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.ask-request { flex: 1 1 220px; min-width: 0; }
+
+.ask-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.ask-field .optional { color: var(--muted); font-weight: 400; font-size: 11px; }
+.ask-field textarea { resize: vertical; }
+.ask-field select { width: 100%; }
+
+.ask-preview summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.ask-preview textarea {
+  width: 100%;
+  margin-top: 6px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  resize: vertical;
+}
+
+/* The reason this dialog exists is spending fewer tokens on the analysis, so
+   what it's about to cost is stated rather than left to be discovered. */
+.ask-size { margin: 0; font-size: 12px; color: var(--muted); }

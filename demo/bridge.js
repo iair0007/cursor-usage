@@ -55,8 +55,10 @@
           return respond(id, { ok: true });
         case 'copyText':
           return respond(id, { ok: true });
-        case 'focusCursorChat':
-          return respond(id, { opened: false });
+        case 'sendToCursorChat':
+          // No Cursor to hand it to out here, so report the honest fallback the
+          // real dispatcher reports when the deeplink isn't available.
+          return respond(id, { pasted: false, opened: false, via: 'none' });
         case 'exportCsv':
           return respond(id, { ok: true });
         default:

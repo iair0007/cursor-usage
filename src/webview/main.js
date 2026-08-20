@@ -411,6 +411,12 @@ const state = {
   alertType: null,
   /** Note to fold into the next load's banner (see takePendingNotice). */
   pendingNotice: null,
+  /**
+   * summarize() of the current filter, as refresh() last built it — extras
+   * included. Kept so a view switch can redraw what depends on it (the billing
+   * banner) without re-deriving the whole dashboard.
+   */
+  summary: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -545,6 +551,7 @@ function renderPlanCycle(quota, hardLimit) {
   // stuck 0 next to a period with actual loaded requests is more likely an
   // untracked bucket than genuinely zero usage.
   const hasMeaningfulCountOnly = quota && !hasLimit && quota.used > 0;
+  const runway = budgetRunwayState();
 
   if (hasLimit) {
     const pctExact = (quota.used / quota.limit) * 100; // uncapped — used for numbers and severity
@@ -580,8 +587,8 @@ function renderPlanCycle(quota, hardLimit) {
     if (hardLimit) notes.push(`Usage-based spend cap: $${hardLimit.toFixed(2)}/mo.`);
     noteEl.textContent = notes.join(' ');
     renderPlanCycleScope('quota', quota);
-  } else if (budgetRunwayState()) {
-    renderBudgetCycle(card, budgetRunwayState(), barRow, ring, noteEl, hardLimit, quota);
+  } else if (runway) {
+    renderBudgetCycle(card, runway, barRow, ring, noteEl, hardLimit, quota);
   } else if (hasMeaningfulCountOnly) {
     barRow.classList.add('hidden');
     ring.classList.add('hidden');
@@ -690,7 +697,7 @@ function planChangeSpanNote() {
   // The same one-way test detectPlanChange applies: interleaved regimes mean
   // this account meters some requests and not others, not that it migrated.
   if (!state.planChangeDay) return '';
-  const changed = state.planChangeDay ? ` on ${fmt.shortDate(state.planChangeDay)}` : '';
+  const changed = ` on ${fmt.shortDate(state.planChangeDay)}`;
   return ` This range spans your plan's billing change${changed}: ${fmt.num(legacy)} of these requests`
     + ` were priced per request and ${fmt.num(metered)} by token cost, so the totals below add up two`
     + ' pricing systems. Use "Current plan" for figures comparable with cursor.com.';
@@ -1862,7 +1869,7 @@ async function loadSessionTitles(ids) {
   // on the Overview, so gating this on the current view meant the names had
   // arrived but the column kept showing raw ids until a sort or a page change
   // happened to force a redraw.
-  if (state.filtered.length) renderTable(state.filtered, summarize(state.filtered));
+  if (state.filtered.length) renderTable(state.filtered, state.summary);
   // A session opened straight from a request row is usually opened before its
   // name has been looked up, and the dialog's own heading is not redrawn by
   // anything above — so it kept the raw id for as long as it stayed open.
@@ -2250,7 +2257,15 @@ function sessionMetricDefs() {
     },
     { label: 'Cache hit rate', value: (c) => c.m.cacheHitRate, format: fmt.pct, betterWhen: 'up' },
     { label: 'Cache savings', value: (c) => c.t.savingsDollars, format: fmt.money, betterWhen: 'up' },
-    { label: 'Cold starts', value: (c) => c.coldStarts, format: fmt.num, betterWhen: 'down' },
+    {
+      label: 'Cold starts',
+      value: (c) => c.coldStarts,
+      format: fmt.num,
+      betterWhen: 'down',
+      // Same rule as the errored row above: "0 / 0 / 0 / 0 · no change" is a
+      // line of table for a fact nobody needed told.
+      when: (ctxs) => ctxs.some((c) => c.coldStarts > 0),
+    },
   ];
 }
 
@@ -2736,7 +2751,7 @@ function renderKpis(summary) {
     KPI_PLACEHOLDER_IDS.forEach((id) => { $(id).textContent = '—'; });
     KPI_SUB_IDS.forEach((id) => { $(id).innerHTML = ''; });
     $('kpiCostFees')?.classList.add('hidden');
-    $('billingNotice')?.classList.add('hidden');
+    renderBillingNotice(null);
     return;
   }
 
@@ -2791,10 +2806,27 @@ function renderKpis(summary) {
     ? `Avg without cache: ${fmt.money(summary.avgNoCache)}`
     : '—';
 
+  renderBillingNotice(summary);
+}
+
+/**
+ * The banner under the toolbar that explains how this plan bills, and how to
+ * reconcile the request log against cursor.com.
+ *
+ * Its own function rather than a tail of renderKpis(), because switching to the
+ * Requests tab does not re-run refresh(): rendered only from there, the one
+ * banner that explains the figures in the log stayed hidden until something
+ * unrelated (a sort, a page change) happened to redraw the KPIs.
+ *
+ * Owns its own visibility in every state — no data, or a view the banner does
+ * not belong to — so no caller has to hide it.
+ */
+function renderBillingNotice(summary) {
   const billingEl = $('billingNotice');
-  if (billingEl && state.appView !== 'usage') {
+  if (!billingEl) return;
+  if (!summary || !state.loaded || state.appView !== 'usage') {
     billingEl.classList.add('hidden');
-  } else if (billingEl) {
+  } else {
     const messages = {
       usage: 'Your plan bills a flat <strong>usage fee per request</strong> (often $0.04) separately from <strong>token cost</strong>. Token cost is what drives optimization.',
       token: 'Your plan uses <strong>token-based billing</strong>. The Cost column shows <code>chargedCents</code> from Cursor — the full amount billed per request (model + fees).',
@@ -2809,7 +2841,12 @@ function renderKpis(summary) {
     // billing-mode explanations already live.
     const planChange = planChangeNote(summary);
     const planChangeHtml = planChange ? ` <strong>${esc(planChange)}</strong>` : '';
-    billingEl.innerHTML = `${planNote}${messages[summary.billingMode] || messages.unknown}${planChangeHtml} Cache savings use each request's model pricing from <a href="https://cursor.com/docs/models-and-pricing">Cursor docs</a> (Auto requests use Auto rates). Compare with the <a href="https://cursor.com/dashboard/usage">official dashboard</a>.`;
+    // Wrapped in .alert-msg for the same reason showAlert() wraps its text:
+    // `.alert` is a flex row (it has to hold a dismiss button beside the
+    // message), so rich text dropped in bare turns every <strong>, <code> and
+    // <a> in this paragraph into a flex item of its own — the sentence came out
+    // as a row of ragged columns rather than as prose.
+    billingEl.innerHTML = `<span class="alert-msg">${planNote}${messages[summary.billingMode] || messages.unknown}${planChangeHtml} Cache savings use each request's model pricing from <a href="https://cursor.com/docs/models-and-pricing">Cursor docs</a> (Auto requests use Auto rates). Compare with the <a href="https://cursor.com/dashboard/usage">official dashboard</a>.</span>`;
     billingEl.classList.remove('hidden');
   }
 }
@@ -3034,7 +3071,7 @@ function jumpToRequest(requestId) {
   setPanel('requests');
   state.page = Math.floor(index / state.pageSize) + 1;
   state.expandedRequests.add(requestId);
-  renderTable(state.filtered, summarize(state.filtered));
+  renderTable(state.filtered, state.summary);
   // After paint, so the row being scrolled to exists.
   requestAnimationFrame(() => {
     const row = [...document.querySelectorAll('#tableBody tr[data-request]')]
@@ -3129,7 +3166,9 @@ function renderSessionTimeline(events) {
     const lines = [
       `#${index + 1} · ${fmt.date(event.timestampMs)}`,
       `${fmt.money(event.cost)}${breakdown ? ` · ${fmt.pct(contextPct)} context handling` : ''}`,
-      esc(event.model),
+      // Raw: the whole list is escaped once below, and escaping a line here too
+      // put "&amp;" on screen for any model name carrying an ampersand.
+      event.model,
       ...(isCompaction ? ['Cursor summarised the conversation here'] : []),
       ...flags.map((f) => f.title),
     ];
@@ -3672,6 +3711,8 @@ function overviewCostSubHtml(summary) {
 function refresh() {
   const baseEvents = applyFilters(state.all);
   state.filtered = sortEvents(applyCostMode(baseEvents));
+  // The previous range's derivation is now wrong and nothing else will drop it.
+  analyzeCache = { events: null, data: null };
   // Built once per filter change, off the same rows every view renders, so the
   // same tip reaches the Overview, the session list and the request row.
   state.insights = buildInsights({
@@ -3684,6 +3725,7 @@ function refresh() {
   summary.valueTotal = baseEvents.reduce((s, e) => s + (e.valueCost ?? 0), 0);
   summary.billedTotal = baseEvents.reduce((s, e) => s + (e.billedCost ?? 0), 0);
   summary.billedKnown = baseEvents.some((e) => e.billedCost != null);
+  state.summary = summary;
   updateFilterSummary();
   renderKpis(summary);
 
@@ -3847,8 +3889,13 @@ function renderOverview() {
 
   const insightPanel = $('ovInsightPanel');
   if (events.length) {
-    const data = computeAnalyzeData(events, summary);
-    const top = pickTopFinding(data.findings);
+    const data = analyzeDataFor(events, summary);
+    // Deduped first, so this card shows the same finding — and promises the
+    // same remaining count — as the Analyze tab it links to. Picked from the
+    // raw list, the card could lead on a repeat of a rule whose costliest
+    // instance is the one Analyze puts on screen.
+    const ranked = dedupeFindings(data.findings);
+    const top = pickTopFinding(ranked);
     if (top) {
       insightPanel.classList.remove('hidden');
       $('ovInsightCard').className = `finding-card ov-insight-card severity-${top.severity}`;
@@ -3862,7 +3909,7 @@ function renderOverview() {
       if (top.anchor?.sessionId && top.anchor.sessionId !== UNATTRIBUTED_SESSION) {
         links.push(`<button type="button" class="btn-link finding-session" data-session="${esc(top.anchor.sessionId)}">Open the session →</button>`);
       }
-      const others = data.findings.length - 1;
+      const others = ranked.length - 1;
       $('ovInsightCard').innerHTML = `
         <h4>${esc(top.title)}${top.impact > 0 ? `<span class="finding-impact">${fmt.money(top.impact)}</span>` : ''}</h4>
         <p>${esc(top.body)}</p>
@@ -4233,6 +4280,35 @@ function applyTemplateScopes(templateId) {
   });
 }
 
+/**
+ * computeAnalyzeData() for the filter currently loaded, derived once.
+ *
+ * Three callers want the same object — the Overview's insight card, the Analyze
+ * tab, and the Cursor brief — and the brief's caller is an `input` listener on
+ * the question box, so typing a sentence there used to re-sort every event in
+ * the range and rebuild every finding on every keystroke.
+ *
+ * Keyed on the events array itself, because refresh() replaces it wholesale
+ * (along with state.insights, which the derivation reads) and that is exactly
+ * when the cached answer stops being true. Anything that changes the analysis —
+ * a new range, the model filter, the cost mode, a finding threshold — goes
+ * through refresh(), so there is no path that can leave this stale. refresh()
+ * also drops the reference, so a range that has been replaced is not kept alive
+ * by this.
+ *
+ * `summary` is not part of the key: every caller derives it from the very
+ * events being passed in, so two callers with the same array cannot disagree
+ * about it.
+ */
+let analyzeCache = { events: null, data: null };
+
+function analyzeDataFor(events, summary) {
+  if (analyzeCache.events === events) return analyzeCache.data;
+  const data = computeAnalyzeData(events, summary);
+  analyzeCache = { events, data };
+  return data;
+}
+
 function computeAnalyzeData(events, summary, thresholds = state.analyzeThresholds) {
   const byModel = {};
   const byModelCount = {};
@@ -4396,7 +4472,7 @@ function buildAnalyzeFindings(events, summary, ctx, thresholds = state.analyzeTh
     findings.push({
       severity: 'medium',
       title: 'Heavy output requests',
-      body: `${ctx.highOutput.length} requests exceeded 2k output tokens.`,
+      body: `${ctx.highOutput.length} requests exceeded ${fmt.num(thresholds.heavyOutputTokens)} output tokens.`,
       action: 'Ask for focused diffs or smaller scopes; output tokens often cost more than input.',
     });
   }
@@ -4638,7 +4714,7 @@ function buildBriefSectionFindings(findings) {
 function buildCursorBrief() {
   const events = state.filtered;
   if (!events.length) return '';
-  const data = computeAnalyzeData(events, summarize(events));
+  const data = analyzeDataFor(events, summarize(events));
   const tpl = ANALYZE_TEMPLATES.find((t) => t.id === state.analyzeTemplateId) || ANALYZE_TEMPLATES[0];
   const scopes = getSelectedAnalyzeScopes();
   const customQ = $('analyzeCustomQ')?.value?.trim();
@@ -4720,7 +4796,7 @@ function renderAnalyze() {
 
   initAnalyzeSidebar();
   const summary = summarize(state.filtered);
-  const data = computeAnalyzeData(state.filtered, summary);
+  const data = analyzeDataFor(state.filtered, summary);
 
   renderAnalyzeHero(data, state.filtered);
   renderAnalyzeFindings(data.findings);
@@ -5397,7 +5473,7 @@ function renderDiscountEditor(preselectKeys = []) {
         <input type="number" id="simDiscountPct" min="1" max="99" step="1" value="50" />
       </div>
       <div class="discount-actions">
-        <button type="button" class="btn-primary" id="simDiscountSave">Save</button>
+        <button type="button" class="btn primary" id="simDiscountSave">Save</button>
         <button type="button" class="btn-text" id="simDiscountCancel">Close</button>
       </div>
     </div>
@@ -5562,8 +5638,10 @@ function setAppView(view) {
   // the duplicate is gone. Only the Simulator drops the bar — that view is a
   // standalone calculator that doesn't read the date filter at all.
   document.querySelector('.filter-bar')?.classList.toggle('hidden', view === 'simulator');
+  // Shown on the request log and nowhere else, and this is the only path that
+  // reaches that tab without going through refresh() first.
+  renderBillingNotice(state.summary);
   if (view !== 'usage') {
-    $('billingNotice')?.classList.add('hidden');
     // Errors and warnings describe the data every view is showing, so they
     // follow the user across tabs; only the "loaded N requests" confirmation is
     // specific to the request log and goes away with it.
@@ -5894,7 +5972,7 @@ async function init() {
     const id = row.dataset.request;
     if (state.expandedRequests.has(id)) state.expandedRequests.delete(id);
     else state.expandedRequests.add(id);
-    renderTable(state.filtered, summarize(state.filtered));
+    renderTable(state.filtered, state.summary);
   });
 
   // Findings carry their own links, and they appear in several containers.
@@ -5990,14 +6068,19 @@ async function init() {
     input.value = clamped;
     state.analyzeThresholds[field.key] = clamped;
     saveAnalyzePrefs();
-    renderAnalyze();
+    // refresh() rather than renderAnalyze(): buildInsights() reads these
+    // thresholds too, and its findings are what the request rows, the session
+    // list and the Overview card all badge from. Re-rendering Analyze alone
+    // moved this panel's own counts while leaving every other surface reading
+    // findings computed at the old threshold.
+    refresh();
   });
 
   $('analyzeThresholdsReset')?.addEventListener('click', () => {
     state.analyzeThresholds = { ...ANALYZE_THRESHOLD_DEFAULTS };
     renderThresholdInputs();
     saveAnalyzePrefs();
-    renderAnalyze();
+    refresh();
   });
 
   $('analyzeCustomQ')?.addEventListener('input', updateBriefPreview);

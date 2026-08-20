@@ -120,7 +120,7 @@ function dashboardBody(): string {
         </div>
         <div class="filter-actions">
           <span id="filterSummary" class="filter-summary"></span>
-          <div class="date-presets" role="group" aria-label="Cost mode" id="costModeToggle">
+          <div class="date-presets" role="group" aria-label="Cost mode">
             <span class="presets-label">Costs <span class="tip" tabindex="0" data-tip="What-if: the API-equivalent value of your tokens (what they would cost if billed at published rates) — best for optimizing. Billed: what your plan actually charged.">ⓘ</span></span>
             <button type="button" class="preset-btn cost-mode-btn active" data-cost-mode="value">What-if</button>
             <button type="button" class="preset-btn cost-mode-btn" data-cost-mode="billed">Billed</button>
@@ -428,7 +428,7 @@ function dashboardBody(): string {
         already long page: a dialog gets it out of the list's way, keeps the
         row labels next to the figures, and closes on Escape.
       -->
-      <dialog id="sessionsDialog" class="sessions-dialog">
+      <dialog id="sessionsDialog" class="sessions-dialog" aria-labelledby="sessionsDialogTitle">
         <header class="sessions-dialog-head">
           <div>
             <h3 id="sessionsDialogTitle">Compare sessions</h3>
@@ -460,7 +460,7 @@ function dashboardBody(): string {
             <article class="panel" id="analyzeExpensivePanel"></article>
           </div>
         </div>
-        <aside class="analyze-sidebar panel" id="analyzeCursorPanel">
+        <aside class="analyze-sidebar panel">
           <h2>Ask Cursor Chat</h2>
           <p class="panel-desc">Pick a template and what data to include. Copy the brief and paste it into <strong>Cursor Chat</strong> — no raw event dump, only the slices you choose.</p>
           <div class="analyze-templates" id="analyzeTemplates" role="listbox" aria-label="Analysis templates"></div>
@@ -474,7 +474,7 @@ function dashboardBody(): string {
           </label>
           <details class="analyze-preview">
             <summary>Preview brief</summary>
-            <textarea id="analyzeBriefPreview" readonly rows="12"></textarea>
+            <textarea id="analyzeBriefPreview" readonly rows="12" aria-label="Preview of the brief"></textarea>
           </details>
           <div class="analyze-actions">
             <button type="button" id="copyCursorBrief" class="btn primary">Open and paste in Cursor Chat</button>
@@ -491,7 +491,7 @@ function dashboardBody(): string {
       rather than browsed to, and because closing it should put the user back
       where they were.
     -->
-    <dialog id="sessionDetailDialog" class="sessions-dialog session-detail">
+    <dialog id="sessionDetailDialog" class="sessions-dialog session-detail" aria-labelledby="sessionDetailTitle">
       <header class="sessions-dialog-head">
         <div>
           <h3 id="sessionDetailTitle">Session</h3>
@@ -526,7 +526,7 @@ function dashboardBody(): string {
       ancestor opens at zero size, and this one is reached from the session
       dialog, which can be open from anywhere.
     -->
-    <dialog id="askCursorDialog" class="sessions-dialog ask-dialog">
+    <dialog id="askCursorDialog" class="sessions-dialog ask-dialog" aria-labelledby="askTitle">
       <header class="sessions-dialog-head">
         <div>
           <h3 id="askTitle">Ask Cursor Chat</h3>
@@ -552,7 +552,7 @@ function dashboardBody(): string {
         </label>
         <details class="ask-preview">
           <summary>Preview brief</summary>
-          <textarea id="askPreview" readonly rows="14"></textarea>
+          <textarea id="askPreview" readonly rows="14" aria-label="Preview of the brief"></textarea>
         </details>
         <p class="ask-size" id="askSize" aria-live="polite"></p>
         <div class="analyze-actions">
@@ -699,7 +699,7 @@ function dashboardBody(): string {
       </div>
       <div class="modal-actions">
         <button type="button" class="btn-text" id="simIntroDismiss">Got it</button>
-        <button type="button" class="btn-primary" id="simIntroAdd">Add a discount</button>
+        <button type="button" class="btn primary" id="simIntroAdd">Add a discount</button>
       </div>
     </div>
   </div>`;

@@ -3,7 +3,54 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
-## 0.8.0 — 2026-08-17
+## 0.8.0 — 2026-08-20
+
+A full review pass over this release before publishing it. Everything below
+rendered or read wrongly without ever throwing, which is why nothing in the
+suite caught any of it; each fix carries a regression test.
+
+- **The banner explaining how your plan bills now appears when you open the
+  request log.** It was drawn only as a tail of the KPI render, and switching to
+  the Requests tab does not re-run that — so the one paragraph that says whether
+  the Cost column is a flat fee or a token charge, and how to reconcile it with
+  cursor.com, stayed hidden until an unrelated redraw (a sort, a page change)
+  happened to bring it back.
+- **And it now reads as a sentence.** Alerts are a flex row so a dismiss button
+  can sit beside the message; this banner's rich text went in bare, which turned
+  every bold phrase, code span and link in it into a column of its own. It is
+  wrapped the way every other alert already was.
+- **"Save" in the discount editor and "Add a discount" in the Simulator intro
+  are styled again.** Both carried a class the stylesheet has never defined, so
+  they rendered as raw native buttons — grey, square, 2px outset — beside the
+  styled buttons they sit next to.
+- **Editing a finding threshold now updates every surface, not just the Analyze
+  panel.** The same thresholds drive the per-request findings that badge rows in
+  the request log, the session list and the Overview card; changing one moved
+  Analyze's own counts and left everywhere else reading findings computed at the
+  old value.
+- The Overview's "N more findings in Analyze" counts the cards Analyze will
+  actually show. It counted the raw list, which repeats a rule that fired on
+  many requests, so it could promise more findings than the tab had to give.
+- The heavy-output finding quotes the threshold that fired it instead of a
+  hardcoded "2k", so it stops contradicting the box you just typed a number into.
+- A model name in the session timeline's tooltip was escaped twice, printing
+  "&amp;" for any name carrying an ampersand.
+- The session comparison drops the "Cold starts" row when every session has
+  none, the way it already drops "Errored or aborted" — a row of zeroes is a
+  line of table for a fact nobody needed told.
+- Typing in Analyze's "Your question" box no longer re-sorts every event in the
+  range and rebuilds every finding on each keystroke; the derivation the
+  Overview, the Analyze tab and the brief all share is computed once per load.
+  The request log likewise reuses the summary rather than re-deriving it every
+  time a row is expanded.
+- Screen readers get told what each dialog is. All three modals announced as a
+  bare "dialog" — a `<dialog>` opened with `showModal()` takes its name from
+  `aria-labelledby` and nothing else — and the heading ids they now point at
+  were already in the markup, one of them referenced by nothing at all. The two
+  readonly brief previews are named too, instead of reading as an anonymous
+  multi-line text field.
+
+### Browser dashboard, sessions, and everything else new in this release
 
 - Three fixes to the session comparison's model table. A long model name plus a
   discount badge overflowed the fixed-width label column and ran over the figure

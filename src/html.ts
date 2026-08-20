@@ -699,7 +699,7 @@ function dashboardBody(): string {
       </div>
       <div class="modal-actions">
         <button type="button" class="btn-text" id="simIntroDismiss">Got it</button>
-        <button type="button" class="btn-primary" id="simIntroAdd">Add a discount</button>
+        <button type="button" class="btn primary" id="simIntroAdd">Add a discount</button>
       </div>
     </div>
   </div>`;

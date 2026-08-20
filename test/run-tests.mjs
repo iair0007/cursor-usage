@@ -4011,6 +4011,136 @@ console.log('\nan omitted bucket is not a zero');
   });
 }
 
+// ---------------------------------------------------------------------------
+// Faults found reviewing this branch end to end. Each one rendered or read
+// wrongly without throwing, so nothing above would have caught them.
+// ---------------------------------------------------------------------------
+console.log('\nthe review pass over the dashboard chrome');
+{
+  const main = readFileSync(path.join(here, '..', 'src/webview/main.js'), 'utf8');
+  const html = readFileSync(path.join(here, '..', 'src/html.ts'), 'utf8');
+  const css = readFileSync(path.join(here, '..', 'src/webview/styles.css'), 'utf8');
+
+  test('every button in the markup carries a class the stylesheet paints', () => {
+    // "btn-primary" is not a class this stylesheet has ever had — .btn.primary
+    // is — so the Save in the discount editor and the "Add a discount" in the
+    // Simulator intro rendered as raw native buttons: grey, square, 2px outset,
+    // beside the styled ones they sit next to. Checked per button rather than
+    // per class: plenty of classes here are click hooks for a delegated
+    // listener (.session-open, .btn-compare) and are not meant to paint
+    // anything — but a button all of whose classes are unknown to the
+    // stylesheet is a button nothing is styling.
+    const defined = new Set([...css.matchAll(/\.([A-Za-z][A-Za-z0-9_-]*)/g)].map((m) => m[1]));
+    for (const [name, src] of [['main.js', main], ['html.ts', html]]) {
+      for (const m of src.matchAll(/<button\b[^>]*?\bclass="([^"$]*)"/g)) {
+        const classes = m[1].split(/\s+/).filter(Boolean);
+        if (!classes.length) continue;
+        assert.ok(classes.some((cls) => defined.has(cls)),
+          `${name} has a <button class="${m[1]}"> that styles.css never paints`);
+      }
+    }
+  });
+
+  test('the billing banner is drawn on arrival at the request log, not only by a refresh', () => {
+    // setAppView() is the only path onto the Requests tab and it does not call
+    // refresh(), so a banner rendered solely from renderKpis() stayed hidden
+    // until an unrelated redraw (a sort, a page change) happened to run.
+    assert.ok(main.includes('function renderBillingNotice(summary)'),
+      'the banner needs a renderer of its own to be callable from both');
+    const setAppView = main.slice(main.indexOf('function setAppView(view)'));
+    assert.match(setAppView.slice(0, setAppView.indexOf('\n}')), /renderBillingNotice\(state\.summary\)/);
+    // And it owns its own visibility, so no caller can leave it up on a view it
+    // does not belong to.
+    const fn = main.slice(main.indexOf('function renderBillingNotice(summary)'));
+    assert.match(fn, /state\.appView !== 'usage'/);
+    assert.match(fn, /billingEl\.classList\.add\('hidden'\)/);
+  });
+
+  test('rich text in an alert goes inside .alert-msg, because .alert is a flex row', () => {
+    // `.alert` is display:flex so the dismiss button can sit beside the message.
+    // Prose dropped straight into it turns every <strong>, <code> and <a> into a
+    // flex item: the billing banner rendered as a row of ragged columns rather
+    // than as a sentence.
+    assert.match(css, /\.alert \{[^}]*display: flex;/s, 'the flex row is what makes the wrapper necessary');
+    assert.match(css, /\.alert \.alert-msg \{[^}]*flex: 1/);
+    const fn = main.slice(main.indexOf('function renderBillingNotice(summary)'));
+    assert.match(fn.slice(0, fn.indexOf('\n}')), /billingEl\.innerHTML = `<span class="alert-msg">/);
+    // showAlert() has always done it; this is the same rule.
+    const alertFn = main.slice(main.indexOf('function showAlert'), main.indexOf('function hideAlert'));
+    assert.match(alertFn, /class="alert-msg"/);
+  });
+
+  test('the timeline tooltip escapes its lines once, not twice', () => {
+    // The whole list is escaped where it is interpolated, so a line that
+    // escaped itself first put "&amp;" on screen for any model name carrying
+    // an ampersand — the tip is written with textContent, which decodes nothing.
+    const fn = main.slice(main.indexOf('function renderSessionTimeline'), main.indexOf('function showTimelineTip'));
+    assert.ok(!/^\s*esc\(event\.model\),/m.test(fn), 'the model line must go in raw');
+    assert.match(fn, /data-tl-tip="\$\{esc\(lines\.join/, 'and the join is what gets escaped');
+  });
+
+  test('editing a finding threshold rebuilds the findings every surface reads', () => {
+    // buildInsights() takes these thresholds too, and its findings badge the
+    // request rows, the session list and the Overview card. Re-rendering only
+    // the Analyze tab moved that panel's counts and left everywhere else
+    // showing findings computed at the old threshold.
+    const handler = main.slice(main.indexOf("$('analyzeThresholds')?.addEventListener"));
+    const body = handler.slice(0, handler.indexOf("$('analyzeThresholdsReset')"));
+    assert.match(body, /refresh\(\);/);
+    assert.ok(!/renderAnalyze\(\);/.test(body), 'renderAnalyze alone leaves state.insights stale');
+    const reset = main.slice(main.indexOf("$('analyzeThresholdsReset')?.addEventListener"));
+    assert.match(reset.slice(0, reset.indexOf('});')), /refresh\(\);/);
+  });
+
+  test('the Overview card counts the findings Analyze will actually show', () => {
+    // Analyze renders dedupeFindings(...); counting the raw list here promised
+    // "6 more findings" against a tab that had three cards to give.
+    const fn = main.slice(main.indexOf('function renderOverview'), main.indexOf('let loadSeq = 0'));
+    assert.match(fn, /const ranked = dedupeFindings\(data\.findings\)/);
+    assert.match(fn, /pickTopFinding\(ranked\)/, 'and leads on a card from that same list');
+    assert.match(fn, /const others = ranked\.length - 1/);
+  });
+
+  test('a finding quotes the threshold that fired it, not a number baked into the sentence', () => {
+    const fn = main.slice(main.indexOf('function buildAnalyzeFindings'));
+    const body = fn.slice(0, fn.indexOf('\nfunction renderAnalyzeHero'));
+    assert.ok(!/exceeded 2k output tokens/.test(body),
+      'the heavy-output card must not hardcode a threshold the user can change');
+    assert.match(body, /thresholds\.heavyOutputTokens\)\} output tokens/);
+  });
+
+  test('the Analyze derivation is not rebuilt on every keystroke in the question box', () => {
+    // updateBriefPreview() is bound to `input` on the custom-question textarea,
+    // and it used to run the whole derivation — sorting every event in the
+    // range, rebuilding every finding — once per character typed.
+    assert.match(main, /let analyzeCache = \{ events: null, data: null \};/);
+    assert.match(main, /if \(analyzeCache\.events === events\) return analyzeCache\.data;/,
+      'keyed on the array refresh() replaces, so nothing can leave it stale');
+    const code = main.split('\n').filter((l) => !l.trim().startsWith('*') && !l.trim().startsWith('//')).join('\n');
+    assert.equal([...code.matchAll(/computeAnalyzeData\(/g)].length, 2,
+      'only analyzeDataFor and the definition itself may call it directly');
+    assert.equal([...code.matchAll(/analyzeDataFor\(/g)].length, 4,
+      'the Overview card, the Analyze tab and the brief all go through the cache');
+  });
+
+  test('the request log reuses the summary refresh() already built', () => {
+    // Three call sites re-derived it with summarize(state.filtered) — six more
+    // passes over the range every time a row was expanded — and the ad-hoc copy
+    // was missing the cost-mode fields the real one carries.
+    assert.ok(!/renderTable\(state\.filtered, summarize\(state\.filtered\)\)/.test(main));
+    assert.equal([...main.matchAll(/renderTable\(state\.filtered, state\.summary\)/g)].length, 3);
+    const refresh = main.slice(main.indexOf('function refresh()'));
+    assert.match(refresh.slice(0, refresh.indexOf('\n}')), /state\.summary = summary;/,
+      'and refresh() is the one place that sets it');
+  });
+
+  test('a comparison row of zeroes earns its place the way the errored row does', () => {
+    const fn = main.slice(main.indexOf('function sessionMetricDefs'), main.indexOf('function sessionCompareContext'));
+    const cold = fn.slice(fn.indexOf("label: 'Cold starts'"));
+    assert.match(cold.slice(0, cold.indexOf('},')), /when: \(ctxs\) => ctxs\.some/);
+  });
+}
+
 console.log('\nthe suite itself');
 {
   const suite = readFileSync(path.join(here, 'run-tests.mjs'), 'utf8');

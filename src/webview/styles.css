@@ -817,8 +817,6 @@ tfoot td {
   font: inherit;
   font-size: 12px;
 }
-.sessions-hint { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
-
 /* --- Selection tray ------------------------------------------------------ */
 
 /* Pinned to the viewport, not the panel: a row can be ticked anywhere down a

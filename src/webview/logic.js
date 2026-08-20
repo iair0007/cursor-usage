@@ -271,12 +271,6 @@ export function parsePricing(md) {
 }
 
 /**
- * `cacheWrite` falls back to the input rate when the table publishes none, so
- * an estimate is still possible — but callers that are *measuring* rather than
- * estimating need to know the difference, or they read the substitution as a
- * real price. `cacheWritePublished` records which of the two this is.
- */
-/**
  * Whether this row is billed at Auto's own flat rate rather than a model's.
  *
  * Bare Auto and Cost mode keep the bundled rate whatever they route to; Balance
@@ -290,6 +284,12 @@ export function isBundledAuto(model) {
     || (n.includes('auto') && n.includes('cost'));
 }
 
+/**
+ * `cacheWrite` falls back to the input rate when the table publishes none, so
+ * an estimate is still possible — but callers that are *measuring* rather than
+ * estimating need to know the difference, or they read the substitution as a
+ * real price. `cacheWritePublished` records which of the two this is.
+ */
 export function matchPricing(model, pricing) {
   const n = normModel(model);
   const autoRates = () => (pricing.auto.input != null ? {
@@ -1138,10 +1138,6 @@ export function normalize(raw, pricing, opts = {}) {
   const outputTokens = num(tu.outputTokens);
   const cacheReadTokens = num(tu.cacheReadTokens);
   const cacheWriteTokens = num(tu.cacheWriteTokens);
-  // Cursor stopped sending this count in August 2026. An omitted bucket and a
-  // measured zero must not print the same figure, so the distinction travels
-  // with the event. Absent flag means reported: every fixture and every older
-  // payload carried the count.
   // Which token buckets arrived with no count at all. An omitted bucket and a
   // measured zero both read 0 here, and the difference is the whole point:
   // one is a measurement, the other is its absence. Empty for any payload that

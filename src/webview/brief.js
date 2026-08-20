@@ -326,18 +326,6 @@ export function briefEvents(events, findings, { classify, breakdownOf, formatTim
 }
 
 /**
- * Findings, trimmed to what a reader can act on.
- *
- * `action` is dropped deliberately. It is the dashboard's own generic advice, and
- * producing something better than it is exactly the job being handed over — quoting
- * it would anchor the answer to the thing we are trying to improve on.
- */
-/**
- * Cursor stopped sending a cache-write count in August 2026. The brief is read
- * by a model that will happily reason from "cache write 0" to "this session
- * cached nothing" — so where the count is absent, say absent.
- */
-/**
  * Whether Cursor sent a count for this bucket on every request in view.
  *
  * The brief is read by a model, and a model handed "cache write 0" will reason
@@ -354,6 +342,13 @@ function writeCount(events, bucket, value, count) {
   return reported(events, bucket) ? count(value) : 'not reported by Cursor (unknown, not zero)';
 }
 
+/**
+ * Findings, trimmed to what a reader can act on.
+ *
+ * `action` is dropped deliberately. It is the dashboard's own generic advice, and
+ * producing something better than it is exactly the job being handed over — quoting
+ * it would anchor the answer to the thing we are trying to improve on.
+ */
 function findingsBlock(findings, cap = FINDING_CAP) {
   // One line per kind of finding. A rule that fired on eleven requests used to
   // spend the whole cap restating itself in eleven numbered lines, which both

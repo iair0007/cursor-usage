@@ -101,6 +101,9 @@
     width: 100%;
     height: auto;
   }
+  /* The same framed video box as the hero, minus the hero's top gap — inside a
+     section the lead paragraph above it already provides the spacing. */
+  .hero-shot.in-section { margin-top: 0; }
   .hero-note {
     margin: 14px 0 0;
     font-size: 0.85rem;
@@ -271,7 +274,7 @@
         <img src="screenshot-sessions.png" alt="Sessions comparison">
         <div class="body">
           <h3>Sessions</h3>
-          <p>Requests grouped by conversation. Pick up to four and compare cost, cache hit rate, and which models each one used.</p>
+          <p>Requests grouped by conversation. Pick up to four and compare cost, cache hit rate, and which models each one used. <a href="#session-video">See it in action ↓</a></p>
         </div>
       </div>
       <div class="feature-card">
@@ -282,6 +285,23 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <section id="session-video">
+    <h2>Follow one session end to end</h2>
+    <p class="lead">Open a single conversation and you get what it cost, request by request — plus findings that name what went wrong and link to the request that caused it. All of it derived from token counts and timestamps; your prompts and your code are never read.</p>
+
+    <div class="hero-shot in-section">
+      <!-- Same preload="none" reasoning as the hero video above: the file is
+           only fetched if someone presses play. -->
+      <video controls preload="none" playsinline poster="demo-session-poster.jpg"
+             width="1600" height="900" aria-label="Narrated walkthrough of the per-session breakdown">
+        <source src="demo-session.mp4" type="video/mp4">
+        <p>Your browser can't play this video —
+          <a href="demo-session.mp4">download the session walkthrough</a> instead.</p>
+      </video>
+    </div>
+    <p class="hero-note">Session walkthrough · 2 min 44 s · <a href="demo-session-short.mp4">55-second version</a></p>
   </section>
 
   <section id="privacy">

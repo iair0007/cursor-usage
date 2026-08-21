@@ -39,6 +39,17 @@ const outDir = path.join(__dirname, outDirForCut(CUT));
 const voiceDir = path.join(outDir, 'voice');
 fs.mkdirSync(voiceDir, { recursive: true });
 
+// Playwright names each capture after the page's guid, so re-recording a cut
+// leaves the previous take beside the new one and render.sh has to guess which
+// is meant (it takes the newest). Clearing them keeps exactly one .webm per cut
+// directory, so "which file did I just render?" is never a question. These are
+// this script's own gitignored intermediates — the mp4/gif it feeds are not
+// touched.
+for (const stale of fs.readdirSync(outDir).filter((f) => f.endsWith('.webm'))) {
+  fs.rmSync(path.join(outDir, stale));
+  console.log(`Removed previous take: ${path.join(outDirForCut(CUT), stale)}`);
+}
+
 const VIEWPORT = { width: 1600, height: 900 };
 // DEMO_CHROMIUM, else this sandbox's known Playwright browser path if it
 // happens to exist, else undefined — which tells Playwright to resolve its
@@ -121,25 +132,62 @@ async function main() {
     document.getElementById(id).classList.remove('demo-slide-hidden');
   }, id);
 
-  // Moves Playwright's real mouse in visible steps (rather than teleporting),
-  // so demo/demo-runtime.js's fake-cursor-follows-real-events trick has
-  // motion to draw — see overlay.css's #demoCursor.
-  const moveCursorTo = async (x, y, steps = 26) => {
-    await page.mouse.move(x, y, { steps });
+  // Native <dialog>.showModal() puts the dialog in the top layer and makes
+  // everything behind it inert, so any beat that leaves one open blocks the
+  // clicks of whatever beat runs next. Cuts reorder beats freely, so a beat
+  // that needs the page underneath closes them itself rather than trusting the
+  // beat before it to have tidied up. Idempotent — closing nothing is a no-op.
+  const closeAnyDialog = async () => {
+    const closed = await page.evaluate(() => {
+      const open = [...document.querySelectorAll('dialog[open]')];
+      for (const d of open) d.close();
+      return open.length;
+    });
+    if (closed) await page.waitForTimeout(300);
   };
-  const moveCursorToCenterOf = async (locator) => {
+
+  // Where the pointer was left, so a move can be interpolated from it rather
+  // than jumping to the target and animating from nowhere.
+  let cursorAt = { x: VIEWPORT.width / 2, y: VIEWPORT.height / 2 };
+
+  // Moves Playwright's real mouse so demo/demo-runtime.js's
+  // fake-cursor-follows-real-events trick has motion to draw — see
+  // overlay.css's #demoCursor.
+  //
+  // `page.mouse.move(x, y, { steps })` dispatches its intermediate mousemoves
+  // back to back with no delay, so the whole travel lands inside a single 25fps
+  // frame and the cursor reads as teleporting. Pacing the segments by hand is
+  // what makes the approach visible: TRAVEL_MS of wall clock, which is also
+  // real time the beat spends, hence the modest default.
+  const TRAVEL_MS = 460;
+  const moveCursorTo = async (x, y, { travelMs = TRAVEL_MS, steps = 24 } = {}) => {
+    const from = cursorAt;
+    const perStep = travelMs / steps;
+    for (let i = 1; i <= steps; i++) {
+      // Ease in/out, so the pointer accelerates away and settles rather than
+      // sliding at a constant machine-like rate.
+      const t = i / steps;
+      const eased = t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2;
+      await page.mouse.move(from.x + (x - from.x) * eased, from.y + (y - from.y) * eased);
+      await page.waitForTimeout(perStep);
+    }
+    cursorAt = { x, y };
+  };
+  const moveCursorToCenterOf = async (locator, opts) => {
     const box = await locator.boundingBox();
     if (!box) return null;
-    await moveCursorTo(box.x + box.width / 2, box.y + box.height / 2);
+    await moveCursorTo(box.x + box.width / 2, box.y + box.height / 2, opts);
     return box;
   };
   // Moves the mouse to an element, pauses so the viewer can register where
   // it's headed, then clicks — instead of jumping straight to a hidden
   // Playwright-internal click with no visible approach.
-  const clickWithCursor = async (selector, { settleMs = 350 } = {}) => {
+  const clickWithCursor = async (selector, { settleMs = 350, travelMs, pauseMs = 260 } = {}) => {
     const el = page.locator(selector).first();
-    await moveCursorToCenterOf(el);
-    await page.waitForTimeout(150);
+    await moveCursorToCenterOf(el, travelMs === undefined ? undefined : { travelMs });
+    // A beat of stillness on the target before the click, so the viewer's eye
+    // catches up with the pointer and reads what is about to be pressed.
+    await page.waitForTimeout(pauseMs);
     await el.click();
     await page.waitForTimeout(settleMs);
   };
@@ -291,7 +339,7 @@ async function main() {
         await compareBtn.click();
         // The dialog is a native modal, so it enters the top layer above the
         // subtitles — put them back on top of it.
-        await page.evaluate(() => window.__demoCaptions.raise());
+        await page.evaluate(() => { window.__demoCaptions.raise(); window.__demoCursor?.raise(); });
         // The comparison dialog is the payoff of this beat, so it holds the
         // screen for the rest of it — reserving just enough at the end to
         // close again inside the beat rather than after it.
@@ -317,6 +365,9 @@ async function main() {
   };
 
   handlers.install = async (beat) => {
+    // The session cuts reach this beat straight from a beat that leaves a
+    // session dialog open; the slide below it would be inert behind the modal.
+    await closeAnyDialog();
     await showSlide('demoInstall');
     await page.waitForTimeout(600);
     const search = page.locator('#mockExtSearch');
@@ -347,9 +398,15 @@ async function main() {
   // The session dialogs are native modals opened with showModal(), so they
   // enter the browser's top layer above every z-index on the page — including
   // the subtitles. Every beat that opens one has to put the captions back.
+  // Idempotent, because cuts reorder beats: whether the dialog is already up
+  // depends on which beat ran before this one, and clicking the row underneath
+  // an open modal times out (the modal makes the page behind it inert) rather
+  // than failing in any way that reads as the real cause.
   const openStorySession = async () => {
+    const alreadyOpen = await page.locator(`#sessionDetailDialog[open][data-session="${STORY_SESSION}"]`).count();
+    if (alreadyOpen) return;
     await clickWithCursor(`.session-open[data-session="${STORY_SESSION}"]`);
-    await page.evaluate(() => window.__demoCaptions.raise());
+    await page.evaluate(() => { window.__demoCaptions.raise(); window.__demoCursor?.raise(); });
     await page.waitForTimeout(400);
   };
 
@@ -398,9 +455,12 @@ async function main() {
     // and the stale resume (#22), which is the plot's peak and the bar the
     // narration ends on. Guarded by count, so a shorter session just hovers
     // fewer bars rather than throwing mid-take.
+    //
+    // A beat can override the list: the short cut has one line about the peak
+    // and no time to tour the bars that set it up, so it stops twice.
     const bars = timeline.locator('.tl-bar');
     const total = await bars.count();
-    for (const i of [5, 11, 12, 21].filter((n) => n < total)) {
+    for (const i of (beat.timelineStops || [5, 11, 12, 21]).filter((n) => n < total)) {
       await moveCursorToCenterOf(bars.nth(i)).catch(() => {});
       await page.waitForTimeout(900);
     }
@@ -438,12 +498,19 @@ async function main() {
   };
 
   handlers.sessionAsk = async (beat) => {
-    // Back to the session — the request log is where the previous beat left us.
-    await ensureAnalyzePanel('sessions');
-    await page.waitForTimeout(500);
-    await openStorySession();
+    // Where this beat starts from depends on the cut: the long one arrives from
+    // the request log with everything closed and has to navigate back, while
+    // the short one comes straight off the findings with the dialog still up —
+    // and navigating then means clicking the page behind an open modal, which
+    // only ever times out. So the trip back is conditional on needing it.
+    const alreadyOpen = await page.locator(`#sessionDetailDialog[open][data-session="${STORY_SESSION}"]`).count();
+    if (!alreadyOpen) {
+      await ensureAnalyzePanel('sessions');
+      await page.waitForTimeout(500);
+      await openStorySession();
+    }
     await clickWithCursor('#sessionAskBtn');
-    await page.evaluate(() => window.__demoCaptions.raise());
+    await page.evaluate(() => { window.__demoCaptions.raise(); window.__demoCursor?.raise(); });
     await page.waitForTimeout(500);
 
     // Pick the template the narration is about, by its wording rather than its
@@ -501,7 +568,7 @@ async function main() {
     if (await compareBtn.count() && await compareBtn.isEnabled()) {
       await moveCursorToCenterOf(compareBtn);
       await compareBtn.click();
-      await page.evaluate(() => window.__demoCaptions.raise());
+      await page.evaluate(() => { window.__demoCaptions.raise(); window.__demoCursor?.raise(); });
       await holdBeat(beat, { reserveMs: 400 });
       await page.locator('#sessionsDialogClose').click().catch(() => {});
       await page.waitForTimeout(400);

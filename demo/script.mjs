@@ -242,15 +242,86 @@ export const SESSION_BEATS = [
     minMs: 5500,
   },
   {
+    // Reuses the full cut's `install` handler and its mock Extensions panel —
+    // same beat id, so record.mjs dispatches to the same code. The publisher
+    // search is the point: the extension has few downloads, so searching its
+    // name buries it, while the publisher name finds it first hit.
+    id: 'install',
+    narration: 'To install it, open the Extensions panel and search for the publisher name, iair0007 — that finds it faster than searching for the extension itself.',
+    minMs: 6000,
+  },
+  {
     id: 'sessionOutro',
     narration: "It's free on Open VSX, and needs no proxy and no separate login — just your Cursor account.",
   },
 ];
 
-/** The beats for a named cut — `full` (the default), `short`, or `session`. */
+/**
+ * The under-a-minute session cut, for feeds where the two-and-a-half minute
+ * walkthrough is longer than anyone scrolling will watch.
+ *
+ * Every id here already has a handler in record.mjs, and the order keeps the
+ * dependency those handlers carry: `sessionTimeline` and `sessionFindings`
+ * both read the detail dialog `sessionOpen` opens, so they have to follow it.
+ * Cut are the sessions list, the finding-to-request jump and the two-session
+ * comparison — leaving one arc: open a session, see the bar that cost the
+ * most, learn why, hand the numbers on.
+ *
+ * The narration is rewritten rather than truncated, and each beat is allowed
+ * exactly one idea — at this length a line that restates an earlier one is the
+ * most expensive thing in the cut. So the 3.5h resume is explained once, on
+ * the plot where it is visible (not again in the findings), and the privacy
+ * claim is made once, on the findings beat (not again on the Cursor Chat one).
+ */
+export const SESSION_SHORT_BEATS = [
+  {
+    id: 'sessionIntro',
+    narration: 'One long agent chat can cost more than a week of ordinary work.',
+  },
+  {
+    id: 'sessionOpen',
+    narration: 'Open the session and you see where the money actually went, by token bucket — mostly context handling rather than new work.',
+    minMs: 4000,
+  },
+  {
+    // The plot carries this beat, so it hovers only two bars: an ordinary turn
+    // for scale, then the peak the line is about. The long cut's four-stop tour
+    // of the blowup and the summary bar is a different story than this one.
+    id: 'sessionTimeline',
+    narration: 'One bar per request. The tallest is not a long answer — it is the price of coming back after three and a half hours: the cache had expired, so the whole thread was written again before any work happened.',
+    timelineStops: [5, 21],
+    minMs: 5000,
+  },
+  {
+    // Where the privacy claim lands, once. It belongs on this beat rather than
+    // on the Cursor Chat one because this is the beat that shows conclusions
+    // being drawn — the natural place a viewer wonders how much was read to
+    // draw them. Saying it here also frees the Ask beat to make its own point
+    // instead of repeating this one.
+    id: 'sessionFindings',
+    narration: 'The extension spots that on its own. It reads only token counts and timestamps — never your prompts, your code, or anything the conversation said.',
+    minMs: 5000,
+  },
+  {
+    id: 'sessionAsk',
+    narration: 'Hand the numbers to Cursor Chat when you want a second opinion — it shows you the brief, and what it costs, before anything is sent.',
+    minMs: 5000,
+  },
+  {
+    id: 'install',
+    narration: 'Search the publisher iair0007 in your Extensions panel. Free, no proxy, no login.',
+    minMs: 5500,
+  },
+];
+
+/**
+ * The beats for a named cut — `full` (the default), `short`, `session`, or
+ * `session-short`.
+ */
 export function beatsForCut(cut) {
   if (cut === 'short') return SHORT_BEATS;
   if (cut === 'session') return SESSION_BEATS;
+  if (cut === 'session-short') return SESSION_SHORT_BEATS;
   return BEATS;
 }
 
@@ -263,7 +334,6 @@ export function beatsForCut(cut) {
  * is namespaced this way, so re-rendering one cut can never clobber another's.
  */
 export function outDirForCut(cut) {
-  if (cut === 'short') return 'out/short';
-  if (cut === 'session') return 'out/session';
-  return 'out';
+  if (cut === 'full') return 'out';
+  return `out/${cut}`;
 }

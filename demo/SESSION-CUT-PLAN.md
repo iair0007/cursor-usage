@@ -1,5 +1,29 @@
 # Plan: a "how a session went" demo video
 
+> **Status: built, up to a silent test recording.** The fixtures, the beats and
+> the handlers are in the repo and a silent take records cleanly; what is left
+> is voicing and rendering, which need a machine with Hugging Face access and a
+> full ffmpeg (section 0). `demo/README.md` documents the cut as it actually
+> ships — read that first; this file is the reasoning behind it, kept for the
+> next person who wonders why the story sessions are hand-written.
+>
+> Three things changed while building it, all of them from looking at what
+> rendered rather than at the thresholds:
+>
+> - **The model-switch finding was dropped from the story session.** A surface
+>   shows `FINDING_CARD_LIMIT` (3) cards, and the narration already names three.
+>   A fourth rule would have competed for those slots and could have pushed one
+>   of the named findings behind the "show more" button, where the camera would
+>   never see it. `verify-story.mjs` now fails on exactly that.
+> - **The timeline narration was rewritten.** The draft said "the shaded band
+>   swells while the solid part stays flat" — but the plot is dominated by the
+>   stale-resume bar (the costliest request in the session at $2.25), which
+>   compresses the earlier growth to almost nothing. The line now describes the
+>   peak that is actually there.
+> - **The stale resume's gap moved from 215 to 210 minutes.** The narration says
+>   "three and a half hours" and the finding rendered "3.6h". Rather than
+>   re-word, the fixture now makes the sentence true.
+
 A third cut for the existing pipeline in `demo/` — one that shows the
 session-level features added in 0.8.0: the session breakdown, the timeline,
 the findings anchored to a conversation, the jump from a finding to the
@@ -114,9 +138,10 @@ timeline reads as a story rather than a bar chart:
 6. **Turn 22 — stale resume.** Starts ≥3.5h after turn 21, `cacheRead` 0,
    `cacheWrite` 240,000 (past `staleResumeCacheWriteTokens` 100,000). Keep
    `cacheWrite` non-zero or it reads as a second compaction instead.
-7. **Turns 22–26 — a model switch.** Pin turns 1–21 to one model and 22–26 to
-   another, with cache reads large enough that re-pricing identical token
-   counts moves more than `switchMinImpact` ($0.25) and `switchMinPct` (20%).
+7. ~~**Turns 22–26 — a model switch.**~~ **Dropped** — see the status note at
+   the top. The whole session stays on one model, which also keeps the
+   comparison beat's model table to a single row and the story about context
+   rather than model choice.
 
 ### Session B — `conv_cleanrun`, the counter-example
 

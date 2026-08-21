@@ -188,13 +188,185 @@ sessions.push({
 });
 
 // ---------------------------------------------------------------------------
+// Story sessions — the two conversations the `session` cut of the demo video
+// is about (see demo/SESSION-CUT-PLAN.md).
+//
+// These are hand-written turn by turn rather than drawn from the PRNG above,
+// for two reasons. The findings this cut exists to show only fire on specific
+// token shapes — a compaction is `cacheRead === 0 && cacheWrite === 0` with a
+// large input, a stale resume needs a cache *write* past 100k tokens, a blowup
+// needs 5x the session's median read — and a smooth random walk produces none
+// of them. And the narration and the recording both have to stay true across
+// re-runs, which a reproducible-but-random session cannot promise.
+//
+// Every number below is set against a threshold in INSIGHT_DEFAULTS
+// (src/webview/insights.js). Changing one means re-checking the rule it feeds:
+// demo/verify-story.mjs does exactly that, and is the reason to run it after
+// touching anything here.
+//
+// `cacheRead` is the running context being re-sent each turn, so it climbs
+// within a phase and resets where the thread is summarised or the cache has
+// expired — the shape the session timeline draws as a swelling shaded band.
+// ---------------------------------------------------------------------------
+
+const STORY_MODEL = 'claude-4-5-sonnet';
+
+// Session A: the conversation that got away. Four phases, in order — a cold
+// start, an ordinary climb, one request that reads far more context than any
+// other, Cursor summarising the thread, the thread growing straight back, and
+// finally a resume hours later against an expired cache.
+//
+// gapMin is minutes since the previous turn; the 210-minute gap before turn 22
+// is what makes it a stale resume rather than just another expensive request.
+const AUTH_TURNS = [
+  // Cold start: uncached, and big enough to clear coldStartInputTokens (3,000).
+  { gapMin: 0, input: 7200, output: 900, cacheRead: 0, cacheWrite: 1400 },
+  { gapMin: 3, input: 2400, output: 1100, cacheRead: 24000, cacheWrite: 300 },
+  { gapMin: 4, input: 2100, output: 1300, cacheRead: 41000, cacheWrite: 260 },
+  // The ordinary climb — context accumulating a turn at a time.
+  { gapMin: 3, input: 2600, output: 950, cacheRead: 62000, cacheWrite: 280 },
+  { gapMin: 5, input: 2300, output: 1500, cacheRead: 84000, cacheWrite: 240 },
+  { gapMin: 4, input: 2500, output: 1200, cacheRead: 103000, cacheWrite: 300 },
+  { gapMin: 3, input: 2200, output: 1000, cacheRead: 121000, cacheWrite: 250 },
+  { gapMin: 6, input: 2700, output: 1600, cacheRead: 138000, cacheWrite: 320 },
+  { gapMin: 4, input: 2400, output: 1100, cacheRead: 152000, cacheWrite: 270 },
+  { gapMin: 3, input: 2100, output: 1300, cacheRead: 166000, cacheWrite: 240 },
+  { gapMin: 5, input: 2600, output: 1400, cacheRead: 181000, cacheWrite: 290 },
+  // Turn 12 — context blowup. 720k reads against a session median of ~121k is
+  // just under 6x, past blowupMultiple (5), and the read is 99% of the
+  // request's tokens, past blowupCacheShare (0.9).
+  { gapMin: 4, input: 3000, output: 1500, cacheRead: 720000, cacheWrite: 200 },
+  // Turn 13 — Cursor compacts. Zero cache either way with a large input is
+  // what separates a compaction from a cold start; input clears
+  // compactionMinInput (50,000).
+  { gapMin: 3, input: 62000, output: 2600, cacheRead: 0, cacheWrite: 0 },
+  // Relief: the four turns after the summary, well under the four before it.
+  { gapMin: 4, input: 2200, output: 1000, cacheRead: 44000, cacheWrite: 260 },
+  { gapMin: 3, input: 2400, output: 1200, cacheRead: 52000, cacheWrite: 240 },
+  { gapMin: 5, input: 2100, output: 900, cacheRead: 61000, cacheWrite: 280 },
+  { gapMin: 4, input: 2500, output: 1300, cacheRead: 73000, cacheWrite: 250 },
+  // ...and then it grows back. Turn 19 passes the pre-compaction median, which
+  // is what turns "summarising worked" into "worked, then the context grew
+  // back" — the finding that carries the start-a-fresh-chat advice.
+  { gapMin: 6, input: 2300, output: 1100, cacheRead: 128000, cacheWrite: 270 },
+  { gapMin: 5, input: 2600, output: 1400, cacheRead: 197000, cacheWrite: 300 },
+  { gapMin: 4, input: 2400, output: 1250, cacheRead: 262000, cacheWrite: 280 },
+  { gapMin: 5, input: 2200, output: 1150, cacheRead: 318000, cacheWrite: 260 },
+  // Turn 22 — back after exactly 3.5 hours, which is what the narration says. The prompt cache has expired, so the whole
+  // accumulated thread is re-written at full price before any work happens.
+  // cacheWrite clears staleResumeCacheWriteTokens (100,000), and stays
+  // non-zero so this reads as a resume rather than a second compaction.
+  { gapMin: 210, input: 4800, output: 1300, cacheRead: 0, cacheWrite: 240000 },
+  { gapMin: 4, input: 2300, output: 1050, cacheRead: 96000, cacheWrite: 250 },
+  { gapMin: 5, input: 2500, output: 1200, cacheRead: 142000, cacheWrite: 270 },
+  { gapMin: 4, input: 2100, output: 980, cacheRead: 188000, cacheWrite: 240 },
+  { gapMin: 6, input: 2600, output: 1350, cacheRead: 231000, cacheWrite: 290 },
+];
+
+// Session B: the counter-example, earlier the same day. Same shape of work,
+// one compaction — but nothing after it climbs back to the pre-compaction
+// level, so the rule resolves as plain "summarising worked".
+//
+// It takes a second session to show that outcome at all: one compaction
+// resolves one way or the other, never both, so the good ending cannot be told
+// on session A's timeline.
+const CLEAN_TURNS = [
+  { gapMin: 0, input: 6800, output: 900, cacheRead: 0, cacheWrite: 1300 },
+  { gapMin: 4, input: 2200, output: 1000, cacheRead: 21000, cacheWrite: 240 },
+  { gapMin: 3, input: 2400, output: 1200, cacheRead: 38000, cacheWrite: 260 },
+  { gapMin: 5, input: 2100, output: 900, cacheRead: 57000, cacheWrite: 210 },
+  { gapMin: 4, input: 2600, output: 1400, cacheRead: 79000, cacheWrite: 280 },
+  { gapMin: 3, input: 2300, output: 1100, cacheRead: 98000, cacheWrite: 250 },
+  { gapMin: 6, input: 2500, output: 1300, cacheRead: 116000, cacheWrite: 230 },
+  { gapMin: 4, input: 2200, output: 1000, cacheRead: 133000, cacheWrite: 240 },
+  // Compacted here — and this time the relief holds.
+  { gapMin: 3, input: 54000, output: 2300, cacheRead: 0, cacheWrite: 0 },
+  { gapMin: 5, input: 2000, output: 900, cacheRead: 32000, cacheWrite: 220 },
+  { gapMin: 4, input: 2300, output: 1100, cacheRead: 38000, cacheWrite: 250 },
+  { gapMin: 3, input: 2100, output: 1000, cacheRead: 44000, cacheWrite: 230 },
+  { gapMin: 5, input: 2400, output: 1200, cacheRead: 51000, cacheWrite: 260 },
+  // Ends below the pre-compaction median, so nothing here counts as regrowth.
+  { gapMin: 4, input: 2200, output: 1050, cacheRead: 58000, cacheWrite: 240 },
+];
+
+const storyDayStart = (daysAgo, hour, minute = 0) => {
+  const d = new Date(now - daysAgo * DAY_MS);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, minute).getTime();
+};
+
+sessions.push({
+  id: 'conv_authnight',
+  startMs: storyDayStart(2, 15),
+  title: 'Refactor auth flow: session store + token refresh',
+  forcedModel: STORY_MODEL,
+  turns: AUTH_TURNS,
+});
+
+sessions.push({
+  id: 'conv_cleanrun',
+  startMs: storyDayStart(2, 9, 30),
+  title: 'Add rate limiting to the public API',
+  forcedModel: STORY_MODEL,
+  turns: CLEAN_TURNS,
+});
+
+// ---------------------------------------------------------------------------
 // Build events
 // ---------------------------------------------------------------------------
 
 let eventSeq = 0;
 const events = [];
 
+/**
+ * Appends one event. Shared by the random sessions and the scripted story
+ * sessions so both produce byte-identical event shapes — a story session that
+ * differed structurally would exercise a different code path in the webview
+ * than the rest of the fixture, which is exactly what a demo must not do.
+ */
+function pushEvent(session, ts, model, tokens) {
+  const totalCents = estimateCents(model, tokens);
+  eventSeq += 1;
+  events.push({
+    id: `evt_${eventSeq.toString(36).padStart(6, '0')}`,
+    timestamp: ts,
+    model,
+    kind: 'composer',
+    conversationId: session.id,
+    isTokenBasedCall: true,
+    // Undiscounted for now — chargedCents is set to match totalCents until
+    // the discount pass below (after the budget-scaling pass further down,
+    // deliberately: at this per-event scale, list costs are often 1-3
+    // cents, where Math.round(cents * 0.6) frequently rounds right back to
+    // the same integer it started from — collapsing the discount before it
+    // exists. Scaling first means the 40%-off cut lands on cent values
+    // large enough for that rounding to actually preserve a visible gap.
+    chargedCents: totalCents,
+    cursorTokenFee: null,
+    tokenUsage: {
+      inputTokens: tokens.input,
+      outputTokens: tokens.output,
+      cacheReadTokens: tokens.cacheRead,
+      cacheWriteTokens: tokens.cacheWrite,
+      totalCents,
+    },
+  });
+}
+
 for (const session of sessions) {
+  // Scripted sessions carry their own turns; everything else is a random walk.
+  if (session.turns) {
+    let ts = session.startMs;
+    for (const turn of session.turns) {
+      ts += turn.gapMin * 60 * 1000;
+      pushEvent(session, ts, session.forcedModel, {
+        input: turn.input,
+        output: turn.output,
+        cacheRead: turn.cacheRead,
+        cacheWrite: turn.cacheWrite,
+      });
+    }
+    continue;
+  }
   let cacheReadTokens = 0;
   const forcedModel = session.forcedModel || (session.heavy ? 'claude-4-5-sonnet' : null);
   for (let i = 0; i < session.length; i++) {
@@ -203,7 +375,13 @@ for (const session of sessions) {
     const model = forcedModel || pickModel(rand);
 
     const isFirst = i === 0;
-    const inputTokens = randInt(600, 3000) + i * randInt(50, 300);
+    // A first turn carries Cursor's system prompt, your rules files and every
+    // connected MCP server's tool definitions, so it is far larger than a
+    // follow-up — and has to clear coldStartInputTokens (3,000) for the
+    // "what every new chat costs before you type" baseline to have samples.
+    const inputTokens = isFirst
+      ? randInt(4000, 9000)
+      : randInt(600, 3000) + i * randInt(50, 300);
     let outputTokens = randInt(200, 1800);
     // A handful of genuine output spikes across the whole window, for the
     // "heavy output request" finding.
@@ -211,33 +389,11 @@ for (const session of sessions) {
     const cacheWriteTokens = isFirst ? randInt(400, 1600) : randInt(0, 300);
     cacheReadTokens = isFirst ? 0 : cacheReadTokens + randInt(800, 4000);
 
-    const tokens = { input: inputTokens, output: outputTokens, cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens };
-    const totalCents = estimateCents(model, tokens);
-
-    eventSeq += 1;
-    events.push({
-      id: `evt_${eventSeq.toString(36).padStart(6, '0')}`,
-      timestamp: ts,
-      model,
-      kind: 'composer',
-      conversationId: session.id,
-      isTokenBasedCall: true,
-      // Undiscounted for now — chargedCents is set to match totalCents until
-      // the discount pass below (after the budget-scaling pass further down,
-      // deliberately: at this per-event scale, list costs are often 1-3
-      // cents, where Math.round(cents * 0.6) frequently rounds right back to
-      // the same integer it started from — collapsing the discount before it
-      // exists. Scaling first means the 40%-off cut lands on cent values
-      // large enough for that rounding to actually preserve a visible gap.
-      chargedCents: totalCents,
-      cursorTokenFee: null,
-      tokenUsage: {
-        inputTokens,
-        outputTokens,
-        cacheReadTokens,
-        cacheWriteTokens,
-        totalCents,
-      },
+    pushEvent(session, ts, model, {
+      input: inputTokens,
+      output: outputTokens,
+      cacheRead: cacheReadTokens,
+      cacheWrite: cacheWriteTokens,
     });
   }
 }

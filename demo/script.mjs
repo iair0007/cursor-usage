@@ -184,9 +184,74 @@ export const SHORT_BEATS = [
   },
 ];
 
-/** The beats for a named cut — `full` (the default) or `short`. */
+/**
+ * The session cut — one conversation followed from start to finish.
+ *
+ * The other two cuts tour the tabs; this one tells a story, because the
+ * session features only mean anything against a conversation that went wrong.
+ * It follows `conv_authnight` from generate-fixtures.mjs: an ordinary refactor
+ * whose context blew out, got summarised, grew straight back, and was finally
+ * resumed hours later against an expired cache.
+ *
+ * Two rules govern the wording. No dollar figure is spoken — the screen shows
+ * them and the fixtures regenerate with fresh dates, so a number in the
+ * narration would eventually contradict the picture beside it. And nothing is
+ * claimed that the findings on screen do not say: demo/verify-story.mjs runs
+ * the real rules over the real fixture data and fails if any of the three this
+ * script names stops firing, or drops below FINDING_CARD_LIMIT where the
+ * camera would never see it.
+ */
+export const SESSION_BEATS = [
+  {
+    id: 'sessionIntro',
+    narration: "One long agent chat can cost more than a whole week of ordinary work — and by the time you notice, it's already on the bill. This is what the dashboard can tell you about a conversation that got away from you.",
+  },
+  {
+    id: 'sessionsList',
+    narration: 'Sessions groups every request by the conversation it came from, so one chat reads as one row: what it cost, how long it ran, and which models it reached for. The names come from Cursor\'s own local chat index — nothing you wrote is ever read, and no title leaves your machine.',
+    minMs: 3200,
+  },
+  {
+    id: 'sessionOpen',
+    narration: 'Open one and you get where its money actually went, by token bucket. On a long agent session most of it is cache reads — the accumulated thread being re-sent, turn after turn — rather than the answers you were waiting for.',
+    minMs: 3400,
+  },
+  {
+    id: 'sessionTimeline',
+    narration: 'One bar per request, in the order you asked them, each priced, with the share that was re-read context shaded in. Hover any of them for what it cost and what that cost was made of. The striped bar is Cursor summarising the thread — and the tallest bar is not a long answer at all, it is what it cost to come back to this conversation hours later.',
+    minMs: 7000,
+  },
+  {
+    id: 'sessionFindings',
+    narration: 'The findings anchored to the session say what happened, and when. Coming back after three and a half hours cost the most — the cache had expired, so the whole thread was written again before any work happened. One request read six times more context than the rest of the conversation. And summarising did bring it down, before the thread grew straight back, which is the moment a fresh chat beats another summary. All of it derived from token counts and timestamps, never from anything you wrote.',
+    minMs: 7500,
+  },
+  {
+    id: 'findingToRequest',
+    narration: 'Every finding links to the request it is about. Open the row and the cost breaks down by bucket, so you can check the claim yourself: a few cents of answer, and the rest re-reading context you had already paid for once.',
+    minMs: 5000,
+  },
+  {
+    id: 'sessionAsk',
+    narration: 'Or hand the session to Cursor Chat. The brief carries token counts, timings and costs, and nothing you typed, because none of it is ever read. It is built small on purpose — the analysis costs tokens too — and it tells you its size and what sending it is worth before you send anything. It fills the chat box and stops there: nothing goes until you have read it and pressed Enter.',
+    minMs: 8000,
+  },
+  {
+    id: 'sessionCompare',
+    narration: 'And you can put two conversations side by side. Same kind of work, same day — but in this one the summary held, and the context never grew back.',
+    minMs: 5500,
+  },
+  {
+    id: 'sessionOutro',
+    narration: "It's free on Open VSX, and needs no proxy and no separate login — just your Cursor account.",
+  },
+];
+
+/** The beats for a named cut — `full` (the default), `short`, or `session`. */
 export function beatsForCut(cut) {
-  return cut === 'short' ? SHORT_BEATS : BEATS;
+  if (cut === 'short') return SHORT_BEATS;
+  if (cut === 'session') return SESSION_BEATS;
+  return BEATS;
 }
 
 /**
@@ -198,5 +263,7 @@ export function beatsForCut(cut) {
  * is namespaced this way, so re-rendering one cut can never clobber another's.
  */
 export function outDirForCut(cut) {
-  return cut === 'short' ? 'out/short' : 'out';
+  if (cut === 'short') return 'out/short';
+  if (cut === 'session') return 'out/session';
+  return 'out';
 }

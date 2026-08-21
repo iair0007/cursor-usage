@@ -334,6 +334,188 @@ async function main() {
     await hideSlide('demoInstall');
   };
 
+  // ---------------------------------------------------------------------------
+  // Session cut — one conversation followed start to finish. The fixture story
+  // session these drive is `conv_authnight` (see generate-fixtures.mjs), and
+  // demo/verify-story.mjs is what guarantees the findings this cut narrates are
+  // actually on screen when it records.
+  // ---------------------------------------------------------------------------
+
+  const STORY_SESSION = 'conv_authnight';
+  const CLEAN_SESSION = 'conv_cleanrun';
+
+  // The session dialogs are native modals opened with showModal(), so they
+  // enter the browser's top layer above every z-index on the page — including
+  // the subtitles. Every beat that opens one has to put the captions back.
+  const openStorySession = async () => {
+    await clickWithCursor(`.session-open[data-session="${STORY_SESSION}"]`);
+    await page.evaluate(() => window.__demoCaptions.raise());
+    await page.waitForTimeout(400);
+  };
+
+  handlers.sessionIntro = async (beat) => {
+    await holdBeat(beat);
+  };
+
+  handlers.sessionsList = async (beat) => {
+    await enterDashboard();
+    await ensureAnalyzePanel('sessions');
+    await page.waitForTimeout(700);
+    // The story session is the costliest in the fixtures (verify-story.mjs
+    // fails if it stops being), so it leads the list — but point at it by id
+    // rather than by position, so a re-sort cannot silently change the subject.
+    const row = page.locator(`.session-open[data-session="${STORY_SESSION}"]`).first();
+    if (await row.count()) {
+      await row.scrollIntoViewIfNeeded().catch(() => {});
+      await moveCursorToCenterOf(row);
+    }
+    await holdBeat(beat);
+  };
+
+  handlers.sessionOpen = async (beat) => {
+    await enterDashboard();
+    await ensureAnalyzePanel('sessions');
+    await openStorySession();
+    const spend = page.locator('#sessionDetailSpend');
+    if (await spend.count()) {
+      await spend.scrollIntoViewIfNeeded().catch(() => {});
+      await moveCursorToCenterOf(spend).catch(() => {});
+    }
+    await holdBeat(beat);
+  };
+
+  handlers.sessionTimeline = async (beat) => {
+    const timeline = page.locator('#sessionDetailTimeline');
+    await timeline.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(300);
+    // Hovering is the whole point of this beat: each bar's cost readout is
+    // bound to mouseover, so the fake cursor has to actually travel across
+    // them. Three stops — an ordinary turn, the blowup, and the striped
+    // summary bar — rather than a sweep, so each tooltip is readable.
+    //
+    // The stops are the story's turns, by index into AUTH_TURNS: an ordinary
+    // early turn, the blowup (#12), Cursor's summary (#13, the striped bar),
+    // and the stale resume (#22), which is the plot's peak and the bar the
+    // narration ends on. Guarded by count, so a shorter session just hovers
+    // fewer bars rather than throwing mid-take.
+    const bars = timeline.locator('.tl-bar');
+    const total = await bars.count();
+    for (const i of [5, 11, 12, 21].filter((n) => n < total)) {
+      await moveCursorToCenterOf(bars.nth(i)).catch(() => {});
+      await page.waitForTimeout(900);
+    }
+    await holdBeat(beat);
+  };
+
+  handlers.sessionFindings = async (beat) => {
+    const findings = page.locator('#sessionDetailFindings');
+    await findings.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(400);
+    await moveCursorToCenterOf(findings.locator('.finding-card').first()).catch(() => {});
+    await holdBeat(beat);
+  };
+
+  handlers.findingToRequest = async (beat) => {
+    // jumpToRequest() in main.js does all of it: closes the dialog, switches to
+    // the request log, paginates to the row, expands it and flashes it. So this
+    // beat is one real click and then time to read the breakdown it lands on.
+    // The context-blowup card specifically, not merely the first: this beat's
+    // line is about a request that was almost entirely re-*read* context, and
+    // the card above it (the stale resume) is about context being re-*written*.
+    // Jumping to that one would land on a breakdown the narration misdescribes.
+    // Matched on the multiplier, not on the bare words: "Context grew" also
+    // appears in "Summarising worked, then the context grew back", the card
+    // below it.
+    const blowupCard = page.locator('#sessionDetailFindings .finding-card', { hasText: /Context grew \d+×/ });
+    const jump = (await blowupCard.count() ? blowupCard : page.locator('#sessionDetailFindings .finding-card'))
+      .first().locator('.finding-jump').first();
+    if (await jump.count()) {
+      await moveCursorToCenterOf(jump);
+      await jump.click();
+      await page.waitForTimeout(1200);
+    }
+    await holdBeat(beat);
+  };
+
+  handlers.sessionAsk = async (beat) => {
+    // Back to the session — the request log is where the previous beat left us.
+    await ensureAnalyzePanel('sessions');
+    await page.waitForTimeout(500);
+    await openStorySession();
+    await clickWithCursor('#sessionAskBtn');
+    await page.evaluate(() => window.__demoCaptions.raise());
+    await page.waitForTimeout(500);
+
+    // Pick the template the narration is about, by its wording rather than its
+    // position, so re-ordering the list cannot pick a different question.
+    const chosen = await page.evaluate(() => {
+      const sel = document.getElementById('askTemplate');
+      if (!sel) return null;
+      const match = [...sel.options].find((o) => /fresh chat/i.test(o.textContent || ''));
+      const option = match || sel.options[0];
+      if (!option) return null;
+      sel.value = option.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return option.textContent;
+    });
+    if (chosen) await page.waitForTimeout(600);
+
+    // The brief itself sits in a collapsed <details>; open it so the thing the
+    // narration describes is actually on screen.
+    const preview = page.locator('.ask-preview summary').first();
+    if (await preview.count()) {
+      await moveCursorToCenterOf(preview);
+      await preview.click();
+      await page.waitForTimeout(500);
+    }
+    const size = page.locator('#askSize');
+    if (await size.count()) await moveCursorToCenterOf(size).catch(() => {});
+
+    // Deliberately stops here without clicking "Open and paste in Cursor Chat".
+    // bridge.js answers sendToCursorChat with the honest out-of-Cursor result
+    // ({ pasted: false, via: 'none' }), so a click would put a fallback message
+    // on screen under narration describing the feature working. The dialog —
+    // the brief, its token size, its cost — is what the beat is about anyway,
+    // and the line says it stops before sending.
+    await holdBeat(beat, { reserveMs: 400 });
+    await page.locator('#askClose').click().catch(() => {});
+    await page.waitForTimeout(400);
+  };
+
+  handlers.sessionCompare = async (beat) => {
+    await page.locator('#sessionDetailClose').click().catch(() => {});
+    await page.waitForTimeout(300);
+    await ensureAnalyzePanel('sessions');
+    await page.waitForTimeout(500);
+    // By id, not by row position: the comparison is only worth showing for
+    // this specific pair — the session that regrew against the one that didn't.
+    for (const id of [STORY_SESSION, CLEAN_SESSION]) {
+      const box = page.locator(`#sessionsList input[type="checkbox"][data-session-id="${id}"]`).first();
+      if (!(await box.count())) continue;
+      await box.scrollIntoViewIfNeeded().catch(() => {});
+      await moveCursorToCenterOf(box);
+      await box.check();
+      await page.waitForTimeout(350);
+    }
+    const compareBtn = page.locator('#trayCompare');
+    if (await compareBtn.count() && await compareBtn.isEnabled()) {
+      await moveCursorToCenterOf(compareBtn);
+      await compareBtn.click();
+      await page.evaluate(() => window.__demoCaptions.raise());
+      await holdBeat(beat, { reserveMs: 400 });
+      await page.locator('#sessionsDialogClose').click().catch(() => {});
+      await page.waitForTimeout(400);
+      return;
+    }
+    await holdBeat(beat);
+  };
+
+  handlers.sessionOutro = async (beat) => {
+    await page.evaluate(() => window.__demoCursor?.hide());
+    await showSlide('demoOutro');
+    await holdBeat(beat);
+  };
+
   handlers.outro = async (beat) => {
     await page.evaluate(() => window.__demoCursor?.hide());
     await showSlide('demoOutro');

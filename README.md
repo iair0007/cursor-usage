@@ -113,7 +113,16 @@ Groups the requests in your selected period by the Cursor conversation they came
 
 ![Sessions list](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-sessions.png)
 
-**Click a session name** to open its breakdown: where that session's money went by token bucket, the findings anchored to it, and one bar per request in the order you asked them, each priced, with the context share shaded. A session that got more expensive as it went looks expensive — the shaded band swells while the solid part stays flat.
+**Click a session name** to open its breakdown: where that session's money went by token bucket, the findings anchored to it, and one bar per request in the order you asked them, each priced, with the context share shaded. Bars are scaled against the session's own priciest request, so its most expensive moment is the one you see first — the axis names that peak, and short sessions carry a price under every bar. Hover any of them for what it cost, how much of that was context handling, the model, and any finding attached to that request. A striped bar is Cursor summarising the thread, not a request you made.
+
+<!-- Same GitHub Pages hosting as the tour video at the top: raw.githubusercontent
+     serves .mp4 as application/octet-stream with nosniff, which browsers refuse
+     to play. -->
+<video controls preload="none" playsinline poster="https://iair0007.github.io/cursor-usage/demo-session-poster.jpg" width="900">
+  <source src="https://iair0007.github.io/cursor-usage/demo-session-short.mp4" type="video/mp4">
+</video>
+
+*Video not playing? Watch the [55-second session tour](https://iair0007.github.io/cursor-usage/demo-session-short.mp4) or the [full 2¾-minute session walkthrough](https://iair0007.github.io/cursor-usage/demo-session.mp4) instead.*
 
 **Ask Cursor Chat about it.** The breakdown has an **Ask Cursor Chat** button that builds a brief about *this* session — or about one request out of it — and opens Cursor Chat with it already in the input box. It stops there: nothing is sent until you've read it and pressed Enter. Where prefilling isn't available it copies the brief and opens chat for you to paste, and tells you which happened.
 

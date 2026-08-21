@@ -3,7 +3,8 @@
 # lightweight gif for embedding in the README). Run after demo/record.mjs.
 #
 # Usage: ./demo/render.sh [cut]
-#   cut: "full" (default) reads/writes demo/out/; "short" uses demo/out/short/.
+#   cut: "full" (default) reads/writes demo/out/; every other cut uses
+#        demo/out/<cut>/ — the same mapping as outDirForCut() in script.mjs.
 #        Must match the cut record.mjs was run with — each cut keeps its own
 #        directory so re-rendering one never overwrites the other.
 set -euo pipefail
@@ -11,10 +12,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 CUT="${1:-full}"
-if [ "$CUT" = "short" ]; then
-  OUT="out/short"
-else
+# Mirror outDirForCut() in script.mjs: the full cut owns demo/out/ itself, and
+# every named cut gets its own subdirectory. Falling back to "out" for an
+# unknown cut would silently re-render the full cut's webm over its own mp4.
+if [ "$CUT" = "full" ]; then
   OUT="out"
+else
+  OUT="out/$CUT"
+fi
+
+if [ ! -d "$OUT" ]; then
+  echo "No demo/$OUT directory — run 'node demo/record.mjs --cut $CUT' first." >&2
+  exit 1
 fi
 
 FFMPEG="${DEMO_FFMPEG:-ffmpeg}"

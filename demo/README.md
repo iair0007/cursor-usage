@@ -15,17 +15,24 @@ differ only in which beats they play and how the narration is worded:
 | --- | --- | --- | --- | --- |
 | `full` (default) | ~2m25s | 12 | `demo/out/` | the marketplace listing, docs, anyone who wants the whole tour |
 | `short` | ~50s | 8 | `demo/out/short/` | social feeds, where nobody watches two minutes |
+| `session` | ~1m40s | 9 | `demo/out/session/` | the session-level features — one conversation followed start to finish |
 
 Each cut owns its directory for every stage (voice clips, manifest, `.webm`,
 mp4, gif), so re-rendering one can never overwrite the other. Pass
-`--cut short` to the two node scripts and `short` to `render.sh`; omitting it
-everywhere gives the full cut, exactly as before.
+`--cut short` or `--cut session` to the two node scripts and the same name to
+`render.sh`; omitting it everywhere gives the full cut, exactly as before.
 
 The short cut is not a trimmed re-edit — its narration is rewritten shorter in
 `script.mjs`'s `SHORT_BEATS`, because each beat's length is set by its
 narration audio. It drops the status bar, request log and Analytics beats,
 keeping what the extension is distinctive for: the budget runway, the measured
 discount, period/session comparison, the Simulator, and how to install it.
+
+The session cut (`SESSION_BEATS`) shares no beats with either. Where the other
+two tour the tabs, this one follows a single conversation — `conv_authnight` in
+the fixtures — through the findings it triggers, because the session features
+only mean anything against a chat that went wrong. See
+[What the session cut shows](#what-the-session-cut-shows) below.
 
 ## Pipeline
 
@@ -62,6 +69,16 @@ The same three steps for the 60-second cut:
 node demo/generate-voiceover.mjs --cut short
 node demo/record.mjs --cut short
 ./demo/render.sh short            # writes demo/out/short/demo.mp4 + .gif
+```
+
+And for the session cut — with one extra step in front, which is worth the
+seconds it costs:
+
+```bash
+node demo/verify-story.mjs        # do the narrated findings still fire?
+node demo/generate-voiceover.mjs --cut session
+node demo/record.mjs --cut session
+./demo/render.sh session          # writes demo/out/session/demo.mp4 + .gif
 ```
 
 Narration is entirely optional — skip `generate-voiceover.mjs` and the other
@@ -166,6 +183,61 @@ strings as `statusBarText()` and the tooltip in `src/statusBar.ts`, down to
 the budget runway line ("At $X/day (cycle average): ~N days of budget left"),
 so they re-derive whenever the fixtures do.
 
+## What the session cut shows
+
+One conversation, start to finish: `conv_authnight` from
+`generate-fixtures.mjs` — an evening's refactor whose context blew out, got
+summarised, grew straight back, and was finally resumed hours later against an
+expired cache.
+
+Sessions list (the story session leads it, being the costliest in the
+fixtures) → its breakdown, spend by token bucket → the timeline, hovering four
+bars in turn: an ordinary turn, the blowup at #12, Cursor's summary at #13
+(the striped bar) and the stale resume at #22, which is the plot's peak → the
+three findings anchored to the session → a click through a finding's "Show me
+the request" link into the request log, where `jumpToRequest()` paginates,
+expands and flashes the row by itself → the Ask Cursor Chat dialog, with its
+brief, token size and cost → a two-session comparison against
+`conv_cleanrun`, the same day's work where the summary held.
+
+Two deliberate choices in there:
+
+**The Ask beat stops before sending.** `bridge.js` answers `sendToCursorChat`
+with the honest out-of-Cursor result (`{ pasted: false, via: 'none' }`), so
+clicking the button would put a fallback message on screen underneath
+narration describing the feature working. The dialog is what the beat is about
+anyway, and the line says it stops before sending — which is also what the
+real thing does.
+
+**The findings are data, not staging.** Nothing in this cut is mocked into
+place: the harness runs the real rules from `src/webview/insights.js` over the
+fixtures, and the cards on screen are whatever those rules found. That is why
+the story session is hand-written rather than sampled, and why
+`verify-story.mjs` exists.
+
+### Why the story sessions are hand-written
+
+Every rule in `insights.js` is a threshold test on token counts and
+timestamps, and the random-walk sessions trip almost none of them: a
+compaction needs `cacheRead === 0 && cacheWrite === 0` with a large input, a
+stale resume needs a cache *write* past 100k tokens, a blowup needs 5x the
+session's median read. A smooth ramp produces no such shapes, so a session
+beat recorded against sampled data opens a breakdown with an empty findings
+panel — which is the kind of thing discovered halfway through a voiced take.
+
+So `AUTH_TURNS` and `CLEAN_TURNS` are written turn by turn, each number set
+against a named threshold. It takes two sessions because one compaction
+resolves one way or the other, never both: `conv_authnight` grew back,
+`conv_cleanrun` did not, and the compare beat is that contrast.
+
+`verify-story.mjs` runs the real rules — imported from `insights.js`, not
+reimplemented — over the generated `data.js` and fails if any finding the
+narration names stops firing, drops below `FINDING_CARD_LIMIT` (where the
+camera would never see it), or if the story session stops being the costliest.
+It also pins the two figures the narration actually speaks aloud, since a
+spoken number the screen contradicts is worse than no number at all. Run it
+after touching anything in the story fixtures.
+
 ## Files
 
 - `script.mjs` — single source of truth for the beats of both cuts (`BEATS`
@@ -179,7 +251,12 @@ so they re-derive whenever the fixtures do.
   so there is no separate caption text that could drift out of sync with it.
 - `generate-fixtures.mjs` — synthesizes ~45 days of usage events, sessions,
   a budget/burn-rate story, and a real (measured) promotional-discount
-  window, and writes them to `data.js` as `window.__DEMO_DATA__`.
+  window, and writes them to `data.js` as `window.__DEMO_DATA__`. Also holds
+  the two hand-written story sessions the session cut is about (`AUTH_TURNS`
+  and `CLEAN_TURNS`) — see above for why those are not sampled.
+- `verify-story.mjs` — runs the real finding rules over the generated
+  fixtures and fails if the session cut's narration has stopped being true.
+  Not part of the recording pipeline; run it before recording.
 - `pricing.md` — a small pricing table in the same format `matchPricing()`
   parses from the real cursor.com page, used only by the harness.
 - `bridge.js` — fakes `acquireVsCodeApi()` and answers the webview's RPC

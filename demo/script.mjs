@@ -184,9 +184,145 @@ export const SHORT_BEATS = [
   },
 ];
 
-/** The beats for a named cut — `full` (the default) or `short`. */
+/**
+ * The session cut — one conversation followed from start to finish.
+ *
+ * The other two cuts tour the tabs; this one tells a story, because the
+ * session features only mean anything against a conversation that went wrong.
+ * It follows `conv_authnight` from generate-fixtures.mjs: an ordinary refactor
+ * whose context blew out, got summarised, grew straight back, and was finally
+ * resumed hours later against an expired cache.
+ *
+ * Two rules govern the wording. No dollar figure is spoken — the screen shows
+ * them and the fixtures regenerate with fresh dates, so a number in the
+ * narration would eventually contradict the picture beside it. And nothing is
+ * claimed that the findings on screen do not say: demo/verify-story.mjs runs
+ * the real rules over the real fixture data and fails if any of the three this
+ * script names stops firing, or drops below FINDING_CARD_LIMIT where the
+ * camera would never see it.
+ */
+export const SESSION_BEATS = [
+  {
+    id: 'sessionIntro',
+    narration: "One long agent chat can cost more than a whole week of ordinary work — and by the time you notice, it's already on the bill. This is what the dashboard can tell you about a conversation that got away from you.",
+  },
+  {
+    id: 'sessionsList',
+    narration: 'Sessions groups every request by the conversation it came from, so one chat reads as one row: what it cost, how long it ran, and which models it reached for. The names come from Cursor\'s own local chat index — nothing you wrote is ever read, and no title leaves your machine.',
+    minMs: 3200,
+  },
+  {
+    id: 'sessionOpen',
+    narration: 'Open one and you get where its money actually went, by token bucket. On a long agent session most of it is cache reads — the accumulated thread being re-sent, turn after turn — rather than the answers you were waiting for.',
+    minMs: 3400,
+  },
+  {
+    id: 'sessionTimeline',
+    narration: 'One bar per request, in the order you asked them, each priced, with the share that was re-read context shaded in. Hover any of them for what it cost and what that cost was made of. The striped bar is Cursor summarising the thread — and the tallest bar is not a long answer at all, it is what it cost to come back to this conversation hours later.',
+    minMs: 7000,
+  },
+  {
+    id: 'sessionFindings',
+    narration: 'The findings anchored to the session say what happened, and when. Coming back after three and a half hours cost the most — the cache had expired, so the whole thread was written again before any work happened. One request read six times more context than the rest of the conversation. And summarising did bring it down, before the thread grew straight back, which is the moment a fresh chat beats another summary. All of it derived from token counts and timestamps, never from anything you wrote.',
+    minMs: 7500,
+  },
+  {
+    id: 'findingToRequest',
+    narration: 'Every finding links to the request it is about. Open the row and the cost breaks down by bucket, so you can check the claim yourself: a few cents of answer, and the rest re-reading context you had already paid for once.',
+    minMs: 5000,
+  },
+  {
+    id: 'sessionAsk',
+    narration: 'Or hand the session to Cursor Chat. The brief carries token counts, timings and costs, and nothing you typed, because none of it is ever read. It is built small on purpose — the analysis costs tokens too — and it tells you its size and what sending it is worth before you send anything. It fills the chat box and stops there: nothing goes until you have read it and pressed Enter.',
+    minMs: 8000,
+  },
+  {
+    id: 'sessionCompare',
+    narration: 'And you can put two conversations side by side. Same kind of work, same day — but in this one the summary held, and the context never grew back.',
+    minMs: 5500,
+  },
+  {
+    // Reuses the full cut's `install` handler and its mock Extensions panel —
+    // same beat id, so record.mjs dispatches to the same code. The publisher
+    // search is the point: the extension has few downloads, so searching its
+    // name buries it, while the publisher name finds it first hit.
+    id: 'install',
+    narration: 'To install it, open the Extensions panel and search for the publisher name, iair0007 — that finds it faster than searching for the extension itself.',
+    minMs: 6000,
+  },
+  {
+    id: 'sessionOutro',
+    narration: "It's free on Open VSX, and needs no proxy and no separate login — just your Cursor account.",
+  },
+];
+
+/**
+ * The under-a-minute session cut, for feeds where the two-and-a-half minute
+ * walkthrough is longer than anyone scrolling will watch.
+ *
+ * Every id here already has a handler in record.mjs, and the order keeps the
+ * dependency those handlers carry: `sessionTimeline` and `sessionFindings`
+ * both read the detail dialog `sessionOpen` opens, so they have to follow it.
+ * Cut are the sessions list, the finding-to-request jump and the two-session
+ * comparison — leaving one arc: open a session, see the bar that cost the
+ * most, learn why, hand the numbers on.
+ *
+ * The narration is rewritten rather than truncated, and each beat is allowed
+ * exactly one idea — at this length a line that restates an earlier one is the
+ * most expensive thing in the cut. So the 3.5h resume is explained once, on
+ * the plot where it is visible (not again in the findings), and the privacy
+ * claim is made once, on the findings beat (not again on the Cursor Chat one).
+ */
+export const SESSION_SHORT_BEATS = [
+  {
+    id: 'sessionIntro',
+    narration: 'One long agent chat can cost more than a week of ordinary work.',
+  },
+  {
+    id: 'sessionOpen',
+    narration: 'Open the session and you see where the money actually went, by token bucket — mostly context handling rather than new work.',
+    minMs: 4000,
+  },
+  {
+    // The plot carries this beat, so it hovers only two bars: an ordinary turn
+    // for scale, then the peak the line is about. The long cut's four-stop tour
+    // of the blowup and the summary bar is a different story than this one.
+    id: 'sessionTimeline',
+    narration: 'One bar per request. The tallest is not a long answer — it is the price of coming back after three and a half hours: the cache had expired, so the whole thread was written again before any work happened.',
+    timelineStops: [5, 21],
+    minMs: 5000,
+  },
+  {
+    // Where the privacy claim lands, once. It belongs on this beat rather than
+    // on the Cursor Chat one because this is the beat that shows conclusions
+    // being drawn — the natural place a viewer wonders how much was read to
+    // draw them. Saying it here also frees the Ask beat to make its own point
+    // instead of repeating this one.
+    id: 'sessionFindings',
+    narration: 'The extension spots that on its own. It reads only token counts and timestamps — never your prompts, your code, or anything the conversation said.',
+    minMs: 5000,
+  },
+  {
+    id: 'sessionAsk',
+    narration: 'Hand the numbers to Cursor Chat when you want a second opinion — it shows you the brief, and what it costs, before anything is sent.',
+    minMs: 5000,
+  },
+  {
+    id: 'install',
+    narration: 'Search the publisher iair0007 in your Extensions panel. Free, no proxy, no login.',
+    minMs: 5500,
+  },
+];
+
+/**
+ * The beats for a named cut — `full` (the default), `short`, `session`, or
+ * `session-short`.
+ */
 export function beatsForCut(cut) {
-  return cut === 'short' ? SHORT_BEATS : BEATS;
+  if (cut === 'short') return SHORT_BEATS;
+  if (cut === 'session') return SESSION_BEATS;
+  if (cut === 'session-short') return SESSION_SHORT_BEATS;
+  return BEATS;
 }
 
 /**
@@ -198,5 +334,6 @@ export function beatsForCut(cut) {
  * is namespaced this way, so re-rendering one cut can never clobber another's.
  */
 export function outDirForCut(cut) {
-  return cut === 'short' ? 'out/short' : 'out';
+  if (cut === 'full') return 'out';
+  return `out/${cut}`;
 }

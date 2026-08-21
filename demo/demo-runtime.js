@@ -23,7 +23,20 @@
 
   const cursor = document.getElementById('demoCursor');
   if (cursor) {
+    // The pointer is a popover for the same reason the subtitles are: the
+    // session dialogs are native modals, and the top layer paints above every
+    // z-index there is — so a plain positioned div is drawn *behind* the very
+    // dialog the pointer is supposed to be clicking on. Top-layer elements
+    // paint in promotion order, hence raise() below.
+    // Checked rather than try/catch'd: this runs on every mousemove, and
+    // showPopover() throws when the popover is already open.
+    const showCursor = () => {
+      if (cursor.matches(':popover-open')) return;
+      try { cursor.showPopover(); } catch { /* popover unsupported */ }
+    };
+
     document.addEventListener('mousemove', (e) => {
+      showCursor();
       cursor.style.transform = `translate(${e.clientX - 2}px, ${e.clientY - 2}px)`;
       cursor.style.opacity = '1';
     }, true);
@@ -31,10 +44,16 @@
     document.addEventListener('mousedown', (e) => {
       const ripple = document.createElement('div');
       ripple.className = 'demo-click-ripple';
+      // Popover too — a ripple behind the dialog is a click the viewer cannot
+      // see landing.
+      ripple.setAttribute('popover', 'manual');
       ripple.style.left = `${e.clientX}px`;
       ripple.style.top = `${e.clientY}px`;
       document.body.appendChild(ripple);
+      try { ripple.showPopover(); } catch { /* popover unsupported */ }
       ripple.addEventListener('animationend', () => ripple.remove());
+      // Promoted after the ripple so the arrow stays on top of its own splash.
+      showCursor();
       cursor.classList.add('demo-cursor-active');
       setTimeout(() => cursor.classList.remove('demo-cursor-active'), 200);
     }, true);
@@ -44,6 +63,14 @@
     // mouse move, so nothing else has to un-hide it.
     window.__demoCursor = {
       hide() { cursor.style.opacity = '0'; },
+      /**
+       * Re-promotes the pointer above a native modal <dialog> that opened after
+       * it. Same trick as __demoCaptions.raise() — call it after opening one.
+       */
+      raise() {
+        try { cursor.hidePopover(); } catch { /* not open */ }
+        try { cursor.showPopover(); } catch { /* popover unsupported */ }
+      },
     };
   }
 

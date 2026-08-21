@@ -69,7 +69,16 @@
    so it tracks record.mjs's actual pointer motion rather than being scripted
    separately. Purely visual, never intercepts input. */
 #demoCursor {
+  /* A popover, so it can sit above the native modal dialogs (see
+     demo-runtime.js) — which means undoing the UA popover defaults
+     (inset: 0, margin: auto, border, padding, overflow: auto) that would
+     otherwise centre it in the viewport and box it in. */
   position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: visible;
   top: 0;
   left: 0;
   width: 26px;
@@ -89,7 +98,13 @@
 }
 
 .demo-click-ripple {
+  /* Also a popover — same top-layer reason as #demoCursor. Its own
+     left/top are set inline per click, so `inset: auto` has to clear the UA
+     default before those take effect. */
   position: fixed;
+  inset: auto;
+  padding: 0;
+  overflow: visible;
   z-index: 999998;
   width: 14px;
   height: 14px;
@@ -416,4 +431,37 @@
   border: 1px solid rgba(255, 255, 255, 0.08);
   opacity: 1;
   transition: opacity 220ms ease;
+}
+
+/* --- Caption clearance -----------------------------------------------------
+   The subtitles are pinned to the bottom of the viewport and the session
+   dialogs are centred native modals sized to 86vh, so on a 900px capture the
+   two overlap: the caption lands on top of whatever the beat is pointing at
+   (the cost-per-request chart, the brief preview). Reserving a band at the
+   bottom keeps the subtitles where a viewer expects them and costs the dialogs
+   only height they were not using — they scroll internally anyway.
+
+   Demo-only. The shipped extension draws no subtitles, so styles.css keeps its
+   own 86vh sizing untouched. */
+:root {
+  --demo-caption-band: 150px;
+}
+
+dialog[open] {
+  max-height: calc(86vh - var(--demo-caption-band));
+  /* Shrinks the box the UA's `margin: auto` centres the dialog in, so it stays
+     centred in what is left above the caption instead of in the whole viewport.
+     Deliberately NOT `transform: translateY(...)`: a transform makes the dialog
+     the containing block for its `position: fixed` descendants, which silently
+     relocates the timeline's hover tooltip (fixed on purpose — see
+     showTimelineTip in src/webview/main.js) to somewhere off the plot. */
+  bottom: var(--demo-caption-band);
+}
+
+/* These scroll areas are sized off the same 86vh, so they have to lose the band
+   too — otherwise the dialog clips them instead of shrinking. */
+.session-detail-body,
+.sessions-dialog-scroll,
+.ask-body {
+  max-height: calc(86vh - 84px - var(--demo-caption-band));
 }

@@ -206,7 +206,9 @@ sessions.push({
 //
 // `cacheRead` is the running context being re-sent each turn, so it climbs
 // within a phase and resets where the thread is summarised or the cache has
-// expired — the shape the session timeline draws as a swelling shaded band.
+// expired. That climb is real on the timeline but easy to miss: bars are scaled
+// against the session's costliest request, and this story's peak — the stale
+// resume — dwarfs the growth leading up to it.
 // ---------------------------------------------------------------------------
 
 const STORY_MODEL = 'claude-4-5-sonnet';

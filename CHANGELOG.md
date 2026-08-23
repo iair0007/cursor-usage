@@ -3,6 +3,22 @@
 All notable user-facing changes. Earlier releases predate this file; see the
 [commit history](https://github.com/iair0007/cursor-usage/commits/main) for those.
 
+## Unreleased
+
+- **The CSV export now carries the columns the dashboard reasons from.** A row
+  in the file could be reconciled against cursor.com but not against the
+  dashboard's own reading of it: there was no way to tell which session a
+  request belonged to, why a plan-included row was billed $0, or whether a
+  model was on sale. Eight columns are appended — `conversationId`,
+  `sessionName`, `kind`, `counted`, `listTokenCost`, `billedTokenCost`,
+  `baselineDiscountPct`, `pricedAs`. The existing columns keep their positions,
+  so anything already parsing this file by index is unaffected.
+- **Session names are resolved for the whole export, not just what was on
+  screen.** They are looked up lazily per rendered page, so an export taken
+  from a tab that never drew the Session column would have carried ids and no
+  names — and away from the extension there is nothing left to resolve an id
+  against.
+
 ## 0.8.0 — 2026-08-20
 
 A full review pass over this release before publishing it. Everything below

@@ -4135,15 +4135,35 @@ function csvToken(event, bucket) {
   return (event.unreportedBuckets || []).includes(bucket) ? '' : event[BUCKET_TOKEN_FIELD[bucket]];
 }
 
-function exportCsv() {
+/**
+ * The session name for a row, when this machine could supply one.
+ *
+ * Blank rather than the id: the id already has its own column, and repeating
+ * it here would read as a name in a spreadsheet, which is exactly the
+ * confusion the table's shortened-id styling avoids on screen.
+ */
+function csvSessionName(event) {
+  if (!event.conversationId) return '';
+  return state.sessions.titles.get(event.conversationId) || '';
+}
+
+async function exportCsv() {
   if (!state.filtered.length) {
     showAlert('warn', 'Nothing to export — no requests in the current filter.');
     return;
   }
-  // meteredCost/billingRegime are appended, not inserted: existing columns keep
-  // their positions for anything already parsing this file. They're what makes
-  // a row-by-row reconciliation against cursor.com's usage export possible.
-  const headers = ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost', 'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'meteredCost', 'billingRegime'];
+  // Names are looked up lazily for what's on screen, so an export taken from
+  // the Overview would otherwise carry ids and no names at all. This is the
+  // one place worth asking for every conversation in the filter: the file is
+  // read away from the extension, where nothing can resolve an id later.
+  await loadSessionTitles(state.filtered.map((e) => e.conversationId).filter(Boolean));
+  // Columns are appended, never inserted: existing ones keep their positions
+  // for anything already parsing this file. time..billingRegime are what make
+  // a row-by-row reconciliation against cursor.com's usage export possible;
+  // the rest are what make the extension's own reading of a row checkable —
+  // which session it belongs to, why it was billed the way it was, and the two
+  // figures discount detection compares.
+  const headers = ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost', 'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'meteredCost', 'billingRegime', 'conversationId', 'sessionName', 'kind', 'counted', 'listTokenCost', 'billedTokenCost', 'baselineDiscountPct', 'pricedAs'];
   const rows = state.filtered.map((e) => [
     // Rows the API sent without a usable timestamp are left blank rather than
     // stamped 1970-01-01, which would read as a real (and very old) date.
@@ -4161,6 +4181,24 @@ function exportCsv() {
     e.totalTokens,
     e.planMeteredCost ?? '',
     e.billingRegime,
+    // Blank where Cursor reported no conversation, which is the same thing the
+    // Sessions tab says in words: the request exists, its conversation is
+    // unknown. A placeholder id here would group unrelated requests together
+    // in whatever reads the file.
+    e.conversationId ?? '',
+    csvSessionName(e),
+    e.kind ?? '',
+    e.counted,
+    // The pair discount detection measures: what Cursor says the tokens are
+    // worth at list, and what it actually charged for them less the token fee.
+    // Equal figures mean no promotion was in force — indistinguishable, until
+    // both are in the file, from detection having nothing to measure.
+    e.listTokenCost ?? '',
+    e.billedTokenCost ?? '',
+    e.baselineDiscountPct || '',
+    // Which row of the scraped price list priced this request. Blank means no
+    // row matched, so every modelled figure for it is a fallback.
+    e.pricingLabel ?? '',
   ]);
   const csv = [headers.join(','), ...rows.map((r) => r.map(csvCell).join(','))].join('\n');
   const filename = `cursor-usage-${$('startDate').value}-${$('endDate').value}.csv`;
@@ -5702,7 +5740,7 @@ async function init() {
   }
 
   $('refreshBtn').addEventListener('click', load);
-  $('exportBtn').addEventListener('click', exportCsv);
+  $('exportBtn').addEventListener('click', () => { void exportCsv(); });
 
   // Only meaningful inside the VS Code webview — a tab opened this way is
   // already a browser tab, so the button stays hidden there (default state).

@@ -75,6 +75,8 @@ The full request log: custom date ranges, model filter, per-request token cost a
 
 A **Session** column names the conversation each request came from and links straight to it, so an expensive row doesn't mean going hunting for which chat it belonged to. **Click any row** to see what its cost was actually made of — cache read, cache write, output, input. On a long agent turn that split is usually the whole story: the answer costs a few cents and the rest is re-reading context. Rows the dashboard has something to say about carry a marker.
 
+The **CSV export** carries every row the current filter holds, with the columns the dashboard reasons from rather than just the ones it prints: the conversation id and session name behind the Session column, the usage-event kind, and both of Cursor's own cost figures for a request — what the tokens are worth at list and what it actually charged. That last pair is what a promotional discount shows up in, so an export is enough to check the dashboard's reading of a day without re-reading it on screen. Existing columns keep their positions; new ones are appended.
+
 Date presets are **Today / 7 days / 30 days / Month to date / Custom**. If your account moved from per-request to token pricing, a **Current plan** preset appears and the dashboard switches to it once, so you aren't comparing dollars from two different billing systems in one total.
 
 ![Analytics charts](https://raw.githubusercontent.com/iair0007/cursor-usage/main/docs/screenshot-analytics.png)

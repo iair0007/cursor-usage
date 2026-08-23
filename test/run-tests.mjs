@@ -4003,6 +4003,31 @@ console.log('\nan omitted bucket is not a zero');
     }
   });
 
+  test('the CSV carries what a row cannot be checked without', () => {
+    const fn = main.slice(main.indexOf('async function exportCsv'), main.indexOf('function downloadCsv'));
+    // Reconciliation against cursor.com reads these by position, so an
+    // inserted column silently shifts every later value in someone's script.
+    const header = fn.slice(fn.indexOf('const headers'), fn.indexOf('];', fn.indexOf('const headers')));
+    const names = [...header.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    assert.deepEqual(names.slice(0, 14), ['time', 'model', 'modelRaw', 'whatIfCost', 'billedCost',
+      'usageFee', 'cacheSavings', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens',
+      'totalTokens', 'meteredCost', 'billingRegime'], 'the original columns keep their positions');
+    for (const col of ['conversationId', 'sessionName', 'kind', 'counted', 'listTokenCost',
+      'billedTokenCost', 'baselineDiscountPct', 'pricedAs']) {
+      assert.ok(names.includes(col), `${col} is exported`);
+    }
+    // A row count that doesn't match the header count writes every value into
+    // the wrong column from that point on, which reads as plausible data.
+    const body = fn.slice(fn.indexOf('const rows'), fn.indexOf(']);', fn.indexOf('const rows')));
+    const cells = body.split('\n').filter((l) => /^\s{4}\S/.test(l) && !l.trim().startsWith('//'));
+    assert.equal(cells.length, names.length, 'one cell per header');
+    // An export taken from a tab that never rendered the session column would
+    // otherwise carry ids and no names.
+    assert.match(fn, /await loadSessionTitles\(/);
+    // An id-shaped placeholder here would group unrelated requests together.
+    assert.match(fn, /e\.conversationId \?\? ''/);
+  });
+
   test('the brief says absent in words, so the model cannot reason from a zero', () => {
     assert.match(brief, /not reported by Cursor \(unknown, not zero\)/);
     assert.match(main, /not reported by Cursor \(unknown, not zero\)/);
